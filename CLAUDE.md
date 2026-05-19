@@ -64,13 +64,19 @@ Shared types, agent binary with all 44 tools, HTTP server with JSON-RPC routing.
 - `cmd/conan-agent/` — Cobra CLI with `run` subcommand, config loading, graceful shutdown
 - `configs/example/agent-config.yaml` — Example configuration
 
-### Phase 2: CLI Core — TODO
+### Phase 2: CLI Core — DONE
 
-LLM client, MCP client, config loading with inheritance, conversation manager.
+CLI config loader with cluster inheritance, MCP client, conversation manager, LLM provider interfaces, and minimal Cobra commands (`config validate`, `clusters`, `nodes`, `ping`, `tools list`).
 
-### Phase 3: TUI & Features — TODO
+### Phase 3A: TUI Shell & Slash Commands — DONE
 
-Bubble Tea TUI, node selector, slash commands, memory system, security review, session resume.
+Minimal Bubble Tea shell with header, conversation display, text input, slash command parsing, and `conan tui` command.
+
+Plan: `docs/superpowers/plans/2026-05-19-tui-shell.md`
+
+### Phase 3B: TUI Features — NEXT
+
+Interactive node selector, LLM streaming integration, MCP tool dispatch visualization, security review prompts, memory UI, and session resume.
 
 ## Design Spec
 
