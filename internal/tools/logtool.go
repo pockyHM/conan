@@ -96,7 +96,7 @@ func (l *logJournalctlTool) Execute(ctx context.Context, input json.RawMessage) 
 	if args.Tail > 0 {
 		cmd += fmt.Sprintf(" -n %d", args.Tail)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 func NewLogTools() []Tool {

@@ -32,7 +32,7 @@ func (n *netPingTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 		args.Count = 3
 	}
 	cmd := fmt.Sprintf("ping -c %d -W 5 %s", args.Count, args.Host)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // net/traceroute
@@ -51,7 +51,7 @@ func (n *netTracerouteTool) Execute(ctx context.Context, input json.RawMessage) 
 		return nil, err
 	}
 	cmd := fmt.Sprintf("traceroute -m 30 -w 2 %s 2>/dev/null || tracepath %s", args.Host, args.Host)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // net/portcheck

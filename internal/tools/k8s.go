@@ -29,7 +29,7 @@ func (k *k8sPodsTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	if args.LabelSelector != "" {
 		cmd += fmt.Sprintf(" -l '%s'", args.LabelSelector)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // k8s/logs
@@ -57,7 +57,7 @@ func (k *k8sLogsTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	if args.Tail > 0 {
 		cmd += fmt.Sprintf(" --tail=%d", args.Tail)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // k8s/events
@@ -75,7 +75,7 @@ func (k *k8sEventsTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	if args.Namespace != "" {
 		cmd += " -n " + args.Namespace
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // k8s/describe
@@ -99,7 +99,7 @@ func (k *k8sDescribeTool) Execute(ctx context.Context, input json.RawMessage) (*
 	if args.Namespace != "" {
 		cmd += " -n " + args.Namespace
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // k8s/apply
@@ -122,7 +122,7 @@ func (k *k8sApplyTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	if args.Namespace != "" {
 		cmd = fmt.Sprintf("echo '%s' | kubectl apply -f - -n %s", args.Manifest, args.Namespace)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // k8s/delete
@@ -146,7 +146,7 @@ func (k *k8sDeleteTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	if args.Namespace != "" {
 		cmd += " -n " + args.Namespace
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 func NewK8sTools() []Tool {

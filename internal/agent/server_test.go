@@ -6,22 +6,38 @@ import (
 	"io"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
+func waitForServer(t *testing.T, base string) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		resp, err := http.Get(base + "/health")
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("server did not start in time")
+}
+
 func newTestServer(t *testing.T) string {
 	t.Helper()
 	cfg := configschema.DefaultAgentConfig()
-	cfg.Token = "" // disable auth for tests
+	cfg.Token = ""
 	r := tools.NewRegistry()
 	r.Register(&echoTool{})
 	srv := NewServer(cfg, r, "test")
 	go srv.Start()
 	t.Cleanup(func() { srv.Shutdown(t.Context()) })
-	return "http://" + cfg.Listen
+	base := "http://" + cfg.Listen
+	waitForServer(t, base)
+	return base
 }
 
 func TestServerHealth(t *testing.T) {
@@ -45,6 +61,7 @@ func TestServerAuth(t *testing.T) {
 	go srv.Start()
 	t.Cleanup(func() { srv.Shutdown(t.Context()) })
 	base := "http://" + cfg.Listen
+	waitForServer(t, base)
 
 	// No auth
 	resp, err := http.Post(base+"/rpc", "application/json", bytes.NewBufferString(

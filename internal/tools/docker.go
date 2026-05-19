@@ -29,7 +29,7 @@ func (d *dockerPsTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	if args.Filter != "" {
 		cmd += fmt.Sprintf(" --filter '%s'", args.Filter)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // docker/images
@@ -47,7 +47,7 @@ func (d *dockerImagesTool) Execute(ctx context.Context, input json.RawMessage) (
 	if args.Filter != "" {
 		cmd += fmt.Sprintf(" --filter '%s'", args.Filter)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // docker/logs
@@ -70,7 +70,7 @@ func (d *dockerLogsTool) Execute(ctx context.Context, input json.RawMessage) (*m
 	if args.Tail > 0 {
 		cmd += fmt.Sprintf(" --tail %d", args.Tail)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // docker/exec
@@ -90,7 +90,7 @@ func (d *dockerExecTool) Execute(ctx context.Context, input json.RawMessage) (*m
 		return nil, err
 	}
 	cmd := fmt.Sprintf("docker exec %s %s", args.Container, args.Command)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // docker/run
@@ -126,7 +126,7 @@ func (d *dockerRunTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 		cmd += fmt.Sprintf(" -e %s=%s", k, v)
 	}
 	cmd += fmt.Sprintf(" %s", args.Image)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // docker/compose
@@ -150,7 +150,7 @@ func (d *dockerComposeTool) Execute(ctx context.Context, input json.RawMessage) 
 		cmd += fmt.Sprintf(" -f %s", args.File)
 	}
 	cmd += " " + args.Action
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 func NewDockerTools() []Tool {

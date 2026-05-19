@@ -23,7 +23,7 @@ func (p *pkgListTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	if args.Name != "" {
 		cmd = fmt.Sprintf("dpkg -l %s 2>/dev/null || rpm -q %s", args.Name, args.Name)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // pkg/install
@@ -48,7 +48,7 @@ func (p *pkgInstallTool) Execute(ctx context.Context, input json.RawMessage) (*m
 	} else {
 		cmd = fmt.Sprintf("apt-get install -y %s 2>/dev/null || yum install -y %s", args.Name, args.Name)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // pkg/update
@@ -68,7 +68,7 @@ func (p *pkgUpdateTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	} else {
 		cmd = "apt-get upgrade -y 2>/dev/null || yum update -y"
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // pkg/search
@@ -85,7 +85,7 @@ func (p *pkgSearchTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 		return nil, err
 	}
 	cmd := fmt.Sprintf("apt-cache search %s 2>/dev/null || yum search %s", args.Query, args.Query)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 func NewPkgTools() []Tool {

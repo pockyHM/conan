@@ -24,7 +24,7 @@ func (c *cronListTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	if args.User != "" {
 		cmd = fmt.Sprintf("crontab -l -u %s", args.User)
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // cron/add
@@ -78,7 +78,7 @@ func (c *cronRemoveTool) Execute(ctx context.Context, input json.RawMessage) (*m
 		userFlag = fmt.Sprintf(" -u %s", args.User)
 	}
 	cmd := fmt.Sprintf(`crontab -l%s 2>/dev/null | grep -v '%s' | crontab%s`, userFlag, args.Pattern, userFlag)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // cron/show
@@ -102,7 +102,7 @@ func (c *cronShowTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 		userFlag = fmt.Sprintf(" -u %s", args.User)
 	}
 	cmd := fmt.Sprintf("crontab -l%s 2>/dev/null | grep '%s'", userFlag, args.Pattern)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 func NewCronTools() []Tool {

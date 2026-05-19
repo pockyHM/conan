@@ -26,7 +26,7 @@ func (s *svcListTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	if args.State != "" {
 		cmd += " --state=" + args.State
 	}
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // svc/status
@@ -45,7 +45,7 @@ func (s *svcStatusTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 		return nil, err
 	}
 	cmd := fmt.Sprintf("systemctl status %s --no-pager", args.Name)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // svc/start
@@ -64,7 +64,7 @@ func (s *svcStartTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 		return nil, err
 	}
 	cmd := fmt.Sprintf("systemctl start %s", args.Name)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // svc/stop
@@ -83,7 +83,7 @@ func (s *svcStopTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 		return nil, err
 	}
 	cmd := fmt.Sprintf("systemctl stop %s", args.Name)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 // svc/restart
@@ -102,7 +102,7 @@ func (s *svcRestartTool) Execute(ctx context.Context, input json.RawMessage) (*m
 		return nil, err
 	}
 	cmd := fmt.Sprintf("systemctl restart %s", args.Name)
-	return runCommand(cmd)
+	return runCommand(ctx, cmd)
 }
 
 func NewSvcTools() []Tool {
@@ -110,8 +110,8 @@ func NewSvcTools() []Tool {
 }
 
 // runCommand is a shared helper for tools that wrap simple shell commands.
-func runCommand(cmd string) (*mcpproto.ToolResult, error) {
-	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+func runCommand(ctx context.Context, cmd string) (*mcpproto.ToolResult, error) {
+	out, err := exec.CommandContext(ctx, "sh", "-c", cmd).CombinedOutput()
 	text := string(out)
 	if err != nil {
 		return &mcpproto.ToolResult{
