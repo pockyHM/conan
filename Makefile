@@ -15,6 +15,7 @@ build-linux:
 
 build-darwin:
 	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/conan-darwin-amd64 ./cmd/conan
+	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o bin/conan-agent-darwin-amd64 ./cmd/conan-agent
 	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/conan-darwin-arm64 ./cmd/conan
 	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o bin/conan-agent-darwin-arm64 ./cmd/conan-agent
 

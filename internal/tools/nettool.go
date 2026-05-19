@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"os/exec"
 	"time"
 
@@ -69,7 +70,7 @@ func (n *netPortcheckTool) Execute(ctx context.Context, input json.RawMessage) (
 	if err := json.Unmarshal(input, &args); err != nil {
 		return nil, err
 	}
-	addr := fmt.Sprintf("%s:%d", args.Host, args.Port)
+	addr := net.JoinHostPort(args.Host, strconv.Itoa(args.Port))
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return &mcpproto.ToolResult{
