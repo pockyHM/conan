@@ -50,6 +50,29 @@ Single Go module with visibility managed by `internal/` and `pkg/`:
 - **LLM providers:** `anthropic` type (Messages API) and `openai` type (Chat Completions API), both with configurable endpoints
 - **Config inheritance:** `base.yaml` → `cluster.yaml` → per-node overrides, deep merge (maps merge, arrays overwrite)
 
+## Implementation Progress
+
+### Phase 1: Foundation & Agent — DONE
+
+Shared types, agent binary with all 44 tools, HTTP server with JSON-RPC routing.
+
+- `pkg/mcpproto/` — JSON-RPC 2.0 + MCP tool types
+- `pkg/configschema/` — Agent + CLI config structs with YAML tags
+- `pkg/models/` — Conversation, Message, Memory, AuditEntry, NodeStatus
+- `internal/tools/` — 44 tools in 10 categories (shell, fs, sys, svc, log, net, k8s, pkg, cron, docker)
+- `internal/agent/` — HTTP server, JSON-RPC handler, auth/audit/rate-limit middleware
+- `cmd/conan-agent/` — Cobra CLI with `run` subcommand, config loading, graceful shutdown
+- `configs/example/agent-config.yaml` — Example configuration
+
+### Phase 2: CLI Core — TODO
+
+LLM client, MCP client, config loading with inheritance, conversation manager.
+
+### Phase 3: TUI & Features — TODO
+
+Bubble Tea TUI, node selector, slash commands, memory system, security review, session resume.
+
 ## Design Spec
 
 Full design document: `docs/superpowers/specs/2026-05-19-conan-ops-agent-design.md`
+Implementation plan: `docs/superpowers/plans/2026-05-19-foundation-agent.md`
