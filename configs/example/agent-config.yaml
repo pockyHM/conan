@@ -1,0 +1,9 @@
+listen: "0.0.0.0:9200"
+token: "changeme"
+tls: false
+# tls_cert: /etc/conan-agent/cert.pem
+# tls_key: /etc/conan-agent/key.pem
+audit_log: /var/log/conan-agent/audit.log
+rate_limit: 10
+disabled_tools: []
+log_level: info
