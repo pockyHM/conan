@@ -277,3 +277,59 @@ func TestNodesNoNodesConfigured(t *testing.T) {
 		t.Fatalf("status = %q, want no nodes message", model.status)
 	}
 }
+
+func TestMultiNodeDispatch(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	nodes := []NodeInfo{
+		{Name: "node-01", Host: "10.0.1.1", Online: true},
+		{Name: "node-02", Host: "10.0.1.2", Online: true},
+	}
+	model := NewModel(ModelConfig{
+		Cluster: "test",
+		Model:   "m",
+		Conv:    conv,
+		Nodes:   nodes,
+	})
+
+	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`)}
+	results := []nodeToolResult{
+		{Node: "node-01", Output: "load average: 0.52", Success: true},
+		{Node: "node-02", Output: "load average: 0.31", Success: true},
+	}
+
+	next, _ := model.Update(multiToolResultMsg{Call: call, Results: results})
+	model = next.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "shell/run on 2 node(s)") {
+		t.Fatalf("view missing multi-node header:\n%s", view)
+	}
+	if !strings.Contains(view, "├── node-01 ✓") {
+		t.Fatalf("view missing first node tree line:\n%s", view)
+	}
+	if !strings.Contains(view, "└── node-02 ✓") {
+		t.Fatalf("view missing last node tree line:\n%s", view)
+	}
+}
+
+func TestMultiNodeDispatchWithFailure(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+
+	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"ls"}`)}
+	results := []nodeToolResult{
+		{Node: "node-01", Output: "file1\nfile2", Success: true},
+		{Node: "node-02", Output: "Connection timeout", Success: false},
+	}
+
+	next, _ := model.Update(multiToolResultMsg{Call: call, Results: results})
+	model = next.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "node-01 ✓") {
+		t.Fatalf("view missing success node:\n%s", view)
+	}
+	if !strings.Contains(view, "node-02 ✗") {
+		t.Fatalf("view missing failure node:\n%s", view)
+	}
+}

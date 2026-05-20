@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,7 +13,6 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
-	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
 type NodeInfo struct {
@@ -117,12 +117,6 @@ type streamEventMsg struct {
 
 type streamDoneMsg struct{}
 
-type toolResultMsg struct {
-	Call   llm.ToolCall
-	Result *mcpproto.ToolResult
-	Err    error
-}
-
 type nodeToolResult struct {
 	Node    string
 	Output  string
@@ -199,18 +193,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case multiToolResultMsg:
-		var output string
+		var outputParts []string
 		for _, r := range msg.Results {
 			if r.Success {
-				output += fmt.Sprintf("[%s] %s\n", r.Node, r.Output)
+				outputParts = append(outputParts, fmt.Sprintf("[%s] %s", r.Node, r.Output))
 			} else {
-				output += fmt.Sprintf("[%s] ERROR: %s\n", r.Node, r.Output)
+				outputParts = append(outputParts, fmt.Sprintf("[%s] ERROR: %s", r.Node, r.Output))
 			}
 		}
+		aggregatedOutput := strings.Join(outputParts, "\n")
+
 		found := false
 		for i := len(m.messages) - 1; i >= 0; i-- {
 			if m.messages[i].role == "tool" && m.messages[i].toolOutput == "" {
-				m.messages[i].toolOutput = output
+				m.messages[i].toolOutput = aggregatedOutput
 				m.messages[i].nodeResults = msg.Results
 				found = true
 				break
@@ -221,42 +217,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				role:        "tool",
 				toolName:    msg.Call.Name,
 				toolInput:   string(msg.Call.Arguments),
-				toolOutput:  output,
+				toolOutput:  aggregatedOutput,
 				nodeResults: msg.Results,
 			})
 		}
 		if m.conv != nil {
-			m.conv.AddToolResult(msg.Call.ID, output)
-		}
-		return m, m.startStream()
-
-	case toolResultMsg:
-		var output string
-		if msg.Err != nil {
-			output = "Error: " + msg.Err.Error()
-		} else {
-			for _, block := range msg.Result.Content {
-				output += block.Text
-			}
-		}
-		found := false
-		for i := len(m.messages) - 1; i >= 0; i-- {
-			if m.messages[i].role == "tool" && m.messages[i].toolOutput == "" {
-				m.messages[i].toolOutput = output
-				found = true
-				break
-			}
-		}
-		if !found {
-			m.messages = append(m.messages, chatMsg{
-				role:       "tool",
-				toolName:   msg.Call.Name,
-				toolInput:  string(msg.Call.Arguments),
-				toolOutput: output,
-			})
-		}
-		if m.conv != nil {
-			m.conv.AddToolResult(msg.Call.ID, output)
+			m.conv.AddToolResult(msg.Call.ID, aggregatedOutput)
 		}
 		return m, m.startStream()
 
@@ -352,13 +318,45 @@ func (m Model) View() string {
 		case "assistant":
 			bodyParts = append(bodyParts, "Conan: "+msg.content)
 		case "tool":
-			header := fmt.Sprintf("-> %s", msg.toolName)
-			if msg.toolOutput != "" {
-				header += "\n" + msg.toolOutput
+			if len(msg.nodeResults) > 1 {
+				header := fmt.Sprintf("-> %s on %d node(s)", msg.toolName, len(msg.nodeResults))
+				if msg.toolOutput != "" {
+					var lines []string
+					for i, r := range msg.nodeResults {
+						prefix := "├──"
+						if i == len(msg.nodeResults)-1 {
+							prefix = "└──"
+						}
+						icon := "✓"
+						if !r.Success {
+							icon = "✗"
+						}
+						output := r.Output
+						if idx := strings.Index(output, "\n"); idx != -1 {
+							output = output[:idx]
+						}
+						if len(output) > 60 {
+							output = output[:57] + "..."
+						}
+						lines = append(lines, fmt.Sprintf("%s %s %s  %s", prefix, r.Node, icon, output))
+					}
+					header += "\n" + strings.Join(lines, "\n")
+				} else {
+					header += " (running...)"
+				}
+				bodyParts = append(bodyParts, header)
 			} else {
-				header += " (running...)"
+				header := fmt.Sprintf("-> %s", msg.toolName)
+				if len(msg.nodeResults) == 1 {
+					header = fmt.Sprintf("-> %s on %s", msg.toolName, msg.nodeResults[0].Node)
+				}
+				if msg.toolOutput != "" {
+					header += "\n" + msg.toolOutput
+				} else {
+					header += " (running...)"
+				}
+				bodyParts = append(bodyParts, header)
 			}
-			bodyParts = append(bodyParts, header)
 		}
 	}
 
@@ -483,12 +481,62 @@ func (m Model) waitForEvent() tea.Cmd {
 
 func (m Model) dispatchTool(call llm.ToolCall) tea.Cmd {
 	clients := m.clients
+	selected := m.selectedNodes
 	return func() tea.Msg {
-		for _, client := range clients {
-			result, err := client.CallTool(context.Background(), call.Name, call.Arguments)
-			return toolResultMsg{Call: call, Result: result, Err: err}
+		if len(selected) == 0 {
+			return multiToolResultMsg{
+				Call: call,
+				Results: []nodeToolResult{
+					{Node: "-", Output: "No nodes selected. Use /nodes to select target nodes.", Success: false},
+				},
+			}
 		}
-		return toolResultMsg{Call: call, Err: fmt.Errorf("no agent available")}
+
+		type result struct {
+			node    string
+			output  string
+			success bool
+		}
+
+		var wg sync.WaitGroup
+		ch := make(chan result, len(selected))
+
+		for name := range selected {
+			client, exists := clients[name]
+			if !exists {
+				ch <- result{node: name, output: "no client configured for node", success: false}
+				continue
+			}
+			wg.Add(1)
+			go func(n string, c *mcp.Client) {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				toolResult, err := c.CallTool(ctx, call.Name, call.Arguments)
+				if err != nil {
+					ch <- result{node: n, output: err.Error(), success: false}
+					return
+				}
+				var output string
+				for _, block := range toolResult.Content {
+					output += block.Text
+				}
+				ch <- result{node: n, output: output, success: true}
+			}(name, client)
+		}
+
+		wg.Wait()
+		close(ch)
+
+		var results []nodeToolResult
+		for r := range ch {
+			results = append(results, nodeToolResult{Node: r.node, Output: r.output, Success: r.success})
+		}
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Node < results[j].Node
+		})
+
+		return multiToolResultMsg{Call: call, Results: results}
 	}
 }
 
