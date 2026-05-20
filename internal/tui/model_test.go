@@ -155,3 +155,125 @@ func TestToolResultMessage(t *testing.T) {
 		t.Fatalf("view missing tool name:\n%s", view)
 	}
 }
+
+func TestNodesCommandOpensSelector(t *testing.T) {
+	nodes := []NodeInfo{
+		{Name: "node-01", Host: "10.0.1.1", Online: true},
+		{Name: "node-02", Host: "10.0.1.2", Online: true},
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Nodes: nodes})
+
+	for _, r := range "/nodes" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeNodeSelect {
+		t.Fatal("should be in node select mode after /nodes")
+	}
+	view := model.View()
+	if !strings.Contains(view, "Select Target Nodes") {
+		t.Fatalf("view should show node selector:\n%s", view)
+	}
+}
+
+func TestNodeSelectConfirm(t *testing.T) {
+	nodes := []NodeInfo{
+		{Name: "node-01", Host: "10.0.1.1", Online: true},
+		{Name: "node-02", Host: "10.0.1.2", Online: true},
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Nodes: nodes})
+	if len(model.selectedNodes) != 2 {
+		t.Fatalf("expected 2 default selected, got %d", len(model.selectedNodes))
+	}
+
+	for _, r := range "/nodes" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatal("should be back in chat mode after confirm")
+	}
+	if model.selectedNodes["node-02"] {
+		t.Fatal("node-02 should be deselected")
+	}
+	if !model.selectedNodes["node-01"] {
+		t.Fatal("node-01 should still be selected")
+	}
+}
+
+func TestNodeSelectCancel(t *testing.T) {
+	nodes := []NodeInfo{
+		{Name: "node-01", Host: "10.0.1.1", Online: true},
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Nodes: nodes})
+
+	for _, r := range "/nodes" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatal("should be back in chat mode after cancel")
+	}
+	if !model.selectedNodes["node-01"] {
+		t.Fatal("cancel should restore original selection")
+	}
+}
+
+func TestPingResultUpdatesNodeStatus(t *testing.T) {
+	nodes := []NodeInfo{
+		{Name: "node-01", Host: "10.0.1.1", Online: false},
+		{Name: "node-02", Host: "10.0.1.2", Online: false},
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Nodes: nodes})
+
+	next, _ := model.Update(pingResultMsg{node: "node-01", online: true})
+	model = next.(Model)
+
+	if !model.nodes[0].Online {
+		t.Fatal("node-01 should be online after ping")
+	}
+	if model.nodes[1].Online {
+		t.Fatal("node-02 should still be offline")
+	}
+}
+
+func TestNodesNoNodesConfigured(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+
+	for _, r := range "/nodes" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatal("should stay in chat mode with no nodes")
+	}
+	if !strings.Contains(model.status, "No nodes") {
+		t.Fatalf("status = %q, want no nodes message", model.status)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -39,6 +40,18 @@ type chatMsg struct {
 	nodeResults []nodeToolResult
 }
 
+type tuiMode int
+
+const (
+	modeChat       tuiMode = iota
+	modeNodeSelect
+)
+
+type pingResultMsg struct {
+	node   string
+	online bool
+}
+
 type Model struct {
 	cluster   string
 	model     string
@@ -49,6 +62,10 @@ type Model struct {
 
 	nodes         []NodeInfo
 	selectedNodes map[string]bool
+
+	mode         tuiMode
+	nodeSelector nodeSelector
+	prevSelected map[string]bool
 
 	input     string
 	messages  []chatMsg
@@ -243,6 +260,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.startStream()
 
+	case pingResultMsg:
+		for i := range m.nodes {
+			if m.nodes[i].Name == msg.node {
+				m.nodes[i].Online = msg.online
+				break
+			}
+		}
+		if m.mode == modeNodeSelect {
+			m.nodeSelector = m.nodeSelector.SetNodes(m.nodes)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -251,6 +280,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeNodeSelect {
+		return m.handleNodeSelectKey(key)
+	}
 	if m.streaming {
 		if key.Type == tea.KeyCtrlC {
 			m.streaming = false
@@ -284,10 +316,33 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		m.selectedNodes = m.nodeSelector.Selected()
+		m.mode = modeChat
+		m.status = fmt.Sprintf("Selected %d node(s)", len(m.selectedNodes))
+		return m, nil
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.selectedNodes = m.prevSelected
+		m.mode = modeChat
+		m.status = "Node selection cancelled"
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.nodeSelector, cmd = m.nodeSelector.Update(key)
+		return m, cmd
+	}
+}
+
 func (m Model) View() string {
 	header := lipgloss.NewStyle().Bold(true).Render(
 		fmt.Sprintf("Conan | Cluster: %s | Model: %s | Nodes: %d/%d", m.cluster, m.model, len(m.selectedNodes), len(m.nodes)),
 	)
+
+	if m.mode == modeNodeSelect {
+		return fmt.Sprintf("%s\n\n%s\n\n%s", header, m.nodeSelector.View(), m.status)
+	}
 
 	var bodyParts []string
 	for _, msg := range m.messages {
@@ -326,11 +381,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if cmd, ok := ParseSlashCommand(input); ok {
-		m = m.applyCommand(cmd)
+		var c tea.Cmd
+		m, c = m.applyCommand(cmd)
 		if cmd.Kind == CommandExit {
 			return m, tea.Quit
 		}
-		return m, nil
+		return m, c
 	}
 	if m.provider == nil {
 		m.messages = append(m.messages, chatMsg{role: "user", content: input})
@@ -347,7 +403,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	return m, m.startStream()
 }
 
-func (m Model) applyCommand(cmd SlashCommand) Model {
+func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	switch cmd.Kind {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
@@ -378,11 +434,19 @@ func (m Model) applyCommand(cmd SlashCommand) Model {
 			m.status = "Current model: " + m.model
 		}
 	case CommandNodes:
-		m.status = "Interactive node selection is not implemented yet"
+		if len(m.nodes) == 0 {
+			m.status = "No nodes configured"
+			return m, nil
+		}
+		m.mode = modeNodeSelect
+		m.prevSelected = m.selectedNodes
+		m.nodeSelector = newNodeSelector(m.nodes, m.selectedNodes)
+		m.status = "Checking node status..."
+		return m, m.pingNodes()
 	default:
 		m.status = "Unknown command: /" + cmd.Arg
 	}
-	return m
+	return m, nil
 }
 
 func (m Model) startStream() tea.Cmd {
@@ -426,6 +490,22 @@ func (m Model) dispatchTool(call llm.ToolCall) tea.Cmd {
 		}
 		return toolResultMsg{Call: call, Err: fmt.Errorf("no agent available")}
 	}
+}
+
+func (m Model) pingNodes() tea.Cmd {
+	clients := m.clients
+	var cmds []tea.Cmd
+	for name, client := range clients {
+		c := client
+		n := name
+		cmds = append(cmds, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := c.Ping(ctx)
+			return pingResultMsg{node: n, online: err == nil}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 func buildSystemPrompt(cluster string, selectedNodes []string) string {
