@@ -74,9 +74,32 @@ Minimal Bubble Tea shell with header, conversation display, text input, slash co
 
 Plan: `docs/superpowers/plans/2026-05-19-tui-shell.md`
 
-### Phase 3B: TUI Features — NEXT
+### Phase 3B: LLM Integration & Streaming — DONE
 
-Interactive node selector, LLM streaming integration, MCP tool dispatch visualization, security review prompts, memory UI, and session resume.
+Anthropic + OpenAI providers, streaming text in TUI, agentic tool-call dispatch loop.
+
+- `internal/llm/anthropic.go` — Anthropic Messages API provider (Chat + ChatStream)
+- `internal/llm/openai.go` — OpenAI Chat Completions API provider (Chat + ChatStream)
+- `internal/llm/sse.go` — Shared SSE stream reader
+- `internal/llm/factory.go` — Provider factory (model name → Provider)
+- `pkg/models/models.go` — Added ToolCallID to Message
+- `internal/conversation/conversation.go` — Added AddToolCall, AddToolResult methods
+- `internal/tui/model.go` — Refactored with streaming display + tool dispatch loop
+- `cmd/conan/main.go` — Wired providers, MCP clients, tools into TUI
+
+Plan: `docs/superpowers/plans/2026-05-20-llm-streaming-tui.md`
+
+### Phase 3C: Node Selector & Multi-node — NEXT
+
+Interactive `/nodes` multi-select, concurrent multi-node tool dispatch, collapsed tool-call visualization.
+
+### Phase 3D: Security Review — TODO
+
+Whitelist pre-check, model risk assessment, confirmation prompts.
+
+### Phase 3E: Memory & Session — TODO
+
+SQLite memory store, MEMORY.md rules, session archive and `/resume`.
 
 ## Design Spec
 
