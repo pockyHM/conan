@@ -10,6 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	cfgloader "github.com/pockyHM/conan/internal/config"
+	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/tui"
 	"github.com/spf13/cobra"
@@ -155,7 +157,48 @@ func newRootCommand() *cobra.Command {
 			if selectedCluster == "" {
 				selectedCluster = global.DefaultCluster
 			}
-			model := tui.NewModel(tui.ModelConfig{Cluster: selectedCluster, Model: global.DefaultModel})
+
+			provider, modelName, err := llm.NewProvider(global.Models, global.DefaultModel)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+			}
+
+			var clients map[string]*mcp.Client
+			var agentTools []llm.ToolDef
+			if selectedCluster != "" {
+				cluster, err := loader.LoadCluster(selectedCluster)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster %s: %v\n", selectedCluster, err)
+				} else {
+					clients = make(map[string]*mcp.Client)
+					for _, node := range cluster.Nodes {
+						url := mcp.URL(node.Agent.Host, node.Agent.Port, node.Agent.TLS)
+						clients[node.Name] = mcp.NewClient(mcp.Config{
+							BaseURL: url,
+							Token:   node.Agent.Token,
+						})
+					}
+					for _, client := range clients {
+						tools, err := client.ListTools(cmd.Context())
+						if err == nil {
+							for _, t := range tools {
+								agentTools = append(agentTools, llm.ToolDef(t))
+							}
+						}
+						break
+					}
+				}
+			}
+
+			conv := conversation.New(selectedCluster, nil, modelName)
+			model := tui.NewModel(tui.ModelConfig{
+				Cluster:  selectedCluster,
+				Model:    modelName,
+				Provider: provider,
+				Conv:     conv,
+				Clients:  clients,
+				Tools:    agentTools,
+			})
 			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
