@@ -165,8 +165,10 @@ func newRootCommand() *cobra.Command {
 
 			var clients map[string]*mcp.Client
 			var agentTools []llm.ToolDef
+			var cluster *cfgloader.Cluster
 			if selectedCluster != "" {
-				cluster, err := loader.LoadCluster(selectedCluster)
+				var err error
+				cluster, err = loader.LoadCluster(selectedCluster)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster %s: %v\n", selectedCluster, err)
 				} else {
@@ -190,6 +192,16 @@ func newRootCommand() *cobra.Command {
 				}
 			}
 
+			var nodeInfos []tui.NodeInfo
+			if cluster != nil {
+				for _, node := range cluster.Nodes {
+					nodeInfos = append(nodeInfos, tui.NodeInfo{
+						Name: node.Name,
+						Host: node.Agent.Host,
+					})
+				}
+			}
+
 			conv := conversation.New(selectedCluster, nil, modelName)
 			model := tui.NewModel(tui.ModelConfig{
 				Cluster:  selectedCluster,
@@ -198,6 +210,7 @@ func newRootCommand() *cobra.Command {
 				Conv:     conv,
 				Clients:  clients,
 				Tools:    agentTools,
+				Nodes:    nodeInfos,
 			})
 			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		},

@@ -8,7 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
-	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
@@ -145,8 +144,10 @@ func TestToolResultMessage(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
 	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"ls"}`)}
-	result := &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("file1\nfile2")}}
-	next, _ := model.Update(toolResultMsg{Call: call, Result: result})
+	results := []nodeToolResult{
+		{Node: "node-01", Output: "file1\nfile2", Success: true},
+	}
+	next, _ := model.Update(multiToolResultMsg{Call: call, Results: results})
 	model = next.(Model)
 
 	view := model.View()

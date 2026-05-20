@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,6 +14,12 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
+type NodeInfo struct {
+	Name   string
+	Host   string
+	Online bool
+}
+
 type ModelConfig struct {
 	Cluster  string
 	Model    string
@@ -20,14 +27,16 @@ type ModelConfig struct {
 	Conv     *conversation.Conversation
 	Clients  map[string]*mcp.Client
 	Tools    []llm.ToolDef
+	Nodes    []NodeInfo
 }
 
 type chatMsg struct {
-	role       string
-	content    string
-	toolName   string
-	toolInput  string
-	toolOutput string
+	role        string
+	content     string
+	toolName    string
+	toolInput   string
+	toolOutput  string
+	nodeResults []nodeToolResult
 }
 
 type Model struct {
@@ -37,6 +46,9 @@ type Model struct {
 	conv      *conversation.Conversation
 	clients   map[string]*mcp.Client
 	tools     []llm.ToolDef
+
+	nodes         []NodeInfo
+	selectedNodes map[string]bool
 
 	input     string
 	messages  []chatMsg
@@ -56,14 +68,20 @@ func NewModel(cfg ModelConfig) Model {
 	if cfg.Model == "" {
 		cfg.Model = "default"
 	}
+	selectedNodes := make(map[string]bool)
+	for _, node := range cfg.Nodes {
+		selectedNodes[node.Name] = true
+	}
 	return Model{
-		cluster:  cfg.Cluster,
-		model:    cfg.Model,
-		provider: cfg.Provider,
-		conv:     cfg.Conv,
-		clients:  cfg.Clients,
-		tools:    cfg.Tools,
-		status:   "Ready",
+		cluster:       cfg.Cluster,
+		model:         cfg.Model,
+		provider:      cfg.Provider,
+		conv:          cfg.Conv,
+		clients:       cfg.Clients,
+		tools:         cfg.Tools,
+		nodes:         cfg.Nodes,
+		selectedNodes: selectedNodes,
+		status:        "Ready",
 	}
 }
 
@@ -86,6 +104,17 @@ type toolResultMsg struct {
 	Call   llm.ToolCall
 	Result *mcpproto.ToolResult
 	Err    error
+}
+
+type nodeToolResult struct {
+	Node    string
+	Output  string
+	Success bool
+}
+
+type multiToolResultMsg struct {
+	Call    llm.ToolCall
+	Results []nodeToolResult
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -151,6 +180,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.status = "Stream ended"
 		return m, nil
+
+	case multiToolResultMsg:
+		var output string
+		for _, r := range msg.Results {
+			if r.Success {
+				output += fmt.Sprintf("[%s] %s\n", r.Node, r.Output)
+			} else {
+				output += fmt.Sprintf("[%s] ERROR: %s\n", r.Node, r.Output)
+			}
+		}
+		found := false
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			if m.messages[i].role == "tool" && m.messages[i].toolOutput == "" {
+				m.messages[i].toolOutput = output
+				m.messages[i].nodeResults = msg.Results
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.messages = append(m.messages, chatMsg{
+				role:        "tool",
+				toolName:    msg.Call.Name,
+				toolInput:   string(msg.Call.Arguments),
+				toolOutput:  output,
+				nodeResults: msg.Results,
+			})
+		}
+		if m.conv != nil {
+			m.conv.AddToolResult(msg.Call.ID, output)
+		}
+		return m, m.startStream()
 
 	case toolResultMsg:
 		var output string
@@ -225,7 +286,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	header := lipgloss.NewStyle().Bold(true).Render(
-		fmt.Sprintf("Conan | Cluster: %s | Model: %s", m.cluster, m.model),
+		fmt.Sprintf("Conan | Cluster: %s | Model: %s | Nodes: %d/%d", m.cluster, m.model, len(m.selectedNodes), len(m.nodes)),
 	)
 
 	var bodyParts []string
@@ -329,8 +390,13 @@ func (m Model) startStream() tea.Cmd {
 		return nil
 	}
 	provider := m.provider
+	var selected []string
+	for name := range m.selectedNodes {
+		selected = append(selected, name)
+	}
+	sort.Strings(selected)
 	req := &llm.ChatRequest{
-		SystemPrompt: buildSystemPrompt(m.cluster),
+		SystemPrompt: buildSystemPrompt(m.cluster, selected),
 		Messages:     m.conv.Messages(),
 		Tools:        m.tools,
 	}
@@ -362,6 +428,7 @@ func (m Model) dispatchTool(call llm.ToolCall) tea.Cmd {
 	}
 }
 
-func buildSystemPrompt(cluster string) string {
-	return fmt.Sprintf("You are Conan, an AI operations assistant. Cluster: %s. Help the user manage their infrastructure.", cluster)
+func buildSystemPrompt(cluster string, selectedNodes []string) string {
+	nodes := strings.Join(selectedNodes, ", ")
+	return fmt.Sprintf("You are Conan, an AI operations assistant. Cluster: %s. Target nodes: %s. Help the user manage their infrastructure.", cluster, nodes)
 }
