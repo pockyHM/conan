@@ -129,6 +129,16 @@ SQLite memory store, MEMORY.md rules, virtual memory tools, session archive, and
 
 Plan: `docs/superpowers/plans/2026-05-20-memory-session.md`
 
+### Phase 3F: TUI Polish — DONE
+
+Markdown rendering via glamour, slash command autocomplete, styled messages.
+
+- `internal/tui/render.go` — Glamour markdown renderer and styled message helpers
+- `internal/tui/autocomplete.go` — Slash command autocomplete with filtering and navigation
+- `internal/tui/model.go` — Refactored View() with polished styling, autocomplete integration
+
+Plan: `docs/superpowers/plans/2026-05-20-tui-polish.md`
+
 ## Design Spec
 
 Full design document: `docs/superpowers/specs/2026-05-19-conan-ops-agent-design.md`
