@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
+	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/security"
 )
 
@@ -31,6 +34,8 @@ type ModelConfig struct {
 	Tools    []llm.ToolDef
 	Nodes    []NodeInfo
 	Reviewer *security.Reviewer
+
+	MemoryStore *memory.Store
 }
 
 type chatMsg struct {
@@ -48,6 +53,7 @@ const (
 	modeChat       tuiMode = iota
 	modeNodeSelect
 	modeConfirm
+	modeSession
 )
 
 type pingResultMsg struct {
@@ -73,6 +79,9 @@ type Model struct {
 	reviewer        *security.Reviewer
 	pendingToolCall *llm.ToolCall
 	pendingRisk     *security.RiskAssessment
+
+	memStore    *memory.Store
+	sessionList sessionList
 
 	input     string
 	messages  []chatMsg
@@ -107,6 +116,7 @@ func NewModel(cfg ModelConfig) Model {
 		selectedNodes: selectedNodes,
 		status:        "Ready",
 		reviewer:      cfg.Reviewer,
+		memStore:      cfg.MemoryStore,
 	}
 }
 
@@ -140,6 +150,11 @@ type riskAssessmentMsg struct {
 	call       llm.ToolCall
 	assessment security.RiskAssessment
 	err        error
+}
+
+type sessionLoadMsg struct {
+	record *memory.ConversationRecord
+	err    error
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -208,6 +223,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.conv.AddToolCall(e.ID, e.Name, string(e.Arguments))
 			}
 			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
+			if memory.IsMemoryTool(e.Name) {
+				return m, m.handleMemoryTool(call)
+			}
 			return m, m.assessToolRisk(call)
 		case llm.StopEvent:
 			if m.conv != nil {
@@ -289,6 +307,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sessionLoadMsg:
+		if msg.err != nil {
+			m.status = "Error loading session: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = fmt.Sprintf("Resumed session %s (%s)", msg.record.ID, msg.record.Cluster)
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -297,6 +323,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeSession {
+		return m.handleSessionSelectKey(key)
+	}
 	if m.mode == modeConfirm {
 		return m.handleConfirmKey(key)
 	}
@@ -315,6 +344,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key.Type {
 	case tea.KeyCtrlC:
+		m.saveCurrentConversation()
 		return m, tea.Quit
 	case tea.KeyCtrlL:
 		m.messages = nil
@@ -419,6 +449,10 @@ func (m Model) View() string {
 		return fmt.Sprintf("%s\n\n%s\n\n%s", header, m.nodeSelector.View(), m.status)
 	}
 
+	if m.mode == modeSession {
+		return fmt.Sprintf("%s\n\n%s\n\n%s", header, m.sessionList.View(), m.status)
+	}
+
 	var bodyParts []string
 	for _, msg := range m.messages {
 		switch msg.role {
@@ -491,6 +525,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		var c tea.Cmd
 		m, c = m.applyCommand(cmd)
 		if cmd.Kind == CommandExit {
+			m.saveCurrentConversation()
 			return m, tea.Quit
 		}
 		return m, c
@@ -550,6 +585,60 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		m.nodeSelector = newNodeSelector(m.nodes, m.selectedNodes)
 		m.status = "Checking node status..."
 		return m, m.pingNodes()
+	case CommandMemory:
+		if m.memStore == nil {
+			m.status = "Memory not available"
+			return m, nil
+		}
+		results, err := m.memStore.ListMemories("", 10)
+		if err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
+		if len(results) == 0 {
+			m.status = "No memories stored yet"
+			return m, nil
+		}
+		var lines []string
+		for _, r := range results {
+			lines = append(lines, fmt.Sprintf("[%s] %s: %s", r.ID, r.Title, truncateStr(r.Content, 60)))
+		}
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: "Memory:\n" + strings.Join(lines, "\n")})
+		m.status = fmt.Sprintf("%d memories", len(results))
+	case CommandResume:
+		if m.memStore == nil {
+			m.status = "Memory not available"
+			return m, nil
+		}
+		if cmd.Arg != "" {
+			return m, m.loadSession(cmd.Arg)
+		}
+		sessions, err := m.memStore.ListConversations(20)
+		if err != nil {
+			m.status = "Error: " + err.Error()
+			return m, nil
+		}
+		if len(sessions) == 0 {
+			m.status = "No previous sessions"
+			return m, nil
+		}
+		var infos []SessionInfo
+		for _, s := range sessions {
+			summary := s.Summary
+			if summary == "" {
+				summary = "(no summary)"
+			}
+			infos = append(infos, SessionInfo{
+				ID:        s.ID,
+				Cluster:   s.Cluster,
+				CreatedAt: s.CreatedAt,
+				Summary:   summary,
+			})
+		}
+		m.mode = modeSession
+		m.sessionList = newSessionList(infos)
+		m.status = "Select a session to resume"
+		return m, nil
 	default:
 		m.status = "Unknown command: /" + cmd.Arg
 	}
@@ -561,15 +650,27 @@ func (m Model) startStream() tea.Cmd {
 		return nil
 	}
 	provider := m.provider
-	var selected []string
-	for name := range m.selectedNodes {
-		selected = append(selected, name)
+
+	allTools := make([]llm.ToolDef, len(m.tools))
+	copy(allTools, m.tools)
+	if m.memStore != nil {
+		for _, td := range memory.ToolDefs() {
+			b, err := json.Marshal(td)
+			if err != nil {
+				continue
+			}
+			var def llm.ToolDef
+			if err := json.Unmarshal(b, &def); err != nil {
+				continue
+			}
+			allTools = append(allTools, def)
+		}
 	}
-	sort.Strings(selected)
+
 	req := &llm.ChatRequest{
-		SystemPrompt: buildSystemPrompt(m.cluster, selected),
+		SystemPrompt: m.buildSystemPromptWithMemory(),
 		Messages:     m.conv.Messages(),
-		Tools:        m.tools,
+		Tools:        allTools,
 	}
 	return func() tea.Msg {
 		ch, err := provider.ChatStream(context.Background(), req)
@@ -676,7 +777,107 @@ func (m Model) pingNodes() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func buildSystemPrompt(cluster string, selectedNodes []string) string {
-	nodes := strings.Join(selectedNodes, ", ")
-	return fmt.Sprintf("You are Conan, an AI operations assistant. Cluster: %s. Target nodes: %s. Help the user manage their infrastructure.", cluster, nodes)
+func (m Model) buildSystemPromptWithMemory() string {
+	nodes := make([]string, 0, len(m.selectedNodes))
+	for name := range m.selectedNodes {
+		nodes = append(nodes, name)
+	}
+	sort.Strings(nodes)
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("You are Conan, an AI operations assistant. Cluster: %s. Target nodes: %s. Help the user manage their infrastructure.", m.cluster, strings.Join(nodes, ", ")))
+
+	if m.memStore != nil {
+		rc, err := memory.LoadRules(filepath.Join(m.memStore.Dir(), "memory"))
+		if err == nil && !rc.Empty() {
+			parts = append(parts, "\n[Behavioral Rules]\n"+rc.Format())
+		}
+		results, err := m.memStore.ListMemories("", 5)
+		if err == nil && len(results) > 0 {
+			var memLines []string
+			for _, r := range results {
+				memLines = append(memLines, fmt.Sprintf("- [%s] %s: %s", r.Category, r.Title, r.Content))
+			}
+			parts = append(parts, "\n[Memory Context]\n"+strings.Join(memLines, "\n"))
+		}
+	}
+
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) handleMemoryTool(call llm.ToolCall) tea.Cmd {
+	store := m.memStore
+	convID := ""
+	if m.conv != nil {
+		convID = m.conv.ID()
+	}
+	return func() tea.Msg {
+		result := memory.HandleTool(store, convID, call.Name, call.Arguments)
+		return multiToolResultMsg{
+			Call: call,
+			Results: []nodeToolResult{
+				{Node: "local", Output: result.Output, Success: result.Success},
+			},
+		}
+	}
+}
+
+func (m Model) handleSessionSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		selected := m.sessionList.Selected()
+		m.mode = modeChat
+		if selected != nil {
+			m.status = fmt.Sprintf("Loading session %s...", selected.ID)
+			return m, m.loadSession(selected.ID)
+		}
+		m.status = "No session selected"
+		return m, nil
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeChat
+		m.status = "Resume cancelled"
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.sessionList, cmd = m.sessionList.Update(key)
+		return m, cmd
+	}
+}
+
+func (m Model) loadSession(id string) tea.Cmd {
+	store := m.memStore
+	return func() tea.Msg {
+		rec, err := store.LoadConversation(id)
+		if err != nil {
+			return sessionLoadMsg{err: err}
+		}
+		return sessionLoadMsg{record: rec}
+	}
+}
+
+func (m Model) saveCurrentConversation() {
+	if m.memStore == nil || m.conv == nil {
+		return
+	}
+	msgs := m.conv.Messages()
+	msgJSON, _ := json.Marshal(msgs)
+	nodes := make([]string, 0, len(m.selectedNodes))
+	for n := range m.selectedNodes {
+		nodes = append(nodes, n)
+	}
+	nodesJSON, _ := json.Marshal(nodes)
+	m.memStore.SaveConversation(memory.ConversationRecord{
+		ID:       m.conv.ID(),
+		Cluster:  m.cluster,
+		Nodes:    string(nodesJSON),
+		Model:    m.model,
+		Messages: string(msgJSON),
+	})
+}
+
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
 }

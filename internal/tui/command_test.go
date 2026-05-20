@@ -14,6 +14,9 @@ func TestParseSlashCommand(t *testing.T) {
 		{input: "/cluster production", kind: CommandCluster, arg: "production"},
 		{input: "/model claude-sonnet", kind: CommandModel, arg: "claude-sonnet"},
 		{input: "/nodes", kind: CommandNodes},
+		{input: "/memory", kind: CommandMemory},
+		{input: "/resume", kind: CommandResume},
+		{input: "/resume abc123", kind: CommandResume, arg: "abc123"},
 	}
 
 	for _, tt := range tests {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
+	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/tui"
 	"github.com/spf13/cobra"
@@ -212,16 +214,24 @@ func newRootCommand() *cobra.Command {
 				})
 			}
 
+			memDir := filepath.Join(loader.Home(), "memory")
+			memStore, err := memory.Open(memDir)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not open memory store: %v\n", err)
+			}
+			memory.EnsureMemoryDir(filepath.Join(loader.Home(), "memory", "memory"))
+
 			conv := conversation.New(selectedCluster, nil, modelName)
 			model := tui.NewModel(tui.ModelConfig{
-				Cluster:  selectedCluster,
-				Model:    modelName,
-				Provider: provider,
-				Conv:     conv,
-				Clients:  clients,
-				Tools:    agentTools,
-				Nodes:    nodeInfos,
-				Reviewer: reviewer,
+				Cluster:     selectedCluster,
+				Model:       modelName,
+				Provider:    provider,
+				Conv:        conv,
+				Clients:     clients,
+				Tools:       agentTools,
+				Nodes:       nodeInfos,
+				Reviewer:    reviewer,
+				MemoryStore: memStore,
 			})
 			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		},

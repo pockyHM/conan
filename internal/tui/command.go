@@ -11,6 +11,8 @@ const (
 	CommandCluster CommandKind = "cluster"
 	CommandModel   CommandKind = "model"
 	CommandNodes   CommandKind = "nodes"
+	CommandMemory  CommandKind = "memory"
+	CommandResume  CommandKind = "resume"
 	CommandUnknown CommandKind = "unknown"
 )
 
@@ -51,6 +53,10 @@ func ParseSlashCommand(input string) (SlashCommand, bool) {
 		return SlashCommand{Kind: CommandModel, Arg: arg}, true
 	case "nodes":
 		return SlashCommand{Kind: CommandNodes, Arg: arg}, true
+	case "memory":
+		return SlashCommand{Kind: CommandMemory, Arg: arg}, true
+	case "resume":
+		return SlashCommand{Kind: CommandResume, Arg: arg}, true
 	default:
 		if arg != "" {
 			return SlashCommand{Kind: CommandUnknown, Arg: name + " " + arg}, true
