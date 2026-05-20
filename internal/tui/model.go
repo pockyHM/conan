@@ -82,6 +82,7 @@ type Model struct {
 
 	memStore    *memory.Store
 	sessionList sessionList
+	ac          autocomplete
 
 	input     string
 	messages  []chatMsg
@@ -354,12 +355,34 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.input) > 0 {
 			runes := []rune(m.input)
 			m.input = string(runes[:len(runes)-1])
+			m.ac = m.ac.update(m.input)
 		}
 		return m, nil
 	case tea.KeyEnter:
+		m.ac.visible = false
 		return m.submit()
+	case tea.KeyTab:
+		if m.ac.visible {
+			comp := m.ac.completion()
+			if comp != "" {
+				m.input = comp
+				m.ac.visible = false
+			}
+		}
+		return m, nil
+	case tea.KeyUp:
+		if m.ac.visible {
+			m.ac = m.ac.moveUp()
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.ac.visible {
+			m.ac = m.ac.moveDown()
+		}
+		return m, nil
 	case tea.KeyRunes:
 		m.input += string(key.Runes)
+		m.ac = m.ac.update(m.input)
 		return m, nil
 	default:
 		return m, nil
@@ -426,9 +449,7 @@ func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	header := lipgloss.NewStyle().Bold(true).Render(
-		fmt.Sprintf("Conan | Cluster: %s | Model: %s | Nodes: %d/%d", m.cluster, m.model, len(m.selectedNodes), len(m.nodes)),
-	)
+	header := renderHeader(m.cluster, m.model, len(m.selectedNodes), len(m.nodes))
 
 	if m.mode == modeConfirm {
 		reason := ""
@@ -442,77 +463,75 @@ func (m Model) View() string {
 			Border(lipgloss.RoundedBorder()).
 			Padding(1, 2).
 			Render(fmt.Sprintf("Security Review\n\n%s\n\nType 'yes' to confirm or 'no' to cancel.", reason))
-		return fmt.Sprintf("%s\n\n%s\n\n%s\n> %s", header, confirmPanel, m.status, m.input)
+		return header + "\n\n" + confirmPanel + "\n\n" + statusStyle.Render(m.status) + "\n" + inputPromptStyle.Render("❯ ") + m.input
 	}
 
 	if m.mode == modeNodeSelect {
-		return fmt.Sprintf("%s\n\n%s\n\n%s", header, m.nodeSelector.View(), m.status)
+		return header + "\n\n" + m.nodeSelector.View() + "\n\n" + statusStyle.Render(m.status)
 	}
 
 	if m.mode == modeSession {
-		return fmt.Sprintf("%s\n\n%s\n\n%s", header, m.sessionList.View(), m.status)
+		return header + "\n\n" + m.sessionList.View() + "\n\n" + statusStyle.Render(m.status)
 	}
 
 	var bodyParts []string
 	for _, msg := range m.messages {
 		switch msg.role {
 		case "user":
-			bodyParts = append(bodyParts, "You: "+msg.content)
+			bodyParts = append(bodyParts, renderUserMsg(msg.content))
 		case "assistant":
-			bodyParts = append(bodyParts, "Conan: "+msg.content)
+			bodyParts = append(bodyParts, renderAssistantMsg(msg.content))
 		case "tool":
-			if len(msg.nodeResults) > 1 {
-				header := fmt.Sprintf("-> %s on %d node(s)", msg.toolName, len(msg.nodeResults))
-				if msg.toolOutput != "" {
-					var lines []string
-					for i, r := range msg.nodeResults {
-						prefix := "├──"
-						if i == len(msg.nodeResults)-1 {
-							prefix = "└──"
-						}
-						icon := "✓"
-						if !r.Success {
-							icon = "✗"
-						}
-						output := r.Output
-						if idx := strings.Index(output, "\n"); idx != -1 {
-							output = output[:idx]
-						}
-						if len(output) > 60 {
-							output = output[:57] + "..."
-						}
-						lines = append(lines, fmt.Sprintf("%s %s %s  %s", prefix, r.Node, icon, output))
-					}
-					header += "\n" + strings.Join(lines, "\n")
-				} else {
-					header += " (running...)"
-				}
-				bodyParts = append(bodyParts, header)
-			} else {
-				header := fmt.Sprintf("-> %s", msg.toolName)
-				if len(msg.nodeResults) == 1 {
-					header = fmt.Sprintf("-> %s on %s", msg.toolName, msg.nodeResults[0].Node)
-				}
-				if msg.toolOutput != "" {
-					header += "\n" + msg.toolOutput
-				} else {
-					header += " (running...)"
-				}
-				bodyParts = append(bodyParts, header)
-			}
+			bodyParts = append(bodyParts, m.renderToolMsg(msg))
 		}
 	}
 
 	if m.streaming && m.streamBuf != "" {
-		bodyParts = append(bodyParts, "Conan: "+m.streamBuf+"...")
+		bodyParts = append(bodyParts, renderStreamingMsg(m.streamBuf))
 	}
 
 	body := strings.Join(bodyParts, "\n\n")
 	if body == "" {
-		body = "No messages yet. Type a message or /help."
+		body = statusStyle.Render("No messages yet. Type a message or /help.")
 	}
 
-	return fmt.Sprintf("%s\n\n%s\n\n%s\n> %s", header, body, m.status, m.input)
+	acView := m.ac.View()
+	footer := statusStyle.Render(m.status) + "\n" + inputPromptStyle.Render("❯ ") + m.input
+	if acView != "" {
+		footer = acView + "\n" + footer
+	}
+
+	return header + "\n\n" + body + "\n\n" + footer
+}
+
+func (Model) renderToolMsg(msg chatMsg) string {
+	if len(msg.nodeResults) > 1 {
+		h := renderToolHeader(msg.toolName, len(msg.nodeResults))
+		if msg.toolOutput != "" {
+			var lines []string
+			for i, r := range msg.nodeResults {
+				prefix := "├──"
+				if i == len(msg.nodeResults)-1 {
+					prefix = "└──"
+				}
+				lines = append(lines, prefix+" "+renderToolNode(r.Node, r.Success, r.Output))
+			}
+			h += "\n" + strings.Join(lines, "\n")
+		} else {
+			h += " (running...)"
+		}
+		return h
+	}
+	h := renderToolHeader(msg.toolName, 0)
+	if len(msg.nodeResults) == 1 {
+		h = toolStyle.Render(fmt.Sprintf("⏚ %s on %s", msg.toolName, msg.nodeResults[0].Node))
+	}
+	if msg.toolOutput != "" {
+		h += "\n" + msg.toolOutput
+	} else {
+		h += " (running...)"
+	}
+	return h
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
