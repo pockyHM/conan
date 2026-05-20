@@ -89,11 +89,17 @@ Anthropic + OpenAI providers, streaming text in TUI, agentic tool-call dispatch 
 
 Plan: `docs/superpowers/plans/2026-05-20-llm-streaming-tui.md`
 
-### Phase 3C: Node Selector & Multi-node — NEXT
+### Phase 3C: Node Selector & Multi-node — DONE
 
-Interactive `/nodes` multi-select, concurrent multi-node tool dispatch, collapsed tool-call visualization.
+Interactive `/nodes` multi-select, concurrent multi-node tool dispatch, tree-style result visualization.
 
-### Phase 3D: Security Review — TODO
+- `internal/tui/nodeselector.go` — Interactive multi-select node overlay component
+- `internal/tui/model.go` — Mode switching, node state tracking, async ping, concurrent multi-node dispatch, tree visualization
+- `cmd/conan/main.go` — Node info wiring from cluster config to TUI
+
+Plan: `docs/superpowers/plans/2026-05-20-node-selector.md`
+
+### Phase 3D: Security Review — NEXT
 
 Whitelist pre-check, model risk assessment, confirmation prompts.
 
