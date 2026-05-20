@@ -111,9 +111,23 @@ Two-stage security pipeline (whitelist + model risk assessment) with TUI confirm
 
 Plan: `docs/superpowers/plans/2026-05-20-security-review.md`
 
-### Phase 3E: Memory & Session — NEXT
+### Phase 3E: Memory & Session — DONE
 
-SQLite memory store, MEMORY.md rules, session archive and `/resume`.
+SQLite memory store, MEMORY.md rules, virtual memory tools, session archive, and `/resume`.
+
+- `internal/memory/store.go` — SQLite store with schema (memories, conversations) and CRUD operations
+- `internal/memory/store_test.go` — Store tests (9 tests)
+- `internal/memory/rules.go` — MEMORY.md + rules/*.md loader for behavioral rules
+- `internal/memory/rules_test.go` — Rules loader tests (5 tests)
+- `internal/memory/tools.go` — Virtual LLM tools (memory/save, update, delete, search)
+- `internal/memory/tools_test.go` — Tool handler tests (7 tests)
+- `internal/tui/sessionlist.go` — Interactive session list component for /resume
+- `internal/tui/sessionlist_test.go` — Session list tests (4 tests)
+- `internal/tui/command.go` — Added /memory and /resume slash commands
+- `internal/tui/model.go` — Memory integration: tool handling, system prompt injection, session save/load
+- `cmd/conan/main.go` — Wired memory store into TUI
+
+Plan: `docs/superpowers/plans/2026-05-20-memory-session.md`
 
 ## Design Spec
 
