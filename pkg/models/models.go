@@ -40,6 +40,7 @@ type Message struct {
 	ConversationID string `json:"conversation_id"`
 	Role           string `json:"role"`
 	Content        string `json:"content"`
+	ToolCallID     string `json:"tool_call_id,omitempty"`
 	ToolName       string `json:"tool_name,omitempty"`
 	ToolInput      string `json:"tool_input,omitempty"`
 	ToolOutput     string `json:"tool_output,omitempty"`

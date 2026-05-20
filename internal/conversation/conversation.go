@@ -37,15 +37,23 @@ func (c *Conversation) ID() string {
 }
 
 func (c *Conversation) AddUser(content string) {
-	c.add(RoleUser, content, "", "", "")
+	c.add(RoleUser, content, "", "", "", "")
 }
 
 func (c *Conversation) AddAssistant(content string) {
-	c.add(RoleAssistant, content, "", "", "")
+	c.add(RoleAssistant, content, "", "", "", "")
 }
 
 func (c *Conversation) AddTool(name string, input string, output string) {
-	c.add(RoleTool, output, name, input, output)
+	c.add(RoleTool, output, "", name, input, output)
+}
+
+func (c *Conversation) AddToolCall(callID string, name string, input string) {
+	c.add(RoleAssistant, "", callID, name, input, "")
+}
+
+func (c *Conversation) AddToolResult(callID string, output string) {
+	c.add(RoleTool, output, callID, "", "", output)
 }
 
 func (c *Conversation) Messages() []models.Message {
@@ -73,13 +81,14 @@ func (c *Conversation) Clear() {
 	c.messages = nil
 }
 
-func (c *Conversation) add(role string, content string, toolName string, toolInput string, toolOutput string) {
+func (c *Conversation) add(role string, content string, toolCallID string, toolName string, toolInput string, toolOutput string) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	c.messages = append(c.messages, models.Message{
 		ID:             models.NewID(),
 		ConversationID: c.id,
 		Role:           role,
 		Content:        content,
+		ToolCallID:     toolCallID,
 		ToolName:       toolName,
 		ToolInput:      toolInput,
 		ToolOutput:     toolOutput,

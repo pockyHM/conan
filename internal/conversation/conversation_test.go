@@ -90,6 +90,44 @@ func TestContextUsesCharacterBudget(t *testing.T) {
 	}
 }
 
+func TestConversationToolCallRoundTrip(t *testing.T) {
+	c := New("prod", []string{"node-1"}, "claude-sonnet")
+	c.AddUser("check disk")
+	c.AddAssistant("I'll check disk usage.")
+	c.AddToolCall("toolu_abc", "shell/run", `{"command":"df -h"}`)
+	c.AddToolResult("toolu_abc", "Filesystem  Size  Used  Avail  Use%")
+
+	msgs := c.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("len = %d, want 4", len(msgs))
+	}
+
+	toolCallMsg := msgs[2]
+	if toolCallMsg.Role != RoleAssistant {
+		t.Fatalf("tool call role = %q, want %q", toolCallMsg.Role, RoleAssistant)
+	}
+	if toolCallMsg.ToolCallID != "toolu_abc" {
+		t.Fatalf("tool call id = %q", toolCallMsg.ToolCallID)
+	}
+	if toolCallMsg.ToolName != "shell/run" {
+		t.Fatalf("tool name = %q", toolCallMsg.ToolName)
+	}
+	if toolCallMsg.ToolInput != `{"command":"df -h"}` {
+		t.Fatalf("tool input = %q", toolCallMsg.ToolInput)
+	}
+
+	resultMsg := msgs[3]
+	if resultMsg.Role != RoleTool {
+		t.Fatalf("tool result role = %q, want %q", resultMsg.Role, RoleTool)
+	}
+	if resultMsg.ToolCallID != "toolu_abc" {
+		t.Fatalf("tool result id = %q", resultMsg.ToolCallID)
+	}
+	if resultMsg.Content != "Filesystem  Size  Used  Avail  Use%" {
+		t.Fatalf("tool result content = %q", resultMsg.Content)
+	}
+}
+
 func TestConversationMessagesReturnsCopyAndClearEmptiesMessages(t *testing.T) {
 	c := New("cluster-a", []string{"node-1"}, "gpt-4.1")
 	c.AddUser("hello")
