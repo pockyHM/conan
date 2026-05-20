@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
@@ -331,5 +332,182 @@ func TestMultiNodeDispatchWithFailure(t *testing.T) {
 	}
 	if !strings.Contains(view, "node-02 ✗") {
 		t.Fatalf("view missing failure node:\n%s", view)
+	}
+}
+
+// execCmd executes a tea.Cmd synchronously and returns its message.
+func execCmd(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		return nil
+	}
+	return cmd()
+}
+
+type stubRiskProvider struct {
+	response string
+}
+
+func (s *stubRiskProvider) Chat(_ context.Context, _ *llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{
+		Message:    models.Message{Role: "assistant", Content: s.response},
+		StopReason: llm.StopEndTurn,
+	}, nil
+}
+
+func (s *stubRiskProvider) ChatStream(_ context.Context, _ *llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	return nil, nil
+}
+
+func TestToolCallDeniedBySecurity(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Whitelist: []string{},
+		Provider:  &stubRiskProvider{response: `{"risk_level":"deny","reason":"Destructive"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+		Nodes:    []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+
+	result, cmd := model.Update(streamEventMsg{Event: llm.ToolCallEvent{
+		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`),
+	}})
+	model = result.(Model)
+
+	// Execute the assessToolRisk command to get riskAssessmentMsg
+	msg := execCmd(t, cmd)
+	result, _ = model.Update(msg)
+	model = result.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "BLOCKED") {
+		t.Fatalf("denied tool should show BLOCKED in view:\n%s", view)
+	}
+}
+
+func TestToolCallNeedsConfirmation(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Whitelist: []string{},
+		Provider:  &stubRiskProvider{response: `{"risk_level":"confirm","reason":"Restarts service","suggestion":"Rolling restart"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+		Nodes:    []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+
+	result, cmd := model.Update(streamEventMsg{Event: llm.ToolCallEvent{
+		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+	}})
+	model = result.(Model)
+
+	// Execute the assessToolRisk command to get riskAssessmentMsg
+	msg := execCmd(t, cmd)
+	result, _ = model.Update(msg)
+	model = result.(Model)
+
+	if model.mode != modeConfirm {
+		t.Fatalf("mode = %v, want modeConfirm", model.mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Confirm?") {
+		t.Fatalf("confirm mode should show prompt:\n%s", view)
+	}
+	if !strings.Contains(view, "Restarts service") {
+		t.Fatalf("confirm mode should show risk reason:\n%s", view)
+	}
+}
+
+func TestConfirmYesDispatchesTool(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Whitelist: []string{},
+		Provider:  &stubRiskProvider{response: `{"risk_level":"confirm","reason":"Risky"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+		Nodes:    []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+
+	result, cmd := model.Update(streamEventMsg{Event: llm.ToolCallEvent{
+		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+	}})
+	model = result.(Model)
+
+	// Execute the assessToolRisk command to get riskAssessmentMsg
+	msg := execCmd(t, cmd)
+	result, _ = model.Update(msg)
+	model = result.(Model)
+
+	if model.mode != modeConfirm {
+		t.Fatal("should be in confirm mode")
+	}
+
+	for _, r := range "yes" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat after confirm", model.mode)
+	}
+	if cmd == nil {
+		t.Fatal("confirming should dispatch the tool")
+	}
+}
+
+func TestConfirmNoCancelsTool(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Whitelist: []string{},
+		Provider:  &stubRiskProvider{response: `{"risk_level":"confirm","reason":"Risky"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+		Nodes:    []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+
+	result, cmd := model.Update(streamEventMsg{Event: llm.ToolCallEvent{
+		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+	}})
+	model = result.(Model)
+
+	// Execute the assessToolRisk command to get riskAssessmentMsg
+	msg := execCmd(t, cmd)
+	result, _ = model.Update(msg)
+	model = result.(Model)
+
+	for _, r := range "no" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat after cancel", model.mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Cancelled") {
+		t.Fatalf("cancelled tool should show cancelled:\n%s", view)
 	}
 }

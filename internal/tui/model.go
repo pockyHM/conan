@@ -13,6 +13,7 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
+	"github.com/pockyHM/conan/internal/security"
 )
 
 type NodeInfo struct {
@@ -29,6 +30,7 @@ type ModelConfig struct {
 	Clients  map[string]*mcp.Client
 	Tools    []llm.ToolDef
 	Nodes    []NodeInfo
+	Reviewer *security.Reviewer
 }
 
 type chatMsg struct {
@@ -45,6 +47,7 @@ type tuiMode int
 const (
 	modeChat       tuiMode = iota
 	modeNodeSelect
+	modeConfirm
 )
 
 type pingResultMsg struct {
@@ -66,6 +69,10 @@ type Model struct {
 	mode         tuiMode
 	nodeSelector nodeSelector
 	prevSelected map[string]bool
+
+	reviewer        *security.Reviewer
+	pendingToolCall *llm.ToolCall
+	pendingRisk     *security.RiskAssessment
 
 	input     string
 	messages  []chatMsg
@@ -99,6 +106,7 @@ func NewModel(cfg ModelConfig) Model {
 		nodes:         cfg.Nodes,
 		selectedNodes: selectedNodes,
 		status:        "Ready",
+		reviewer:      cfg.Reviewer,
 	}
 }
 
@@ -128,12 +136,54 @@ type multiToolResultMsg struct {
 	Results []nodeToolResult
 }
 
+type riskAssessmentMsg struct {
+	call       llm.ToolCall
+	assessment security.RiskAssessment
+	err        error
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		return m, nil
+
+	case riskAssessmentMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, chatMsg{
+				role:       "tool",
+				toolName:   msg.call.Name,
+				toolInput:  string(msg.call.Arguments),
+				toolOutput: "Risk assessment error: " + msg.err.Error(),
+				nodeResults: []nodeToolResult{{Node: "-", Output: msg.err.Error(), Success: false}},
+			})
+			return m, m.startStream()
+		}
+		switch msg.assessment.Level {
+		case security.RiskAllow:
+			return m, m.dispatchTool(msg.call)
+		case security.RiskDeny:
+			denial := "BLOCKED: " + msg.assessment.Reason
+			m.messages = append(m.messages, chatMsg{
+				role:       "tool",
+				toolName:   msg.call.Name,
+				toolInput:  string(msg.call.Arguments),
+				toolOutput: denial,
+				nodeResults: []nodeToolResult{{Node: "-", Output: denial, Success: false}},
+			})
+			if m.conv != nil {
+				m.conv.AddToolResult(msg.call.ID, denial)
+			}
+			return m, m.startStream()
+		case security.RiskConfirm:
+			m.mode = modeConfirm
+			m.pendingToolCall = &msg.call
+			m.pendingRisk = &msg.assessment
+			m.input = ""
+			m.status = fmt.Sprintf("Confirm? %s", msg.assessment.Reason)
+			return m, nil
+		}
 
 	case streamReadyMsg:
 		if msg.err != nil {
@@ -157,7 +207,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.conv != nil {
 				m.conv.AddToolCall(e.ID, e.Name, string(e.Arguments))
 			}
-			return m, m.dispatchTool(llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments})
+			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
+			return m, m.assessToolRisk(call)
 		case llm.StopEvent:
 			if m.conv != nil {
 				m.conv.AddAssistant(m.streamBuf)
@@ -246,6 +297,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeConfirm {
+		return m.handleConfirmKey(key)
+	}
 	if m.mode == modeNodeSelect {
 		return m.handleNodeSelectKey(key)
 	}
@@ -282,6 +336,46 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		input := strings.TrimSpace(m.input)
+		m.input = ""
+		call := *m.pendingToolCall
+		m.pendingToolCall = nil
+		m.pendingRisk = nil
+		m.mode = modeChat
+
+		if input == "yes" || input == "y" {
+			m.status = "Approved â executing..."
+			return m, m.dispatchTool(call)
+		}
+		m.messages = append(m.messages, chatMsg{
+			role:        "tool",
+			toolName:    call.Name,
+			toolInput:   string(call.Arguments),
+			toolOutput:  "Cancelled by user",
+			nodeResults: []nodeToolResult{{Node: "-", Output: "Cancelled by user", Success: false}},
+		})
+		if m.conv != nil {
+			m.conv.AddToolResult(call.ID, "Cancelled by user")
+		}
+		m.status = "Ready"
+		return m, m.startStream()
+	case tea.KeyBackspace:
+		if len(m.input) > 0 {
+			runes := []rune(m.input)
+			m.input = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	case tea.KeyRunes:
+		m.input += string(key.Runes)
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
 func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEnter:
@@ -305,6 +399,21 @@ func (m Model) View() string {
 	header := lipgloss.NewStyle().Bold(true).Render(
 		fmt.Sprintf("Conan | Cluster: %s | Model: %s | Nodes: %d/%d", m.cluster, m.model, len(m.selectedNodes), len(m.nodes)),
 	)
+
+	if m.mode == modeConfirm {
+		reason := ""
+		if m.pendingRisk != nil {
+			reason = m.pendingRisk.Reason
+			if m.pendingRisk.Suggestion != "" {
+				reason += "\nSuggestion: " + m.pendingRisk.Suggestion
+			}
+		}
+		confirmPanel := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			Padding(1, 2).
+			Render(fmt.Sprintf("Security Review\n\n%s\n\nType 'yes' to confirm or 'no' to cancel.", reason))
+		return fmt.Sprintf("%s\n\n%s\n\n%s\n> %s", header, confirmPanel, m.status, m.input)
+	}
 
 	if m.mode == modeNodeSelect {
 		return fmt.Sprintf("%s\n\n%s\n\n%s", header, m.nodeSelector.View(), m.status)
@@ -476,6 +585,17 @@ func (m Model) waitForEvent() tea.Cmd {
 			return streamDoneMsg{}
 		}
 		return streamEventMsg{Event: event}
+	}
+}
+
+func (m Model) assessToolRisk(call llm.ToolCall) tea.Cmd {
+	reviewer := m.reviewer
+	if reviewer == nil {
+		return m.dispatchTool(call)
+	}
+	return func() tea.Msg {
+		assessment, err := reviewer.Review(context.Background(), call.Name, string(call.Arguments))
+		return riskAssessmentMsg{call: call, assessment: assessment, err: err}
 	}
 }
 
