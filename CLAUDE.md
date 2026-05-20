@@ -99,11 +99,19 @@ Interactive `/nodes` multi-select, concurrent multi-node tool dispatch, tree-sty
 
 Plan: `docs/superpowers/plans/2026-05-20-node-selector.md`
 
-### Phase 3D: Security Review — NEXT
+### Phase 3D: Security Review — DONE
 
-Whitelist pre-check, model risk assessment, confirmation prompts.
+Two-stage security pipeline (whitelist + model risk assessment) with TUI confirmation prompts.
 
-### Phase 3E: Memory & Session — TODO
+- `internal/security/whitelist.go` — Command whitelist with prefix matching
+- `internal/security/riskprompt.go` — Risk assessment prompt builder and JSON response parser
+- `internal/security/reviewer.go` — Two-stage reviewer (whitelist bypass → model assessment) with session cache
+- `internal/tui/model.go` — Confirmation mode, security gate in tool dispatch flow
+- `cmd/conan/main.go` — Wired Reviewer from config into TUI
+
+Plan: `docs/superpowers/plans/2026-05-20-security-review.md`
+
+### Phase 3E: Memory & Session — NEXT
 
 SQLite memory store, MEMORY.md rules, session archive and `/resume`.
 

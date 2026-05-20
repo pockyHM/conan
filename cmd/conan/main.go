@@ -13,6 +13,7 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
+	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -202,6 +203,15 @@ func newRootCommand() *cobra.Command {
 				}
 			}
 
+			var reviewer *security.Reviewer
+			if provider != nil {
+				reviewer = security.NewReviewer(security.ReviewerConfig{
+					Whitelist: global.Security.CommandWhitelist,
+					Provider:  provider,
+					ModelName: modelName,
+				})
+			}
+
 			conv := conversation.New(selectedCluster, nil, modelName)
 			model := tui.NewModel(tui.ModelConfig{
 				Cluster:  selectedCluster,
@@ -211,6 +221,7 @@ func newRootCommand() *cobra.Command {
 				Clients:  clients,
 				Tools:    agentTools,
 				Nodes:    nodeInfos,
+				Reviewer: reviewer,
 			})
 			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
