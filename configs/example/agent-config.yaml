@@ -1,4 +1,4 @@
-listen: "0.0.0.0:9200"
+listen: "0.0.0.0:9280"
 token: "changeme"
 tls: false
 # tls_cert: /etc/conan-agent/cert.pem

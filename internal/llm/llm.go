@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
@@ -17,6 +18,18 @@ const (
 type Provider interface {
 	Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
 	ChatStream(ctx context.Context, req *ChatRequest) (<-chan ChatEvent, error)
+}
+
+type httpError struct {
+	Status int
+	Body   string
+}
+
+func (e *httpError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("http %d", e.Status)
+	}
+	return fmt.Sprintf("http %d: %s", e.Status, e.Body)
 }
 
 type ChatRequest struct {

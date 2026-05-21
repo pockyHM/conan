@@ -20,7 +20,7 @@ func NewWhitelist(entries []string) Whitelist {
 func (w Whitelist) Match(command string) bool {
 	command = strings.TrimSpace(command)
 	for _, entry := range w.entries {
-		if command == entry || strings.HasPrefix(command, entry+" ") {
+		if command == entry {
 			return true
 		}
 	}

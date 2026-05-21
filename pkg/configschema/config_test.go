@@ -21,8 +21,8 @@ func TestExpandEnvEmpty(t *testing.T) {
 
 func TestAgentConfigDefaults(t *testing.T) {
 	cfg := DefaultAgentConfig()
-	if cfg.Listen != "0.0.0.0:9200" {
-		t.Errorf("listen = %q, want 0.0.0.0:9200", cfg.Listen)
+	if cfg.Listen != "0.0.0.0:9280" {
+		t.Errorf("listen = %q, want 0.0.0.0:9280", cfg.Listen)
 	}
 	if cfg.RateLimit != 10 {
 		t.Errorf("rate_limit = %d, want 10", cfg.RateLimit)

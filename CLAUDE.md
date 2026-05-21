@@ -139,6 +139,32 @@ Markdown rendering via glamour, slash command autocomplete, styled messages.
 
 Plan: `docs/superpowers/plans/2026-05-20-tui-polish.md`
 
+### Phase 4: Production Readiness — DONE
+
+Structured logging, audit trail, LLM/MCP retry, agent version checking, stream error recovery.
+
+- `internal/logging/logging.go` — Structured file logging with slog, log dir creation, level parsing
+- `internal/security/audit.go` — Audit logger for tool call decisions (ALLOW/CONFIRM/DENY) with JSON entries
+- `internal/llm/retry.go` — Retry wrapper for Provider interface with exponential backoff (429, 5xx)
+- `internal/mcp/version.go` — Agent version checking and mismatch detection
+- `internal/tui/model.go` — Version check on startup, stream error recovery, node offline on connection failure, audit integration
+- `cmd/conan/main.go` — Logging init, audit logger init, retry provider wrapper, version wiring
+
+Plan: `docs/superpowers/plans/2026-05-20-production-readiness.md`
+
+### Model Management CLI
+
+Interactive and non-interactive model configuration management.
+
+- `cmd/conan/model_presets.go` — Provider presets (Anthropic, OpenAI, GLM, MiniMax, Qwen, Kimi, Custom)
+- `cmd/conan/model_lister.go` — OpenAI-compatible `/models` discovery with timeout and fallback
+- `cmd/conan/model_commands.go` — Cobra commands: `model add/list/use/remove`
+- `cmd/conan/model_prompt.go` — Interactive prompt helper for `model add` (provider selection, API key, model discovery, duplicate check)
+- `cmd/conan/main.go` — Model command registration
+
+Design: `docs/superpowers/specs/2026-05-21-model-management-design.md`
+Plan: `docs/superpowers/plans/2026-05-21-model-management-cli.md`
+
 ## Design Spec
 
 Full design document: `docs/superpowers/specs/2026-05-19-conan-ops-agent-design.md`

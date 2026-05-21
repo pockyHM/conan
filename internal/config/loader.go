@@ -56,11 +56,55 @@ func (l *Loader) Home() string {
 	return l.home
 }
 
+func (l *Loader) ConfigPath() string {
+	return filepath.Join(l.home, "config.yaml")
+}
+
+func (l *Loader) SaveGlobal(cfg *configschema.GlobalConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("global config is nil")
+	}
+	toSave := *cfg
+	toSave.Models = append([]configschema.ModelConfig(nil), cfg.Models...)
+	normalizeModelsForSave(toSave.Models)
+	preserveExistingModelAPIKeys(l.ConfigPath(), toSave.Models)
+
+	path := l.ConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(&toSave)
+	if err != nil {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 func (l *Loader) LoadGlobal() (*configschema.GlobalConfig, error) {
 	cfg := &configschema.GlobalConfig{}
 	applyGlobalDefaults(cfg)
+	applyAgentDeployDefaults(cfg, l.home)
 
-	path := filepath.Join(l.home, "config.yaml")
+	path := l.ConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -72,11 +116,42 @@ func (l *Loader) LoadGlobal() (*configschema.GlobalConfig, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	applyGlobalDefaults(cfg)
-	for i := range cfg.Models {
-		cfg.Models[i].APIKey = configschema.ExpandEnv(cfg.Models[i].APIKey)
-		cfg.Models[i].Endpoint = strings.TrimRight(cfg.Models[i].Endpoint, "/")
-	}
+	applyAgentDeployDefaults(cfg, l.home)
+	normalizeModelsForLoad(cfg.Models)
 	return cfg, nil
+}
+
+func normalizeModelsForSave(models []configschema.ModelConfig) {
+	for i := range models {
+		models[i].Endpoint = strings.TrimRight(models[i].Endpoint, "/")
+	}
+}
+
+func preserveExistingModelAPIKeys(path string, models []configschema.ModelConfig) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var existing configschema.GlobalConfig
+	if err := yaml.Unmarshal(data, &existing); err != nil {
+		return
+	}
+	apiKeys := make(map[string]string, len(existing.Models))
+	for _, model := range existing.Models {
+		apiKeys[model.Name] = model.APIKey
+	}
+	for i := range models {
+		if apiKey, ok := apiKeys[models[i].Name]; ok && strings.Contains(apiKey, "${") {
+			models[i].APIKey = apiKey
+		}
+	}
+}
+
+func normalizeModelsForLoad(models []configschema.ModelConfig) {
+	for i := range models {
+		models[i].APIKey = configschema.ExpandEnv(models[i].APIKey)
+		models[i].Endpoint = strings.TrimRight(models[i].Endpoint, "/")
+	}
 }
 
 func (l *Loader) LoadCluster(name string) (*Cluster, error) {
@@ -88,7 +163,7 @@ func (l *Loader) LoadCluster(name string) (*Cluster, error) {
 		name = global.DefaultCluster
 	}
 	if name == "" {
-		return nil, fmt.Errorf("cluster name is required")
+		name = "default"
 	}
 
 	cluster := defaultClusterConfig()
@@ -151,8 +226,8 @@ func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
 	if cfg.Security.RiskAssessmentModel == "" {
 		cfg.Security.RiskAssessmentModel = "claude-sonnet"
 	}
-	if len(cfg.Security.CommandWhitelist) == 0 {
-		cfg.Security.CommandWhitelist = []string{"cat", "ls", "free", "df", "ps aux", "uname -a", "hostname", "uptime", "kubectl get"}
+	if len(cfg.Security.CommandBlacklist) == 0 {
+		cfg.Security.CommandBlacklist = []string{`.*\|\s*bash.*`}
 	}
 	if cfg.Memory.RulesTokenBudget == 0 {
 		cfg.Memory.RulesTokenBudget = 2000
@@ -165,10 +240,45 @@ func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
 	}
 }
 
+func applyAgentDeployDefaults(cfg *configschema.GlobalConfig, home string) {
+	if cfg.AgentDeploy.Binaries.AMD64 == "" {
+		cfg.AgentDeploy.Binaries.AMD64 = filepath.Join(home, "agent", "amd64", "conan-agent")
+	}
+	if cfg.AgentDeploy.Binaries.ARM64 == "" {
+		cfg.AgentDeploy.Binaries.ARM64 = filepath.Join(home, "agent", "arm64", "conan-agent")
+	}
+	if cfg.AgentDeploy.RemoteBinaryPath == "" {
+		cfg.AgentDeploy.RemoteBinaryPath = "/usr/local/bin/conan-agent"
+	}
+	if cfg.AgentDeploy.RemoteConfigPath == "" {
+		cfg.AgentDeploy.RemoteConfigPath = "/etc/conan-agent/config.yaml"
+	}
+	if cfg.AgentDeploy.SystemdUnitPath == "" {
+		cfg.AgentDeploy.SystemdUnitPath = "/etc/systemd/system/conan-agent.service"
+	}
+	cfg.AgentDeploy.Binaries.AMD64 = expandPath(cfg.AgentDeploy.Binaries.AMD64)
+	cfg.AgentDeploy.Binaries.ARM64 = expandPath(cfg.AgentDeploy.Binaries.ARM64)
+}
+
+func expandPath(path string) string {
+	path = configschema.ExpandEnv(path)
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
+	return path
+}
+
 func defaultClusterConfig() *configschema.ClusterConfig {
 	return &configschema.ClusterConfig{
 		Agent: configschema.AgentConfig{
-			Listen:    "0.0.0.0:9200",
+			Listen:    "0.0.0.0:9280",
 			RateLimit: 10,
 			LogLevel:  "info",
 		},
@@ -247,6 +357,7 @@ func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfi
 func effectiveAgent(node configschema.NodeConfig, cluster configschema.ClusterConfig) EffectiveAgentConfig {
 	port := portFromListen(cluster.Agent.Listen)
 	user := cluster.NodeDefaults.User
+	token := cluster.Agent.Token
 	if node.Agent != nil {
 		if node.Agent.Port != 0 {
 			port = node.Agent.Port
@@ -254,24 +365,27 @@ func effectiveAgent(node configschema.NodeConfig, cluster configschema.ClusterCo
 		if node.Agent.User != "" {
 			user = node.Agent.User
 		}
+		if node.Agent.Token != "" {
+			token = node.Agent.Token
+		}
 	}
 	return EffectiveAgentConfig{
 		Host:  node.Host,
 		Port:  port,
 		User:  user,
 		TLS:   cluster.Agent.TLS,
-		Token: configschema.ExpandEnv(cluster.Agent.Token),
+		Token: configschema.ExpandEnv(token),
 	}
 }
 
 func portFromListen(listen string) int {
 	idx := strings.LastIndex(listen, ":")
 	if idx == -1 || idx == len(listen)-1 {
-		return 9200
+		return 9280
 	}
 	port, err := strconv.Atoi(listen[idx+1:])
 	if err != nil || port == 0 {
-		return 9200
+		return 9280
 	}
 	return port
 }

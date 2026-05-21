@@ -31,7 +31,7 @@ type AgentConfig struct {
 
 func DefaultAgentConfig() *AgentConfig {
 	return &AgentConfig{
-		Listen:    "0.0.0.0:9200",
+		Listen:    "0.0.0.0:9280",
 		Token:     "changeme",
 		RateLimit: 10,
 		LogLevel:  "info",
@@ -41,17 +41,18 @@ func DefaultAgentConfig() *AgentConfig {
 // --- CLI-side config ---
 
 type GlobalConfig struct {
-	DefaultModel   string         `yaml:"default_model"`
-	DefaultCluster string         `yaml:"default_cluster"`
-	Models         []ModelConfig  `yaml:"models"`
-	Security       SecurityConfig `yaml:"security"`
-	Memory         MemoryConfig   `yaml:"memory"`
-	Logging        LoggingConfig  `yaml:"logging"`
+	DefaultModel   string            `yaml:"default_model"`
+	DefaultCluster string            `yaml:"default_cluster"`
+	Models         []ModelConfig     `yaml:"models"`
+	Security       SecurityConfig    `yaml:"security"`
+	Memory         MemoryConfig      `yaml:"memory"`
+	Logging        LoggingConfig     `yaml:"logging"`
+	AgentDeploy    AgentDeployConfig `yaml:"agent_deploy"`
 }
 
 type ModelConfig struct {
 	Name     string `yaml:"name"`
-	Type     string `yaml:"type"`     // "anthropic" or "openai"
+	Type     string `yaml:"type"` // "anthropic" or "openai"
 	Endpoint string `yaml:"endpoint"`
 	Model    string `yaml:"model"`
 	APIKey   string `yaml:"api_key"`
@@ -59,7 +60,7 @@ type ModelConfig struct {
 
 type SecurityConfig struct {
 	RiskAssessmentModel string   `yaml:"risk_assessment_model"`
-	CommandWhitelist    []string `yaml:"command_whitelist"`
+	CommandBlacklist    []string `yaml:"command_blacklist"`
 }
 
 type MemoryConfig struct {
@@ -68,19 +69,31 @@ type MemoryConfig struct {
 }
 
 type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	File   string `yaml:"file"`
-	Audit  bool   `yaml:"audit"`
+	Level string `yaml:"level"`
+	File  string `yaml:"file"`
+	Audit bool   `yaml:"audit"`
+}
+
+type AgentDeployConfig struct {
+	Binaries         AgentBinaryConfig `yaml:"binaries"`
+	RemoteBinaryPath string            `yaml:"remote_binary_path"`
+	RemoteConfigPath string            `yaml:"remote_config_path"`
+	SystemdUnitPath  string            `yaml:"systemd_unit_path"`
+}
+
+type AgentBinaryConfig struct {
+	AMD64 string `yaml:"amd64"`
+	ARM64 string `yaml:"arm64"`
 }
 
 // --- Cluster config ---
 
 type ClusterConfig struct {
-	Name         string        `yaml:"name"`
-	Description  string        `yaml:"description"`
-	Inherits     string        `yaml:"inherits"`
-	Agent        AgentConfig   `yaml:"agent"`
-	NodeDefaults NodeDefaults  `yaml:"node_defaults"`
+	Name         string       `yaml:"name"`
+	Description  string       `yaml:"description"`
+	Inherits     string       `yaml:"inherits"`
+	Agent        AgentConfig  `yaml:"agent"`
+	NodeDefaults NodeDefaults `yaml:"node_defaults"`
 }
 
 type NodeDefaults struct {
@@ -93,14 +106,16 @@ type NodeList struct {
 }
 
 type NodeConfig struct {
-	Name   string             `yaml:"name"`
-	Host   string             `yaml:"host"`
-	Labels []string           `yaml:"labels"`
-	Zone   string             `yaml:"zone,omitempty"`
-	Agent  *NodeAgentOverride `yaml:"agent,omitempty"`
+	Name             string             `yaml:"name"`
+	Host             string             `yaml:"host"`
+	Labels           []string           `yaml:"labels"`
+	Zone             string             `yaml:"zone,omitempty"`
+	CommandWhitelist []string           `yaml:"command_whitelist,omitempty"`
+	Agent            *NodeAgentOverride `yaml:"agent,omitempty"`
 }
 
 type NodeAgentOverride struct {
-	User string `yaml:"user"`
-	Port int    `yaml:"port"`
+	User  string `yaml:"user"`
+	Port  int    `yaml:"port"`
+	Token string `yaml:"token"`
 }

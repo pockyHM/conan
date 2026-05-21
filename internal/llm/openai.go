@@ -58,7 +58,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		return nil, err
 	}
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai api status %d: %s", httpResp.StatusCode, data)
+		return nil, &httpError{Status: httpResp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	return p.parseResponse(data)
 }
@@ -75,7 +75,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (<-ch
 	if httpResp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
-		return nil, fmt.Errorf("openai api status %d: %s", httpResp.StatusCode, data)
+		return nil, &httpError{Status: httpResp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	ch := make(chan ChatEvent, 20)
 	go p.handleStream(httpResp.Body, ch)

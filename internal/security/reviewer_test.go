@@ -27,10 +27,10 @@ func (s *stubProvider) ChatStream(_ context.Context, _ *llm.ChatRequest) (<-chan
 
 func TestReviewerWhitelistBypass(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
-		Whitelist: []string{"cat", "ls", "kubectl get"},
-		Provider:  &stubProvider{},
+		NodeWhitelists: map[string][]string{"node-01": {"cat /etc/hosts", "ls", "kubectl get"}},
+		Provider:       &stubProvider{},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat /etc/hosts"}`)
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat /etc/hosts"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,10 +42,61 @@ func TestReviewerWhitelistBypass(t *testing.T) {
 	}
 }
 
+func TestReviewerWhitelistRequiresExactCommand(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{
+		NodeWhitelists: map[string][]string{"node-01": {"cat"}},
+		Provider: &stubProvider{
+			response: `{"risk_level":"confirm","reason":"not exact"}`,
+		},
+	})
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat test.sh | bash"}`, []string{"node-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Level != RiskConfirm {
+		t.Fatalf("prefix-like command should go to model assessment, got %v", result.Level)
+	}
+}
+
+func TestReviewerBlacklistOverridesNodeWhitelist(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{
+		NodeWhitelists: map[string][]string{"node-01": {"cat test.sh | bash"}},
+		Blacklist:      []string{`.*\|\s*bash.*`},
+		Provider: &stubProvider{
+			response: `{"risk_level":"confirm","reason":"pipe to bash"}`,
+		},
+	})
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat test.sh | bash"}`, []string{"node-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Level != RiskConfirm || result.Reason != "pipe to bash" {
+		t.Fatalf("blacklisted command should be model-assessed, got %#v", result)
+	}
+}
+
+func TestReviewerWhitelistRequiresEveryTargetNode(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{
+		NodeWhitelists: map[string][]string{
+			"node-01": {"uptime"},
+			"node-02": {"df -h"},
+		},
+		Provider: &stubProvider{
+			response: `{"risk_level":"confirm","reason":"node missing allowlist entry"}`,
+		},
+	})
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`, []string{"node-01", "node-02"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Level != RiskConfirm {
+		t.Fatalf("command not whitelisted on every target should be assessed, got %v", result.Level)
+	}
+}
+
 func TestReviewerAlwaysAllowReadOnlyTools(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
-		Whitelist: nil,
-		Provider:  &stubProvider{},
+		Provider: &stubProvider{},
 	})
 	readOnlyTools := []struct {
 		name  string
@@ -67,7 +118,7 @@ func TestReviewerAlwaysAllowReadOnlyTools(t *testing.T) {
 		{"k8s/logs", `{"pod":"nginx"}`},
 	}
 	for _, tc := range readOnlyTools {
-		result, err := r.Review(context.Background(), tc.name, tc.input)
+		result, err := r.Review(context.Background(), tc.name, tc.input, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -79,12 +130,11 @@ func TestReviewerAlwaysAllowReadOnlyTools(t *testing.T) {
 
 func TestReviewerModelAssessment(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
-		Whitelist: []string{"cat"},
 		Provider: &stubProvider{
 			response: `{"risk_level":"confirm","reason":"Restarts service causing downtime","suggestion":"Use rolling restart"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"systemctl restart nginx"}`)
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"systemctl restart nginx"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,12 +148,11 @@ func TestReviewerModelAssessment(t *testing.T) {
 
 func TestReviewerModelDeny(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
-		Whitelist: []string{},
 		Provider: &stubProvider{
 			response: `{"risk_level":"deny","reason":"Destructive operation"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"rm -rf /"}`)
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"rm -rf /"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,16 +163,15 @@ func TestReviewerModelDeny(t *testing.T) {
 
 func TestReviewerSessionCache(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
-		Whitelist: []string{},
 		Provider: &stubProvider{
 			response: `{"risk_level":"allow","reason":"ok"}`,
 		},
 	})
-	result1, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`)
+	result1, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result2, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`)
+	result2, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +182,10 @@ func TestReviewerSessionCache(t *testing.T) {
 
 func TestReviewerNoProviderDefaultsToConfirm(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
-		Whitelist: []string{"cat"},
-		Provider:  nil,
+		NodeWhitelists: map[string][]string{"node-01": {"cat"}},
+		Provider:       nil,
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"systemctl restart nginx"}`)
+	result, err := r.Review(context.Background(), "shell/run", `{"command":"systemctl restart nginx"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}

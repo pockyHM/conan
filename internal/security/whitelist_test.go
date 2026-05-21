@@ -12,16 +12,16 @@ func TestWhitelistMatchExact(t *testing.T) {
 	}
 }
 
-func TestWhitelistMatchPrefix(t *testing.T) {
+func TestWhitelistDoesNotMatchPrefix(t *testing.T) {
 	w := NewWhitelist([]string{"kubectl get", "ps aux", "docker ps"})
-	if !w.Match("kubectl get pods -n default") {
-		t.Fatal("prefix match should pass")
+	if w.Match("kubectl get pods -n default") {
+		t.Fatal("prefix match should not pass")
 	}
 	if !w.Match("ps aux") {
-		t.Fatal("exact match of prefix entry should pass")
+		t.Fatal("exact match should pass")
 	}
-	if !w.Match("docker ps --filter name=nginx") {
-		t.Fatal("prefix match should pass")
+	if w.Match("docker ps --filter name=nginx") {
+		t.Fatal("prefix match should not pass")
 	}
 }
 
@@ -44,10 +44,10 @@ func TestWhitelistEmpty(t *testing.T) {
 
 func TestWhitelistTrimSpace(t *testing.T) {
 	w := NewWhitelist([]string{"  cat  ", " ls "})
-	if !w.Match("cat /etc/hosts") {
-		t.Fatal("trimmed entry should match")
+	if w.Match("cat /etc/hosts") {
+		t.Fatal("trimmed entry should not match command prefix")
 	}
-	if !w.Match("ls -la") {
+	if !w.Match("ls") {
 		t.Fatal("trimmed entry should match")
 	}
 }

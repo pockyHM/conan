@@ -2,11 +2,19 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pockyHM/conan/internal/logging"
+	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
 func executeCommand(args ...string) (string, string, error) {
@@ -49,6 +57,7 @@ func TestTUICommandRegistered(t *testing.T) {
 func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
+	defer logging.Close()
 
 	input := strings.NewReader("")
 	var output bytes.Buffer
@@ -73,5 +82,261 @@ func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("tui program was not started")
+	}
+}
+
+func TestTUIProgramOptionsDoNotCaptureMouse(t *testing.T) {
+	input := strings.NewReader("")
+	var output bytes.Buffer
+	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
+
+	startupOptions := reflect.ValueOf(program).Elem().FieldByName("startupOptions").Int()
+	const (
+		withMouseCellMotion = int64(1 << 1)
+		withMouseAllMotion  = int64(1 << 2)
+	)
+	if startupOptions&withMouseCellMotion != 0 || startupOptions&withMouseAllMotion != 0 {
+		t.Fatal("tui should not enable mouse capture; terminal text selection must remain available")
+	}
+}
+
+func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
+	oldRun := runTeaProgram
+	defer func() { runTeaProgram = oldRun }()
+
+	home := t.TempDir()
+	logFile := filepath.Join(home, "logs", "conan.jsonl")
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  level: debug\n  file: "+logFile+"\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+		logging.Write("tui logging initialized")
+		return nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--home", home, "tui"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("tui: %v", err)
+	}
+
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(contents), "tui logging initialized") {
+		t.Fatalf("log file = %q, want tui log message", contents)
+	}
+}
+
+func TestTUICommandInitializesAuditLogger(t *testing.T) {
+	oldRun := runTeaProgram
+	defer func() { runTeaProgram = oldRun }()
+
+	home := t.TempDir()
+	logFile := filepath.Join(home, "logs", "conan.jsonl")
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  audit: true\n  file: "+logFile+"\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+		return nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--home", home, "tui"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("tui: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(home, "logs", "audit.log")); err != nil {
+		t.Fatalf("audit log was not created next to configured log file: %v", err)
+	}
+}
+
+func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
+	oldRun := runTeaProgram
+	defer func() { runTeaProgram = oldRun }()
+	defer logging.Close()
+
+	home := t.TempDir()
+	previousLogFile := filepath.Join(home, "previous.jsonl")
+	if err := logging.Setup(logging.Config{File: previousLogFile}); err != nil {
+		t.Fatalf("setup previous logger: %v", err)
+	}
+	logging.Write("before tui")
+
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  level: debug\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+		logging.Write("discarded tui log")
+		return nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--home", home, "tui"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("tui: %v", err)
+	}
+
+	contents, err := os.ReadFile(previousLogFile)
+	if err != nil {
+		t.Fatalf("read previous log file: %v", err)
+	}
+	if strings.Contains(string(contents), "discarded tui log") {
+		t.Fatalf("empty logging file did not reinitialize logger to discard: %q", contents)
+	}
+}
+
+func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
+	oldRun := runTeaProgram
+	oldVersion := version
+	defer func() {
+		runTeaProgram = oldRun
+		version = oldVersion
+	}()
+	defer logging.Close()
+
+	version = "1.2.3"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/rpc" {
+			t.Fatalf("request = %s %s, want POST /rpc", r.Method, r.URL.Path)
+		}
+		var req mcpproto.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		switch req.Method {
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, map[string]interface{}{"tools": []interface{}{}}))
+		case "initialize":
+			_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, mcpproto.InitializeResult{
+				ProtocolVersion: "2024-11-05",
+				ServerInfo:      mcpproto.ServerInfo{Name: "conan-agent", Version: "1.2.2"},
+			}))
+		default:
+			t.Fatalf("method = %q, want tools/list or initialize", req.Method)
+		}
+	}))
+	defer srv.Close()
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "clusters", "test"), 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	config := "default_cluster: test\nlogging:\n  level: debug\n"
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(config), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cluster := "agent:\n  listen: 127.0.0.1:9280\n"
+	if err := os.WriteFile(filepath.Join(home, "clusters", "test", "cluster.yaml"), []byte(cluster), 0644); err != nil {
+		t.Fatalf("write cluster: %v", err)
+	}
+	nodes := "nodes:\n  - name: node-a\n    host: 127.0.0.1\n    agent:\n      port: " + strings.TrimPrefix(srv.URL, "http://127.0.0.1:") + "\n"
+	if err := os.WriteFile(filepath.Join(home, "clusters", "test", "nodes.yaml"), []byte(nodes), 0644); err != nil {
+		t.Fatalf("write nodes: %v", err)
+	}
+
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+		cmd := model.Init()
+		if cmd == nil {
+			t.Fatal("Init() returned nil, want version check command")
+		}
+		msg := cmd()
+		// Init batches tool fetch with version check; execute all and apply
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, c := range batch {
+				inner := c()
+				next, _ := model.Update(inner)
+				model = next
+			}
+		} else {
+			model.Update(msg)
+		}
+		view := model.View()
+		if !strings.Contains(view, "Version warning") || !strings.Contains(view, "node-a: 1.2.2 (expected 1.2.3)") {
+			t.Fatalf("view missing version warning:\n%s", view)
+		}
+		return nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--home", home, "tui"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("tui: %v", err)
+	}
+}
+
+func TestNodeAddCommandRegistered(t *testing.T) {
+	stdout, _, err := executeCommand("node", "add", "--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(stdout, "add <hostname-or-ip>") {
+		t.Fatalf("help output = %q", stdout)
+	}
+	if !strings.Contains(stdout, "--no-deploy") || !strings.Contains(stdout, "--rotate-token") {
+		t.Fatalf("help output missing node add flags: %q", stdout)
+	}
+}
+
+func TestNodeAddNoDeployWritesConfig(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "clusters", "prod"), 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: prod\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "clusters", "prod", "cluster.yaml"), []byte("name: prod\n"), 0644); err != nil {
+		t.Fatalf("write cluster: %v", err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "node", "add", "127.0.0.1", "--no-deploy", "--port", "9300")
+	if err != nil {
+		t.Fatalf("node add: %v", err)
+	}
+	if !strings.Contains(stdout, "node added: 127.0.0.1") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "clusters", "prod", "nodes.yaml"))
+	if err != nil {
+		t.Fatalf("read nodes.yaml: %v", err)
+	}
+	contents := string(data)
+	for _, want := range []string{"name: 127.0.0.1", "host: 127.0.0.1", "port: 9300", "token:"} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("nodes.yaml missing %q:\n%s", want, contents)
+		}
+	}
+}
+
+func TestNodeAddAutoCreatesDefaultCluster(t *testing.T) {
+	home := t.TempDir()
+
+	stdout, _, err := executeCommand("--home", home, "node", "add", "10.0.0.1", "--no-deploy")
+	if err != nil {
+		t.Fatalf("node add: %v", err)
+	}
+	if !strings.Contains(stdout, "node added: 10.0.0.1") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	clusterYAML := filepath.Join(home, "clusters", "default", "cluster.yaml")
+	if _, err := os.Stat(clusterYAML); err != nil {
+		t.Fatalf("default cluster.yaml not created: %v", err)
+	}
+	nodesYAML := filepath.Join(home, "clusters", "default", "nodes.yaml")
+	data, err := os.ReadFile(nodesYAML)
+	if err != nil {
+		t.Fatalf("read nodes.yaml: %v", err)
+	}
+	contents := string(data)
+	for _, want := range []string{"name: 10.0.0.1", "host: 10.0.0.1"} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("nodes.yaml missing %q:\n%s", want, contents)
+		}
 	}
 }

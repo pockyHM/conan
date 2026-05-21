@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/pockyHM/conan/pkg/configschema"
 )
 
 func writeFile(t *testing.T, path string, content string) {
@@ -45,6 +48,9 @@ models:
 	if cfg.Security.RiskAssessmentModel != "claude-sonnet" {
 		t.Fatalf("RiskAssessmentModel = %q", cfg.Security.RiskAssessmentModel)
 	}
+	if strings.Join(cfg.Security.CommandBlacklist, ",") != `.*\|\s*bash.*` {
+		t.Fatalf("CommandBlacklist = %#v", cfg.Security.CommandBlacklist)
+	}
 	if cfg.Memory.RulesTokenBudget != 2000 {
 		t.Fatalf("RulesTokenBudget = %d", cfg.Memory.RulesTokenBudget)
 	}
@@ -64,10 +70,245 @@ func TestLoadGlobalMissingFileUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadGlobalAppliesAgentDeployDefaults(t *testing.T) {
+	home := t.TempDir()
+
+	loader := NewLoader(home)
+	cfg, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+
+	wantAMD64 := filepath.Join(home, "agent", "amd64", "conan-agent")
+	wantARM64 := filepath.Join(home, "agent", "arm64", "conan-agent")
+	if cfg.AgentDeploy.Binaries.AMD64 != wantAMD64 {
+		t.Fatalf("amd64 binary = %q, want %q", cfg.AgentDeploy.Binaries.AMD64, wantAMD64)
+	}
+	if cfg.AgentDeploy.Binaries.ARM64 != wantARM64 {
+		t.Fatalf("arm64 binary = %q, want %q", cfg.AgentDeploy.Binaries.ARM64, wantARM64)
+	}
+	if cfg.AgentDeploy.RemoteBinaryPath != "/usr/local/bin/conan-agent" {
+		t.Fatalf("remote binary path = %q", cfg.AgentDeploy.RemoteBinaryPath)
+	}
+	if cfg.AgentDeploy.RemoteConfigPath != "/etc/conan-agent/config.yaml" {
+		t.Fatalf("remote config path = %q", cfg.AgentDeploy.RemoteConfigPath)
+	}
+	if cfg.AgentDeploy.SystemdUnitPath != "/etc/systemd/system/conan-agent.service" {
+		t.Fatalf("systemd unit path = %q", cfg.AgentDeploy.SystemdUnitPath)
+	}
+}
+
+func TestLoadGlobalExpandsAgentDeployBinaryPaths(t *testing.T) {
+	home := t.TempDir()
+	customRoot := filepath.Join(home, "custom")
+	t.Setenv("CONAN_AGENT_ROOT", customRoot)
+	writeFile(t, filepath.Join(home, "config.yaml"), `agent_deploy:
+  binaries:
+    amd64: ${CONAN_AGENT_ROOT}/amd64/agent
+    arm64: ~/agents/arm64/conan-agent
+  remote_binary_path: /opt/conan/conan-agent
+`)
+
+	loader := NewLoader(home)
+	cfg, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+
+	if cfg.AgentDeploy.Binaries.AMD64 != filepath.Join(customRoot, "amd64", "agent") {
+		t.Fatalf("amd64 path = %q", cfg.AgentDeploy.Binaries.AMD64)
+	}
+	if !strings.HasSuffix(cfg.AgentDeploy.Binaries.ARM64, filepath.Join("agents", "arm64", "conan-agent")) {
+		t.Fatalf("arm64 path was not expanded from home: %q", cfg.AgentDeploy.Binaries.ARM64)
+	}
+	if cfg.AgentDeploy.RemoteBinaryPath != "/opt/conan/conan-agent" {
+		t.Fatalf("remote binary path = %q", cfg.AgentDeploy.RemoteBinaryPath)
+	}
+	if cfg.AgentDeploy.RemoteConfigPath != "/etc/conan-agent/config.yaml" {
+		t.Fatalf("remote config path default = %q", cfg.AgentDeploy.RemoteConfigPath)
+	}
+}
+
+func TestSaveGlobalCreatesConfigWithPrivatePermissions(t *testing.T) {
+	home := t.TempDir()
+	loader := NewLoader(home)
+	cfg := &configschema.GlobalConfig{
+		DefaultModel: "qwen-prod",
+		Models: []configschema.ModelConfig{{
+			Name:     "qwen-prod",
+			Type:     "openai",
+			Endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+			Model:    "qwen-max",
+			APIKey:   "sk-test",
+		}},
+	}
+
+	if err := loader.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+
+	path := filepath.Join(home, "config.yaml")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("mode = %o, want 0600", got)
+	}
+
+	loaded, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if loaded.DefaultModel != "qwen-prod" {
+		t.Fatalf("DefaultModel = %q", loaded.DefaultModel)
+	}
+	if len(loaded.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(loaded.Models))
+	}
+	if loaded.Models[0].Endpoint != "https://dashscope.aliyuncs.com/compatible-mode/v1" {
+		t.Fatalf("endpoint = %q", loaded.Models[0].Endpoint)
+	}
+	if loaded.Models[0].APIKey != "sk-test" {
+		t.Fatalf("api key = %q", loaded.Models[0].APIKey)
+	}
+}
+
+func TestSaveGlobalPreservesUnrelatedFields(t *testing.T) {
+	home := t.TempDir()
+	loader := NewLoader(home)
+	amd64Path := filepath.Join(home, "bin", "amd64", "conan-agent")
+	arm64Path := filepath.Join(home, "bin", "arm64", "conan-agent")
+	remoteBinaryPath := "/opt/conan-agent"
+	remoteConfigPath := "/etc/conan-agent.yaml"
+	systemdUnitPath := "/etc/systemd/system/conan-agent.service"
+	cfg := &configschema.GlobalConfig{
+		DefaultCluster: "prod",
+		Security: configschema.SecurityConfig{
+			RiskAssessmentModel: "claude-risk",
+			CommandBlacklist:    []string{`.*\|\s*bash.*`, `.*curl.*sh.*`},
+		},
+		Memory: configschema.MemoryConfig{
+			RulesTokenBudget:     123,
+			KnowledgeTokenBudget: 456,
+		},
+		Logging: configschema.LoggingConfig{
+			Level: "debug",
+			File:  "/tmp/conan.log",
+			Audit: true,
+		},
+		AgentDeploy: configschema.AgentDeployConfig{
+			Binaries: configschema.AgentBinaryConfig{
+				AMD64: amd64Path,
+				ARM64: arm64Path,
+			},
+			RemoteBinaryPath: remoteBinaryPath,
+			RemoteConfigPath: remoteConfigPath,
+			SystemdUnitPath:  systemdUnitPath,
+		},
+		Models: []configschema.ModelConfig{{Name: "kimi", Type: "openai", Endpoint: "https://api.moonshot.cn/v1", Model: "kimi-k2", APIKey: "moon"}},
+	}
+
+	if err := loader.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	loaded, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+
+	if loaded.DefaultCluster != "prod" {
+		t.Fatalf("DefaultCluster = %q", loaded.DefaultCluster)
+	}
+	if loaded.Security.RiskAssessmentModel != "claude-risk" || strings.Join(loaded.Security.CommandBlacklist, ",") != `.*\|\s*bash.*,.*curl.*sh.*` {
+		t.Fatalf("security = %#v", loaded.Security)
+	}
+	if loaded.Memory.RulesTokenBudget != 123 || loaded.Memory.KnowledgeTokenBudget != 456 {
+		t.Fatalf("memory = %#v", loaded.Memory)
+	}
+	if loaded.Logging.Level != "debug" || loaded.Logging.File != "/tmp/conan.log" || !loaded.Logging.Audit {
+		t.Fatalf("logging = %#v", loaded.Logging)
+	}
+	if loaded.AgentDeploy.Binaries.AMD64 != amd64Path {
+		t.Fatalf("agent deploy amd64 binary = %q, want %q", loaded.AgentDeploy.Binaries.AMD64, amd64Path)
+	}
+	if loaded.AgentDeploy.Binaries.ARM64 != arm64Path {
+		t.Fatalf("agent deploy arm64 binary = %q, want %q", loaded.AgentDeploy.Binaries.ARM64, arm64Path)
+	}
+	if loaded.AgentDeploy.RemoteBinaryPath != remoteBinaryPath {
+		t.Fatalf("agent deploy remote binary path = %q, want %q", loaded.AgentDeploy.RemoteBinaryPath, remoteBinaryPath)
+	}
+	if loaded.AgentDeploy.RemoteConfigPath != remoteConfigPath {
+		t.Fatalf("agent deploy remote config path = %q, want %q", loaded.AgentDeploy.RemoteConfigPath, remoteConfigPath)
+	}
+	if loaded.AgentDeploy.SystemdUnitPath != systemdUnitPath {
+		t.Fatalf("agent deploy systemd unit path = %q, want %q", loaded.AgentDeploy.SystemdUnitPath, systemdUnitPath)
+	}
+}
+
+func TestSaveGlobalDoesNotExpandAPIKeyBeforeWriting(t *testing.T) {
+	home := t.TempDir()
+	loader := NewLoader(home)
+	cfg := &configschema.GlobalConfig{
+		Models: []configschema.ModelConfig{{
+			Name:     "env-model",
+			Type:     "openai",
+			Endpoint: "https://api.openai.com/v1",
+			Model:    "gpt-4.1",
+			APIKey:   "${OPENAI_API_KEY}",
+		}},
+	}
+
+	if err := loader.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "${OPENAI_API_KEY}") {
+		t.Fatalf("saved config = %s, want unexpanded api key", data)
+	}
+}
+
+func TestSaveGlobalPreservesExistingAPIKeyPlaceholders(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OPENAI_API_KEY", "expanded-secret")
+	writeFile(t, filepath.Join(home, "config.yaml"), `default_model: env-model
+models:
+  - name: env-model
+    type: openai
+    endpoint: https://api.openai.com/v1
+    model: gpt-4.1
+    api_key: ${OPENAI_API_KEY}
+`)
+
+	loader := NewLoader(home)
+	cfg, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.Models[0].APIKey != "expanded-secret" {
+		t.Fatalf("APIKey = %q", cfg.Models[0].APIKey)
+	}
+	cfg.DefaultModel = "env-model"
+
+	if err := loader.SaveGlobal(cfg); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "${OPENAI_API_KEY}") {
+		t.Fatalf("saved config = %s, want original api key placeholder", data)
+	}
+}
+
 func TestLoadClusterMergesBaseClusterAndNode(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, "clusters", "base.yaml"), `agent:
-  listen: 0.0.0.0:9200
+  listen: 0.0.0.0:9280
   token: base-token
   tls: false
   audit_log: /tmp/base-audit.log
@@ -121,7 +362,7 @@ node_defaults:
 		t.Fatalf("nodes = %d", len(cluster.Nodes))
 	}
 	master := cluster.Nodes[0]
-	if master.Agent.User != "deploy" || master.Agent.Port != 9200 {
+	if master.Agent.User != "deploy" || master.Agent.Port != 9280 {
 		t.Fatalf("master agent = %+v", master.Agent)
 	}
 	db := cluster.Nodes[1]
@@ -133,7 +374,7 @@ node_defaults:
 func TestLoadClusterAllowsTLSFalseOverride(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, "clusters", "base.yaml"), `agent:
-  listen: 0.0.0.0:9200
+  listen: 0.0.0.0:9280
   tls: true
 node_defaults:
   user: root
@@ -153,12 +394,39 @@ agent:
 	}
 }
 
+func TestLoadClusterNodeTokenOverridesClusterToken(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), `name: prod
+agent:
+  token: cluster-token
+`)
+	writeFile(t, filepath.Join(home, "clusters", "prod", "nodes.yaml"), `nodes:
+  - name: web-1
+    host: 10.0.0.11
+    agent:
+      token: node-token
+  - name: web-2
+    host: 10.0.0.12
+`)
+
+	cluster, err := NewLoader(home).LoadCluster("prod")
+	if err != nil {
+		t.Fatalf("LoadCluster: %v", err)
+	}
+	if cluster.Nodes[0].Agent.Token != "node-token" {
+		t.Fatalf("web-1 token = %q", cluster.Nodes[0].Agent.Token)
+	}
+	if cluster.Nodes[1].Agent.Token != "cluster-token" {
+		t.Fatalf("web-2 token = %q", cluster.Nodes[1].Agent.Token)
+	}
+}
+
 func TestListClusters(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), `name: prod`)
 	writeFile(t, filepath.Join(home, "clusters", "staging", "cluster.yaml"), `name: staging`)
 	writeFile(t, filepath.Join(home, "clusters", "base.yaml"), `agent:
-  listen: 0.0.0.0:9200
+  listen: 0.0.0.0:9280
 `)
 
 	loader := NewLoader(home)

@@ -58,7 +58,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
 		return nil, err
 	}
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic api status %d: %s", httpResp.StatusCode, data)
+		return nil, &httpError{Status: httpResp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	return p.parseResponse(data)
 }
@@ -75,7 +75,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req *ChatRequest) (<
 	if httpResp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
-		return nil, fmt.Errorf("anthropic api status %d: %s", httpResp.StatusCode, data)
+		return nil, &httpError{Status: httpResp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	ch := make(chan ChatEvent, 20)
 	go p.handleStream(httpResp.Body, ch)
@@ -164,10 +164,10 @@ func (p *AnthropicProvider) handleStream(reader io.ReadCloser, ch chan<- ChatEve
 			Type         string `json:"type"`
 			Index        int    `json:"index"`
 			ContentBlock struct {
-				Type  string `json:"type"`
-				Text  string `json:"text"`
-				ID    string `json:"id"`
-				Name  string `json:"name"`
+				Type  string   `json:"type"`
+				Text  string   `json:"text"`
+				ID    string   `json:"id"`
+				Name  string   `json:"name"`
 				Input struct{} `json:"input"`
 			} `json:"content_block"`
 			Delta struct {

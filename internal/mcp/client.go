@@ -64,7 +64,11 @@ func (c *Client) Ping(ctx context.Context) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("health check failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return &rpcError{
+			Code:       resp.StatusCode,
+			HTTPStatus: resp.StatusCode,
+			Message:    fmt.Sprintf("health check failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+		}
 	}
 	return nil
 }
@@ -138,7 +142,11 @@ func (c *Client) rpc(ctx context.Context, method string, params interface{}) (js
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("rpc http status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, &rpcError{
+			Code:       resp.StatusCode,
+			HTTPStatus: resp.StatusCode,
+			Message:    fmt.Sprintf("rpc http status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+		}
 	}
 
 	var envelope struct {

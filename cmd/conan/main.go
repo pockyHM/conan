@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -12,19 +13,76 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	cfgloader "github.com/pockyHM/conan/internal/config"
 	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/internal/credentials"
+	"github.com/pockyHM/conan/internal/deploy"
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/logging"
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/tui"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var version = "dev"
 
 var runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
-	_, err := tea.NewProgram(model, tea.WithInput(in), tea.WithOutput(out)).Run()
+	_, err := tea.NewProgram(model, teaProgramOptions(in, out)...).Run()
 	return err
+}
+
+func teaProgramOptions(in io.Reader, out io.Writer) []tea.ProgramOption {
+	return []tea.ProgramOption{
+		tea.WithInput(in),
+		tea.WithOutput(out),
+		tea.WithAltScreen(),
+	}
+}
+
+type cliPrompter struct {
+	in  io.Reader
+	out io.Writer
+}
+
+func (p cliPrompter) PromptUsername(defaultValue string) (string, error) {
+	fmt.Fprint(p.out, "SSH username: ")
+	reader := bufio.NewReader(p.in)
+	value, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultValue, nil
+	}
+	return value, nil
+}
+
+func (p cliPrompter) PromptPassword() (string, error) {
+	fmt.Fprint(p.out, "SSH password: ")
+	if file, ok := p.in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		data, err := term.ReadPassword(int(file.Fd()))
+		fmt.Fprintln(p.out)
+		return string(data), err
+	}
+	reader := bufio.NewReader(p.in)
+	value, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func (p cliPrompter) PromptIP(hostname string) (string, error) {
+	fmt.Fprintf(p.out, "Hostname %s could not be resolved. Enter IP address: ", hostname)
+	reader := bufio.NewReader(p.in)
+	value, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func main() {
@@ -146,10 +204,20 @@ func newRootCommand() *cobra.Command {
 		},
 	})
 
-	tuiCmd := &cobra.Command{
-		Use:   "tui",
-		Short: "Start the interactive TUI",
-		Args:  cobra.NoArgs,
+	nodeCmd := &cobra.Command{Use: "node", Short: "Node management commands"}
+	var nodeAddUser string
+	var nodeAddPassword string
+	var nodeAddSSHPort int
+	var nodeAddAgentPort int
+	var nodeAddName string
+	var nodeAddAgentBin string
+	var nodeAddNoDeploy bool
+	var nodeAddUpdate bool
+	var nodeAddRotateToken bool
+	nodeAddCmd := &cobra.Command{
+		Use:   "add <hostname-or-ip>",
+		Short: "Add a node and deploy conan-agent",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			loader := cfgloader.NewLoader(home)
 			global, err := loader.LoadGlobal()
@@ -160,10 +228,121 @@ func newRootCommand() *cobra.Command {
 			if selectedCluster == "" {
 				selectedCluster = global.DefaultCluster
 			}
+			if selectedCluster == "" {
+				selectedCluster = "default"
+			}
+			cluster, err := loader.LoadCluster(selectedCluster)
+			if err != nil {
+				return err
+			}
+			sshPort := nodeAddSSHPort
+			if sshPort == 0 {
+				sshPort = cluster.Cluster.NodeDefaults.SSHPort
+			}
+			if sshPort == 0 {
+				sshPort = 22
+			}
+			agentPort := nodeAddAgentPort
+			if agentPort == 0 {
+				agentPort = 9280
+			}
+			service := nodeadd.Service{
+				Credentials: credentials.NewStore(loader.Home()),
+				Prompter:    cliPrompter{in: cmd.InOrStdin(), out: cmd.OutOrStdout()},
+				Resolver:    nodeadd.NetResolver{},
+				Writer:      nodeadd.ConfigNodeWriter{Home: loader.Home()},
+				Deployer:    deploy.NewNativeDeployer(),
+				Health:      nodeadd.MCPHealthChecker{},
+			}
+			result, err := service.Add(cmd.Context(), nodeadd.Request{
+				Home:             loader.Home(),
+				ClusterName:      selectedCluster,
+				Input:            args[0],
+				Name:             nodeAddName,
+				Username:         nodeAddUser,
+				Password:         nodeAddPassword,
+				SSHPort:          sshPort,
+				AgentPort:        agentPort,
+				NoDeploy:         nodeAddNoDeploy,
+				Update:           nodeAddUpdate,
+				RotateToken:      nodeAddRotateToken,
+				AgentBinOverride: nodeAddAgentBin,
+				DeployConfig:     global.AgentDeploy,
+				KnownHostsPath:   filepath.Join(loader.Home(), "known_hosts"),
+				TLS:              cluster.Cluster.Agent.TLS,
+			})
+			if err != nil {
+				return err
+			}
+			if result.Deployed {
+				fmt.Fprintf(cmd.OutOrStdout(), "node added and deployed: %s\n", result.Node.Name)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "node added: %s\n", result.Node.Name)
+			}
+			return nil
+		},
+	}
+	nodeAddCmd.Flags().StringVarP(&nodeAddUser, "user", "u", "", "SSH username")
+	nodeAddCmd.Flags().StringVarP(&nodeAddPassword, "password", "p", "", "SSH password")
+	nodeAddCmd.Flags().IntVar(&nodeAddSSHPort, "ssh-port", 0, "SSH port")
+	nodeAddCmd.Flags().IntVar(&nodeAddAgentPort, "port", 9280, "Agent listen port")
+	nodeAddCmd.Flags().StringVar(&nodeAddName, "name", "", "Node name override")
+	nodeAddCmd.Flags().StringVar(&nodeAddAgentBin, "agent-bin", "", "Local conan-agent binary path override")
+	nodeAddCmd.Flags().BoolVar(&nodeAddNoDeploy, "no-deploy", false, "Only write node configuration")
+	nodeAddCmd.Flags().BoolVar(&nodeAddUpdate, "update", false, "Update an existing node")
+	nodeAddCmd.Flags().BoolVar(&nodeAddRotateToken, "rotate-token", false, "Rotate the node agent token while updating")
+	nodeCmd.AddCommand(nodeAddCmd)
+
+	tuiCmd := &cobra.Command{
+		Use:   "tui",
+		Short: "Start the interactive TUI",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loader := cfgloader.NewLoader(home)
+			global, err := loader.LoadGlobal()
+			if err != nil {
+				return err
+			}
+			logFile := global.Logging.File
+			if strings.HasPrefix(logFile, "~/") {
+				if userHome, err := os.UserHomeDir(); err == nil {
+					logFile = filepath.Join(userHome, strings.TrimPrefix(logFile, "~/"))
+				}
+			}
+			if err := logging.Setup(logging.Config{Level: global.Logging.Level, File: logFile}); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize logging: %v\n", err)
+			} else {
+				defer logging.Close()
+			}
+
+			var auditLog *security.AuditLogger
+			if global.Logging.Audit {
+				auditPath := filepath.Join(loader.Home(), "audit.log")
+				if logFile != "" {
+					auditPath = filepath.Join(filepath.Dir(logFile), "audit.log")
+				}
+				var auditErr error
+				auditLog, auditErr = security.NewAuditLogger(auditPath)
+				if auditErr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize audit logging: %v\n", auditErr)
+				} else {
+					defer auditLog.Close()
+				}
+			}
+			selectedCluster := clusterName
+			if selectedCluster == "" {
+				selectedCluster = global.DefaultCluster
+			}
+			if selectedCluster == "" {
+				selectedCluster = "default"
+			}
 
 			provider, modelName, err := llm.NewProvider(global.Models, global.DefaultModel)
 			if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+			}
+			if provider != nil {
+				provider = llm.NewRetryProvider(provider, llm.DefaultRetryConfig())
 			}
 
 			var clients map[string]*mcp.Client
@@ -196,21 +375,25 @@ func newRootCommand() *cobra.Command {
 			}
 
 			var nodeInfos []tui.NodeInfo
+			nodeWhitelists := make(map[string][]string)
 			if cluster != nil {
 				for _, node := range cluster.Nodes {
 					nodeInfos = append(nodeInfos, tui.NodeInfo{
-						Name: node.Name,
-						Host: node.Agent.Host,
+						Name:             node.Name,
+						Host:             node.Agent.Host,
+						CommandWhitelist: node.CommandWhitelist,
 					})
+					nodeWhitelists[node.Name] = node.CommandWhitelist
 				}
 			}
 
 			var reviewer *security.Reviewer
 			if provider != nil {
 				reviewer = security.NewReviewer(security.ReviewerConfig{
-					Whitelist: global.Security.CommandWhitelist,
-					Provider:  provider,
-					ModelName: modelName,
+					NodeWhitelists: nodeWhitelists,
+					Blacklist:      global.Security.CommandBlacklist,
+					Provider:       provider,
+					ModelName:      modelName,
 				})
 			}
 
@@ -225,19 +408,22 @@ func newRootCommand() *cobra.Command {
 			model := tui.NewModel(tui.ModelConfig{
 				Cluster:     selectedCluster,
 				Model:       modelName,
+				Version:     version,
 				Provider:    provider,
 				Conv:        conv,
 				Clients:     clients,
 				Tools:       agentTools,
 				Nodes:       nodeInfos,
 				Reviewer:    reviewer,
+				AuditLogger: auditLog,
+				ConfigHome:  loader.Home(),
 				MemoryStore: memStore,
 			})
 			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 
-	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, tuiCmd)
+	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
 }
 
