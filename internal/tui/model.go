@@ -315,8 +315,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.conv != nil {
 				m.conv.AddToolResult(msg.call.ID, output)
 			}
-			m.markStreamToolDone(msg.streamID)
-			return m.resumeAfterStreamTools(msg.streamID)
+			return m.completeToolAndResume(msg.streamID, msg.call)
 		}
 		switch msg.assessment.Level {
 		case security.RiskAllow:
@@ -329,8 +328,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.conv != nil {
 				m.conv.AddToolResult(msg.call.ID, denial)
 			}
-			m.markStreamToolDone(msg.streamID)
-			return m.resumeAfterStreamTools(msg.streamID)
+			return m.completeToolAndResume(msg.streamID, msg.call)
 		case security.RiskConfirm:
 			m.logAuditDecision(msg.call, msg.assessment, "pending confirmation")
 			m.mode = modeConfirm
@@ -455,8 +453,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conv.AddToolResult(msg.Call.ID, aggregatedOutput)
 		}
 		m.logAuditExecution(msg.Call, msg.Results)
-		m.markStreamToolDone(msg.streamID)
-		return m.resumeAfterStreamTools(msg.streamID)
+		return m.completeToolAndResume(msg.streamID, msg.Call)
 
 	case nodeAddResultMsg:
 		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
@@ -471,11 +468,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logAuditExecution(msg.Call, results)
 		m.status = "Node added and deployed"
 		m.updateViewportContent()
+		m.clearNodeToolExposure()
 		if len(m.clients) > 0 {
 			return m, fetchNodeToolsBeforeNodeAddResume(msg.streamID, m.clients)
 		}
-		m.markStreamToolDone(msg.streamID)
-		return m.resumeAfterStreamTools(msg.streamID)
+		return m.completeToolAndResume(msg.streamID, msg.Call)
 
 	case pingResultMsg:
 		m.markNodeOnline(msg.node, msg.online)
@@ -686,12 +683,14 @@ func (m Model) cancelNodePrompt() (tea.Model, tea.Cmd) {
 		m.conv.AddToolResult(state.call.ID, output)
 	}
 	m.status = "Ready"
-	m.markStreamToolDone(state.streamID)
+	if state.call.Name == metaToolNodeAdd {
+		m.clearNodeToolExposure()
+	}
 	m.updateViewportContent()
 	if state.streamID == 0 || !m.streaming {
 		return m, nil
 	}
-	return m.resumeAfterStreamTools(state.streamID)
+	return m.completeToolAndResume(state.streamID, state.call)
 }
 
 func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -740,8 +739,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.conv.AddToolResult(call.ID, "Cancelled by user")
 		}
 		m.status = "Ready"
-		m.markStreamToolDone(m.activeStreamID)
-		return m.resumeAfterStreamTools(m.activeStreamID)
+		return m.completeToolAndResume(m.activeStreamID, call)
 	case tea.KeyEsc:
 		call := *m.pendingToolCall
 		assessment := m.pendingRisk
@@ -755,8 +753,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.conv.AddToolResult(call.ID, "Cancelled by user")
 		}
 		m.status = "Ready"
-		m.markStreamToolDone(m.activeStreamID)
-		return m.resumeAfterStreamTools(m.activeStreamID)
+		return m.completeToolAndResume(m.activeStreamID, call)
 	default:
 		return m, nil
 	}
@@ -1296,6 +1293,14 @@ func (m *Model) markStreamToolDone(streamID uint64) {
 		return
 	}
 	m.streamToolDone++
+}
+
+func (m Model) completeToolAndResume(streamID uint64, call llm.ToolCall) (tea.Model, tea.Cmd) {
+	if call.Name == metaToolNodeAdd {
+		m.clearNodeToolExposure()
+	}
+	m.markStreamToolDone(streamID)
+	return m.resumeAfterStreamTools(streamID)
 }
 
 func (m Model) resumeAfterStreamTools(streamID uint64) (tea.Model, tea.Cmd) {

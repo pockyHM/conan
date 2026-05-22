@@ -109,7 +109,11 @@ type nodeAddReadyMsg struct {
 }
 
 func (m Model) prepareNodeAddOrPrompt(streamID uint64, call llm.ToolCall) tea.Cmd {
+	enabled := m.nodeToolsEnabled
 	return func() tea.Msg {
+		if !enabled {
+			return nodeAddLocalResult(streamID, call, "node_add is not enabled. Use /node before asking the model to add nodes.", false)
+		}
 		args, err := parseNodeAddArgs(call.Arguments)
 		if err != nil {
 			return nodeAddLocalResult(streamID, call, "invalid node_add arguments: "+err.Error(), false)
