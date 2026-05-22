@@ -11,7 +11,7 @@ func sanitizeSSELogData(data string) string {
 	var b strings.Builder
 	last := 0
 	for i := 0; i < len(data); i++ {
-		keyEnd, ok := matchSSEPasswordKey(data, i)
+		keyEnd, replacement, ok := matchSSESensitiveLogKey(data, i)
 		if !ok {
 			continue
 		}
@@ -28,7 +28,7 @@ func sanitizeSSELogData(data string) string {
 			b.Grow(len(data))
 		}
 		b.WriteString(data[last:valueStart])
-		b.WriteString("[redacted]")
+		b.WriteString(replacement)
 		last = valueEnd
 		i = closeEnd - 1
 	}
@@ -39,9 +39,21 @@ func sanitizeSSELogData(data string) string {
 	return b.String()
 }
 
-func matchSSEPasswordKey(data string, i int) (int, bool) {
-	const rawKey = `"password"`
-	const escapedKey = `\"password\"`
+func matchSSESensitiveLogKey(data string, i int) (int, string, bool) {
+	if end, ok := matchSSELogKey(data, i, "password"); ok {
+		return end, "[redacted]", true
+	}
+	for _, key := range []string{"arguments", "partial_json"} {
+		if end, ok := matchSSELogKey(data, i, key); ok {
+			return end, "[redacted tool arguments]", true
+		}
+	}
+	return 0, "", false
+}
+
+func matchSSELogKey(data string, i int, key string) (int, bool) {
+	rawKey := `"` + key + `"`
+	escapedKey := `\"` + key + `\"`
 	if i+len(rawKey) <= len(data) && strings.EqualFold(data[i:i+len(rawKey)], rawKey) {
 		return i + len(rawKey), true
 	}

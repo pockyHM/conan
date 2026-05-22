@@ -161,9 +161,49 @@ func TestReadSSEDebugLogsRedactPasswordFields(t *testing.T) {
 					t.Fatalf("debug log should not contain raw password fragment %q:\n%s", secret, logText)
 				}
 			}
-			if !strings.Contains(logText, "[redacted]") {
+			if !strings.Contains(logText, "[redacted]") && !strings.Contains(logText, "[redacted tool arguments]") {
 				t.Fatalf("debug log should contain redacted marker:\n%s", logText)
 			}
 		})
+	}
+}
+
+func TestReadSSEDebugLogsRedactToolArgumentFragments(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
+	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
+		t.Fatalf("setup logging: %v", err)
+	}
+	defer logging.Close()
+
+	input := `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"password\":\"sup"}}]},"finish_reason":null}]}`
+	input += "\n\n"
+	input += "event: content_block_delta\n"
+	input += `data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"er-secret\"}"}}`
+	input += "\n\n"
+	events := ReadSSE(strings.NewReader(input))
+	var raw []SSEEvent
+	for event := range events {
+		raw = append(raw, event)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("events = %d, want 2", len(raw))
+	}
+	if !strings.Contains(raw[0].Data, "sup") || !strings.Contains(raw[1].Data, "er-secret") {
+		t.Fatalf("raw event data should be unchanged: %#v", raw)
+	}
+	logging.Close()
+
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logText := string(contents)
+	for _, secret := range []string{"sup", "er-secret"} {
+		if strings.Contains(logText, secret) {
+			t.Fatalf("debug log should not contain tool argument fragment %q:\n%s", secret, logText)
+		}
+	}
+	if !strings.Contains(logText, "[redacted tool arguments]") {
+		t.Fatalf("debug log should contain redacted tool argument marker:\n%s", logText)
 	}
 }

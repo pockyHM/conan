@@ -1698,6 +1698,44 @@ func TestToolCallNeedsConfirmation(t *testing.T) {
 	}
 }
 
+func TestNodeAddRequiresConfirmationEvenWhenRiskAllows(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Provider: &stubRiskProvider{response: `{"risk_level":"allow","reason":"allowed"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+	})
+	model.nodeToolsEnabled = true
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID:        "node-add-1",
+		Name:      metaToolNodeAdd,
+		Arguments: []byte(`{"host":"10.0.0.12","user":"deploy","password":"secret"}`),
+	}})
+	model = result.(Model)
+
+	msg := execCmd(t, cmd)
+	result, _ = model.Update(msg)
+	model = result.(Model)
+
+	if model.mode != modeConfirm {
+		t.Fatalf("mode = %v, want modeConfirm", model.mode)
+	}
+	if model.pendingRisk == nil || model.pendingRisk.Level != security.RiskConfirm {
+		t.Fatalf("pendingRisk = %#v, want forced confirmation", model.pendingRisk)
+	}
+	if !strings.Contains(model.View(), "node_add requires confirmation") {
+		t.Fatalf("view missing forced confirmation reason:\n%s", model.View())
+	}
+}
+
 func TestConfirmEnterOnAllowDispatchesTool(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	reviewer := security.NewReviewer(security.ReviewerConfig{

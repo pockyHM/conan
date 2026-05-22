@@ -319,6 +319,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.assessment.Level {
 		case security.RiskAllow:
+			if requiresExplicitConfirmation(msg.call.Name) {
+				msg.assessment.Level = security.RiskConfirm
+				if msg.assessment.Reason == "" || msg.assessment.Reason == "allowed" {
+					msg.assessment.Reason = msg.call.Name + " requires confirmation"
+				}
+				m.logAuditDecision(msg.call, msg.assessment, "pending confirmation")
+				m.mode = modeConfirm
+				m.pendingToolCall = &msg.call
+				m.pendingRisk = &msg.assessment
+				m.input = ""
+				m.status = "Use ↑↓ to choose, Enter to confirm"
+				return m, nil
+			}
 			m.logAuditDecision(msg.call, msg.assessment, "dispatched")
 			return m, m.dispatchTool(msg.streamID, msg.call)
 		case security.RiskDeny:
@@ -871,6 +884,10 @@ func (m Model) pendingToolCommand() string {
 
 func isShellCommandTool(toolName string) bool {
 	return toolName == "shell/run" || toolName == metaToolExec
+}
+
+func requiresExplicitConfirmation(toolName string) bool {
+	return toolName == metaToolNodeAdd
 }
 
 func (m *Model) addPendingCommandToAllowlist(call llm.ToolCall) error {
