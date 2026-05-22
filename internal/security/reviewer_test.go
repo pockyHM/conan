@@ -193,3 +193,14 @@ func TestReviewerNoProviderDefaultsToConfirm(t *testing.T) {
 		t.Fatalf("without provider, non-whitelisted should default to confirm, got %v", result.Level)
 	}
 }
+
+func TestReviewerNodeAddNoProviderRequiresConfirm(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{Provider: nil})
+	result, err := r.Review(context.Background(), "node_add", `{"host":"10.0.0.12","user":"deploy","password":"[REDACTED]"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Level != RiskConfirm {
+		t.Fatalf("without provider, node_add should require confirmation, got %v", result.Level)
+	}
+}
