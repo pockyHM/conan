@@ -112,27 +112,58 @@ func TestReadSSEDebugLogsRawEvents(t *testing.T) {
 }
 
 func TestReadSSEDebugLogsRedactPasswordFields(t *testing.T) {
-	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
-	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
-		t.Fatalf("setup logging: %v", err)
+	tests := []struct {
+		name    string
+		input   string
+		secrets []string
+	}{
+		{
+			name:    "embedded_json_string",
+			input:   "event: completion\ndata: {\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"host\\\":\\\"10.0.0.5\\\",\\\"password\\\":\\\"secret\\\"}\"}}]}\n\n",
+			secrets: []string{"secret"},
+		},
+		{
+			name:    "escaped_backslash",
+			input:   "event: completion\ndata: " + `{\"password\":\"alpha\\\\omega\"}` + "\n\n",
+			secrets: []string{"alpha", "omega"},
+		},
+		{
+			name:    "escaped_quote",
+			input:   "event: completion\ndata: " + `{\"password\":\"quote\\\"leak\"}` + "\n\n",
+			secrets: []string{"quote", "leak"},
+		},
 	}
-	defer logging.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logFile := filepath.Join(t.TempDir(), "conan.jsonl")
+			if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
+				t.Fatalf("setup logging: %v", err)
+			}
+			defer logging.Close()
 
-	input := "event: completion\ndata: {\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"host\\\":\\\"10.0.0.5\\\",\\\"password\\\":\\\"secret\\\"}\"}}]}\n\n"
-	events := ReadSSE(strings.NewReader(input))
-	for range events {
-	}
-	logging.Close()
+			events := ReadSSE(strings.NewReader(tt.input))
+			for event := range events {
+				for _, secret := range tt.secrets {
+					if !strings.Contains(event.Data, secret) {
+						t.Fatalf("raw event data should preserve %q: %s", secret, event.Data)
+					}
+				}
+			}
+			logging.Close()
 
-	contents, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
-	logText := string(contents)
-	if strings.Contains(logText, "secret") {
-		t.Fatalf("debug log should not contain raw password:\n%s", logText)
-	}
-	if !strings.Contains(logText, "[redacted]") {
-		t.Fatalf("debug log should contain redacted marker:\n%s", logText)
+			contents, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatalf("read log file: %v", err)
+			}
+			logText := string(contents)
+			for _, secret := range tt.secrets {
+				if strings.Contains(logText, secret) {
+					t.Fatalf("debug log should not contain raw password fragment %q:\n%s", secret, logText)
+				}
+			}
+			if !strings.Contains(logText, "[redacted]") {
+				t.Fatalf("debug log should contain redacted marker:\n%s", logText)
+			}
+		})
 	}
 }
