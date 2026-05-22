@@ -12,6 +12,7 @@ import (
 	"github.com/pockyHM/conan/internal/credentials"
 	"github.com/pockyHM/conan/internal/deploy"
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/pkg/configschema"
 )
@@ -76,6 +77,14 @@ type nodeAddRunnerFunc func(context.Context, nodeadd.Request) (nodeadd.Result, e
 
 func (f nodeAddRunnerFunc) Add(ctx context.Context, req nodeadd.Request) (nodeadd.Result, error) {
 	return f(ctx, req)
+}
+
+type nodeAddResultMsg struct {
+	streamID uint64
+	Call     llm.ToolCall
+	Result   nodeadd.Result
+	Cluster  string
+	Output   string
 }
 
 func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
@@ -165,9 +174,73 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 		if agentPort == 0 {
 			agentPort = 9280
 		}
+		if result.Node.Name == "" {
+			result.Node.Name = name
+		}
+		if result.Node.Host == "" {
+			result.Node.Host = host
+		}
+		if result.Node.Agent != nil && result.Node.Agent.Port == 0 {
+			result.Node.Agent.Port = agentPort
+		}
 		output := fmt.Sprintf("node added and deployed: %s\ncluster: %s\nhost: %s\nagent_port: %d\nhealth: ok", name, req.ClusterName, host, agentPort)
-		return nodeAddLocalResult(streamID, call, output, true)
+		return nodeAddResultMsg{streamID: streamID, Call: call, Result: result, Cluster: req.ClusterName, Output: output}
 	}
+}
+
+func (m Model) applyNodeAddResult(cluster string, result nodeadd.Result) Model {
+	if cluster != "" {
+		m.cluster = cluster
+		m.clusterExplicit = true
+	}
+
+	node := result.Node
+	name := strings.TrimSpace(node.Name)
+	if name == "" {
+		return m
+	}
+	info := NodeInfo{
+		Name:             name,
+		Host:             node.Host,
+		CommandWhitelist: append([]string(nil), node.CommandWhitelist...),
+		Online:           result.Deployed,
+	}
+	upserted := false
+	for i := range m.nodes {
+		if m.nodes[i].Name == name {
+			m.nodes[i] = info
+			upserted = true
+			break
+		}
+	}
+	if !upserted {
+		m.nodes = append(m.nodes, info)
+	}
+
+	if m.selectedNodes == nil {
+		m.selectedNodes = make(map[string]bool)
+	}
+	m.selectedNodes[name] = true
+
+	if node.Agent != nil && node.Host != "" && node.Agent.Port != 0 {
+		if m.clients == nil {
+			m.clients = make(map[string]*mcp.Client)
+		}
+		m.clients[name] = mcp.NewClient(mcp.Config{
+			BaseURL: mcp.URL(node.Host, node.Agent.Port, false),
+			Token:   node.Agent.Token,
+		})
+	}
+
+	if m.mode == modeNodeSelect {
+		m.nodeSelector = m.nodeSelector.SetNodes(m.nodes)
+		if m.nodeSelector.checked == nil {
+			m.nodeSelector.checked = make(map[string]bool)
+		}
+		m.nodeSelector.checked[name] = true
+	}
+
+	return m
 }
 
 func redactNodeAddError(err error, args nodeAddArgs) string {

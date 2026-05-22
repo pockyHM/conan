@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/pkg/configschema"
@@ -90,9 +91,9 @@ func TestDispatchNodeAddUsesInjectedRunnerAndPreservesRawPassword(t *testing.T) 
 	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: rawArgs}
 
 	msg := execCmd(t, model.dispatchNodeAdd(7, call))
-	result, ok := msg.(multiToolResultMsg)
+	result, ok := msg.(nodeAddResultMsg)
 	if !ok {
-		t.Fatalf("dispatchNodeAdd returned %T, want multiToolResultMsg", msg)
+		t.Fatalf("dispatchNodeAdd returned %T, want nodeAddResultMsg", msg)
 	}
 
 	if gotReq.ClusterName != "prod" || gotReq.Input != "10.0.0.12" || gotReq.Name != "web-1" {
@@ -110,10 +111,7 @@ func TestDispatchNodeAddUsesInjectedRunnerAndPreservesRawPassword(t *testing.T) 
 	if string(result.Call.Arguments) != string(rawArgs) {
 		t.Fatalf("dispatch should preserve raw arguments, got %s", string(result.Call.Arguments))
 	}
-	if len(result.Results) != 1 || !result.Results[0].Success {
-		t.Fatalf("results = %#v, want one successful local result", result.Results)
-	}
-	output := result.Results[0].Output
+	output := result.Output
 	for _, want := range []string{"node added and deployed: web-1", "cluster: prod", "host: 10.0.0.12", "agent_port: 9281", "health: ok"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q:\n%s", want, output)
@@ -121,6 +119,25 @@ func TestDispatchNodeAddUsesInjectedRunnerAndPreservesRawPassword(t *testing.T) 
 	}
 	if strings.Contains(output, "secret") {
 		t.Fatalf("output leaked password:\n%s", output)
+	}
+
+	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name})
+	model.streaming = true
+	model.streamID = 7
+	model.activeStreamID = 7
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	next, _ := model.Update(result)
+	model = next.(Model)
+
+	if len(model.nodes) != 1 || model.nodes[0].Name != "web-1" || model.nodes[0].Host != "10.0.0.12" || !model.nodes[0].Online {
+		t.Fatalf("nodes = %#v, want deployed web-1", model.nodes)
+	}
+	if !model.selectedNodes["web-1"] {
+		t.Fatalf("selectedNodes = %#v, want web-1 selected", model.selectedNodes)
+	}
+	if _, ok := model.clients["web-1"]; !ok {
+		t.Fatalf("clients = %#v, want web-1 client", model.clients)
 	}
 }
 
@@ -201,14 +218,101 @@ func TestDispatchNodeAddUsesGlobalDefaultClusterWhenModelClusterImplicit(t *test
 	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"10.0.0.12"}`)}
 
 	msg := execCmd(t, model.dispatchNodeAdd(7, call))
-	result, ok := msg.(multiToolResultMsg)
-	if !ok {
-		t.Fatalf("dispatchNodeAdd returned %T, want multiToolResultMsg", msg)
-	}
-	if len(result.Results) != 1 || !result.Results[0].Success {
-		t.Fatalf("results = %#v, want one successful local result", result.Results)
+	if _, ok := msg.(nodeAddResultMsg); !ok {
+		t.Fatalf("dispatchNodeAdd returned %T, want nodeAddResultMsg", msg)
 	}
 	if gotReq.ClusterName != "prod" {
 		t.Fatalf("cluster name = %q, want prod", gotReq.ClusterName)
+	}
+}
+
+func TestApplyNodeAddResultSelectsNewNodeAndPreservesExistingSelectedNodes(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "old",
+		Nodes: []NodeInfo{
+			{Name: "node-01", Host: "10.0.0.1", Online: true},
+		},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+	model.mode = modeNodeSelect
+	model.nodeSelector = newNodeSelector(model.nodes, model.selectedNodes)
+
+	model = model.applyNodeAddResult("prod", nodeadd.Result{
+		Node: configschema.NodeConfig{
+			Name:             "web-1",
+			Host:             "10.0.0.12",
+			CommandWhitelist: []string{"uptime"},
+			Agent: &configschema.NodeAgentOverride{
+				Port:  9281,
+				Token: "agent-token",
+			},
+		},
+		Deployed: true,
+	})
+
+	if model.cluster != "prod" || !model.clusterExplicit {
+		t.Fatalf("cluster = %q explicit=%v, want prod explicit", model.cluster, model.clusterExplicit)
+	}
+	if !model.selectedNodes["node-01"] || !model.selectedNodes["web-1"] {
+		t.Fatalf("selectedNodes = %#v, want existing and new selections", model.selectedNodes)
+	}
+	if len(model.nodes) != 2 {
+		t.Fatalf("nodes = %#v, want two nodes", model.nodes)
+	}
+	got := model.nodes[1]
+	if got.Name != "web-1" || got.Host != "10.0.0.12" || !got.Online || len(got.CommandWhitelist) != 1 || got.CommandWhitelist[0] != "uptime" {
+		t.Fatalf("new node = %#v", got)
+	}
+	if _, ok := model.clients["web-1"]; !ok {
+		t.Fatalf("clients = %#v, want web-1 client", model.clients)
+	}
+	if !model.nodeSelector.checked["web-1"] {
+		t.Fatalf("nodeSelector checked = %#v, want web-1 selected", model.nodeSelector.checked)
+	}
+}
+
+func TestNodeAddResultUpdateFillsPlaceholderConversationAndStatus(t *testing.T) {
+	conv := conversation.New("test", nil, "m")
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"10.0.0.12"}`)}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+
+	output := "node added and deployed: web-1"
+	next, _ := model.Update(nodeAddResultMsg{
+		streamID: 1,
+		Call:     call,
+		Cluster:  "prod",
+		Output:   output,
+		Result: nodeadd.Result{
+			Node: configschema.NodeConfig{
+				Name: "web-1",
+				Host: "10.0.0.12",
+				Agent: &configschema.NodeAgentOverride{
+					Port:  9281,
+					Token: "agent-token",
+				},
+			},
+			Deployed: true,
+		},
+	})
+	model = next.(Model)
+
+	if model.status != "Node added and deployed" {
+		t.Fatalf("status = %q, want node added status", model.status)
+	}
+	if len(model.messages) != 1 || model.messages[0].toolOutput != output {
+		t.Fatalf("messages = %#v, want filled tool placeholder", model.messages)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].Role != conversation.RoleTool || msgs[0].ToolCallID != call.ID || msgs[0].Content != output {
+		t.Fatalf("conversation messages = %#v, want node_add tool result", msgs)
+	}
+	if !model.selectedNodes["web-1"] {
+		t.Fatalf("selectedNodes = %#v, want web-1 selected", model.selectedNodes)
 	}
 }
