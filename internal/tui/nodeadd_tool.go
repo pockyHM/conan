@@ -95,6 +95,63 @@ type nodeAddToolsFetchedMsg struct {
 	updates  []toolCacheMsg
 }
 
+type nodeAddPromptMsg struct {
+	streamID uint64
+	call     llm.ToolCall
+	field    string
+	label    string
+	secret   bool
+}
+
+type nodeAddReadyMsg struct {
+	streamID uint64
+	call     llm.ToolCall
+}
+
+func (m Model) prepareNodeAddOrPrompt(streamID uint64, call llm.ToolCall) tea.Cmd {
+	return func() tea.Msg {
+		args, err := parseNodeAddArgs(call.Arguments)
+		if err != nil {
+			return nodeAddLocalResult(streamID, call, "invalid node_add arguments: "+err.Error(), false)
+		}
+		if args.User == "" {
+			return nodeAddPromptMsg{
+				streamID: streamID,
+				call:     call,
+				field:    "user",
+				label:    "SSH username",
+				secret:   false,
+			}
+		}
+		if args.Password == "" {
+			return nodeAddPromptMsg{
+				streamID: streamID,
+				call:     call,
+				field:    "password",
+				label:    "SSH password",
+				secret:   true,
+			}
+		}
+		return nodeAddReadyMsg{streamID: streamID, call: call}
+	}
+}
+
+func setNodeAddArg(raw json.RawMessage, field string, value string) (json.RawMessage, error) {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if args == nil {
+		return nil, fmt.Errorf("node_add arguments must be an object")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	args[field] = encoded
+	return json.Marshal(args)
+}
+
 func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 	enabled := m.nodeToolsEnabled
 	home := m.configHome

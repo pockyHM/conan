@@ -30,17 +30,17 @@ type NodeInfo struct {
 }
 
 type ModelConfig struct {
-	Cluster     string
-	Model       string
-	Version     string
-	Provider    llm.Provider
-	Conv        *conversation.Conversation
-	Clients     map[string]*mcp.Client
-	Tools       []llm.ToolDef
-	Nodes       []NodeInfo
-	Reviewer    *security.Reviewer
-	AuditLogger *security.AuditLogger
-	ConfigHome  string
+	Cluster       string
+	Model         string
+	Version       string
+	Provider      llm.Provider
+	Conv          *conversation.Conversation
+	Clients       map[string]*mcp.Client
+	Tools         []llm.ToolDef
+	Nodes         []NodeInfo
+	Reviewer      *security.Reviewer
+	AuditLogger   *security.AuditLogger
+	ConfigHome    string
 	NodeAddRunner nodeAddRunner
 
 	MemoryStore *memory.Store
@@ -65,11 +65,20 @@ const (
 	modeNodeSelect
 	modeConfirm
 	modeSession
+	modeNodePrompt
 )
 
 type pingResultMsg struct {
 	node   string
 	online bool
+}
+
+type nodePromptState struct {
+	streamID uint64
+	call     llm.ToolCall
+	field    string
+	label    string
+	secret   bool
 }
 
 const toolOutputPreviewLines = 4
@@ -100,12 +109,16 @@ type Model struct {
 	pendingToolCall *llm.ToolCall
 	pendingRisk     *security.RiskAssessment
 	confirmChoice   int // 0=Allow, 1=Deny
+	nodePrompt      nodePromptState
 
 	memStore    *memory.Store
 	sessionList sessionList
 	ac          autocomplete
 
 	input              string
+	inputHistory       []string
+	inputHistoryIndex  int
+	inputHistoryDraft  string
 	messages           []chatMsg
 	status             string
 	versionWarning     string
@@ -142,23 +155,24 @@ func NewModel(cfg ModelConfig) Model {
 		selectedNodes[node.Name] = true
 	}
 	return Model{
-		cluster:         cfg.Cluster,
-		clusterExplicit: clusterExplicit,
-		model:           cfg.Model,
-		cliVersion:      cfg.Version,
-		provider:        cfg.Provider,
-		conv:            cfg.Conv,
-		clients:         cfg.Clients,
-		tools:           cfg.Tools,
-		nodes:           cfg.Nodes,
-		selectedNodes:   selectedNodes,
-		status:          "Ready",
-		reviewer:        cfg.Reviewer,
-		auditLog:        cfg.AuditLogger,
-		configHome:      cfg.ConfigHome,
-		nodeAddRunner:   cfg.NodeAddRunner,
-		memStore:        cfg.MemoryStore,
-		toolCache:       newToolCache(),
+		cluster:           cfg.Cluster,
+		clusterExplicit:   clusterExplicit,
+		model:             cfg.Model,
+		cliVersion:        cfg.Version,
+		provider:          cfg.Provider,
+		conv:              cfg.Conv,
+		clients:           cfg.Clients,
+		tools:             cfg.Tools,
+		nodes:             cfg.Nodes,
+		selectedNodes:     selectedNodes,
+		status:            "Ready",
+		reviewer:          cfg.Reviewer,
+		auditLog:          cfg.AuditLogger,
+		configHome:        cfg.ConfigHome,
+		nodeAddRunner:     cfg.NodeAddRunner,
+		memStore:          cfg.MemoryStore,
+		toolCache:         newToolCache(),
+		inputHistoryIndex: -1,
 	}
 }
 
@@ -263,6 +277,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.markStreamToolDone(msg.streamID)
 		return m.resumeAfterStreamTools(msg.streamID)
+
+	case nodeAddPromptMsg:
+		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
+			return m, nil
+		}
+		m.mode = modeNodePrompt
+		m.nodePrompt = nodePromptState{
+			streamID: msg.streamID,
+			call:     msg.call,
+			field:    msg.field,
+			label:    msg.label,
+			secret:   msg.secret,
+		}
+		m.input = ""
+		m.ac = autocomplete{}
+		m.status = msg.label + " required"
+		m.updateViewportContent()
+		return m, nil
+
+	case nodeAddReadyMsg:
+		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
+			return m, nil
+		}
+		m.mode = modeChat
+		m.nodePrompt = nodePromptState{}
+		m.status = "Running tool..."
+		return m, m.dispatchNodeAdd(msg.streamID, msg.call)
 
 	case riskAssessmentMsg:
 		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
@@ -456,6 +497,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeNodePrompt {
+		return m.handleNodePromptKey(key)
+	}
 	if m.mode == modeSession {
 		return m.handleSessionSelectKey(key)
 	}
@@ -575,6 +619,81 @@ func (m *Model) scrollViewportForKey(key tea.KeyMsg) bool {
 	return true
 }
 
+func (m Model) handleNodePromptKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyCtrlC, tea.KeyEsc:
+		return m.cancelNodePrompt()
+	case tea.KeyEnter:
+		return m.submitNodePrompt()
+	case tea.KeyBackspace:
+		if len(m.input) > 0 {
+			runes := []rune(m.input)
+			m.input = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	case tea.KeyRunes:
+		m.input += string(key.Runes)
+		return m, nil
+	case tea.KeySpace:
+		m.input += " "
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) submitNodePrompt() (tea.Model, tea.Cmd) {
+	state := m.nodePrompt
+	value := m.input
+	m.input = ""
+	m.ac = autocomplete{}
+	m.inputHistoryIndex = -1
+	m.inputHistoryDraft = ""
+	if strings.TrimSpace(value) == "" {
+		m.status = state.label + " required"
+		return m, nil
+	}
+	if !state.secret {
+		value = strings.TrimSpace(value)
+	}
+
+	call := state.call
+	updatedArgs, err := setNodeAddArg(call.Arguments, state.field, value)
+	if err != nil {
+		m.mode = modeChat
+		m.nodePrompt = nodePromptState{}
+		return m, func() tea.Msg {
+			return nodeAddLocalResult(state.streamID, call, "invalid node_add arguments: "+err.Error(), false)
+		}
+	}
+	call.Arguments = updatedArgs
+	m.mode = modeChat
+	m.nodePrompt = nodePromptState{}
+	m.status = "Running tool..."
+	return m, m.prepareNodeAddOrPrompt(state.streamID, call)
+}
+
+func (m Model) cancelNodePrompt() (tea.Model, tea.Cmd) {
+	state := m.nodePrompt
+	m.mode = modeChat
+	m.nodePrompt = nodePromptState{}
+	m.input = ""
+	m.ac = autocomplete{}
+
+	output := "Cancelled by user"
+	m.fillToolPlaceholder(state.call, output, []nodeToolResult{{Node: "-", Output: output, Success: false}})
+	if m.conv != nil {
+		m.conv.AddToolResult(state.call.ID, output)
+	}
+	m.status = "Ready"
+	m.markStreamToolDone(state.streamID)
+	m.updateViewportContent()
+	if state.streamID == 0 || !m.streaming {
+		return m, nil
+	}
+	return m.resumeAfterStreamTools(state.streamID)
+}
+
 func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyUp:
@@ -682,12 +801,29 @@ func (m Model) View() string {
 	footer := statusView + "\n" + renderInputBox(m.input)
 	if m.mode == modeConfirm {
 		footer = m.renderConfirmFooter()
+	} else if m.mode == modeNodePrompt {
+		footer = m.renderNodePromptFooter()
 	}
 	if acView != "" {
 		footer = acView + "\n" + footer
 	}
 
 	return header + "\n\n" + body + "\n\n" + footer
+}
+
+func (m Model) renderNodePromptFooter() string {
+	state := m.nodePrompt
+	input := m.input
+	if state.secret {
+		input = strings.Repeat("*", len([]rune(input)))
+	}
+	lines := []string{
+		statusStyle.Render(m.status),
+		inputPromptStyle.Render(state.label),
+		renderInputBox(input),
+		statusStyle.Render("Enter to continue, Esc to cancel"),
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderConfirmFooter() string {
@@ -893,6 +1029,9 @@ func (m *Model) toggleLastToolOutputExpanded() {
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
+	if m.mode == modeNodePrompt {
+		return m.submitNodePrompt()
+	}
 	input := strings.TrimSpace(m.input)
 	m.input = ""
 	if input == "" {
@@ -1234,7 +1373,7 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 	case metaToolCallTool:
 		return m.dispatchCallTool(streamID, call)
 	case metaToolNodeAdd:
-		return m.dispatchNodeAdd(streamID, call)
+		return m.prepareNodeAddOrPrompt(streamID, call)
 	default:
 		return m.dispatchMemoryOrDirectTool(streamID, call)
 	}

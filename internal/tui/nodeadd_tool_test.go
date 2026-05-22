@@ -148,6 +148,154 @@ func TestDispatchNodeAddUsesInjectedRunnerAndPreservesRawPassword(t *testing.T) 
 	}
 }
 
+func TestNodeAddPreparePromptsForMissingPassword(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	call := llm.ToolCall{
+		ID:        "node-add-1",
+		Name:      metaToolNodeAdd,
+		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy"}`),
+	}
+
+	msg := execCmd(t, model.prepareNodeAddOrPrompt(7, call))
+	prompt, ok := msg.(nodeAddPromptMsg)
+	if !ok {
+		t.Fatalf("prepareNodeAddOrPrompt returned %T, want nodeAddPromptMsg", msg)
+	}
+	if prompt.streamID != 7 || prompt.field != "password" || prompt.label != "SSH password" || !prompt.secret {
+		t.Fatalf("prompt = %#v, want password secret prompt", prompt)
+	}
+}
+
+func TestNodePromptSubmitPasswordDoesNotAddSecretToConversation(t *testing.T) {
+	const secret = "super-secret"
+	var gotReq nodeadd.Request
+	conv := conversation.New("prod", nil, "m")
+	call := llm.ToolCall{
+		ID:        "node-add-1",
+		Name:      metaToolNodeAdd,
+		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy"}`),
+	}
+	conv.AddToolCall(call.ID, call.Name, string(sanitizeToolArguments(call.Name, call.Arguments)))
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		ConfigHome: t.TempDir(),
+		Conv:       conv,
+		NodeAddRunner: nodeAddRunnerFunc(func(_ context.Context, req nodeadd.Request) (nodeadd.Result, error) {
+			gotReq = req
+			return nodeadd.Result{
+				Node: configschema.NodeConfig{
+					Name: "web-1",
+					Host: "10.0.0.12",
+					Agent: &configschema.NodeAgentOverride{
+						Port: req.AgentPort,
+					},
+				},
+				Deployed: true,
+			}, nil
+		}),
+	})
+	model.nodeToolsEnabled = true
+	model.mode = modeNodePrompt
+	model.nodePrompt = nodePromptState{streamID: 7, call: call, field: "password", label: "SSH password", secret: true}
+	model.input = secret
+	model.streaming = true
+	model.streamID = 7
+	model.activeStreamID = 7
+	model.inputHistory = []string{"previous"}
+	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name, toolInput: string(sanitizeToolArguments(call.Name, call.Arguments))})
+
+	next, cmd := model.submit()
+	model = next.(Model)
+	if len(model.inputHistory) != 1 || model.inputHistory[0] != "previous" {
+		t.Fatalf("inputHistory = %#v, want prompt input excluded", model.inputHistory)
+	}
+	for _, msg := range model.messages {
+		if msg.role == "user" || strings.Contains(fmt.Sprintf("%#v", msg), secret) {
+			t.Fatalf("messages leaked prompt input: %#v", model.messages)
+		}
+	}
+	for _, msg := range conv.Messages() {
+		if msg.Role == conversation.RoleUser || strings.Contains(fmt.Sprintf("%#v", msg), secret) {
+			t.Fatalf("conversation leaked prompt input: %#v", conv.Messages())
+		}
+	}
+
+	msg := execCmd(t, cmd)
+	ready, ok := msg.(nodeAddReadyMsg)
+	if !ok {
+		t.Fatalf("submit prompt command returned %T, want nodeAddReadyMsg", msg)
+	}
+	next, cmd = model.Update(ready)
+	model = next.(Model)
+	msg = execCmd(t, cmd)
+	result, ok := msg.(nodeAddResultMsg)
+	if !ok {
+		t.Fatalf("ready update command returned %T, want nodeAddResultMsg", msg)
+	}
+	if gotReq.Password != secret {
+		t.Fatalf("runner password = %q, want prompt secret", gotReq.Password)
+	}
+	if strings.Contains(result.Output, secret) {
+		t.Fatalf("node_add output leaked password: %s", result.Output)
+	}
+}
+
+func TestRenderNodePromptFooterMasksSecretInput(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	model.mode = modeNodePrompt
+	model.nodePrompt = nodePromptState{label: "SSH password", secret: true}
+	model.input = "secret"
+	model.status = "SSH password required"
+
+	view := model.renderNodePromptFooter()
+	if strings.Contains(view, "secret") {
+		t.Fatalf("footer leaked secret:\n%s", view)
+	}
+	if !strings.Contains(view, "SSH password") || !strings.Contains(view, "******") {
+		t.Fatalf("footer = %q, want label and masked input", view)
+	}
+}
+
+func TestNodePromptEscCancelsWithoutLeakingPassword(t *testing.T) {
+	const secret = "super-secret"
+	conv := conversation.New("prod", nil, "m")
+	call := llm.ToolCall{
+		ID:        "node-add-1",
+		Name:      metaToolNodeAdd,
+		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy"}`),
+	}
+	conv.AddToolCall(call.ID, call.Name, string(sanitizeToolArguments(call.Name, call.Arguments)))
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "m", Conv: conv})
+	model.mode = modeNodePrompt
+	model.nodePrompt = nodePromptState{streamID: 1, call: call, field: "password", label: "SSH password", secret: true}
+	model.input = secret
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name, toolInput: string(sanitizeToolArguments(call.Name, call.Arguments))})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.status != "Ready" {
+		t.Fatalf("status = %q, want Ready", model.status)
+	}
+	if len(model.messages) != 1 || model.messages[0].toolOutput != "Cancelled by user" {
+		t.Fatalf("messages = %#v, want cancelled tool output", model.messages)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", model.messages), secret) {
+		t.Fatalf("messages leaked password: %#v", model.messages)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", conv.Messages()), secret) {
+		t.Fatalf("conversation leaked password: %#v", conv.Messages())
+	}
+}
+
 func TestDispatchNodeAddRequiresAuthorization(t *testing.T) {
 	model := NewModel(ModelConfig{
 		ConfigHome: t.TempDir(),
