@@ -41,6 +41,7 @@ type ModelConfig struct {
 	Reviewer    *security.Reviewer
 	AuditLogger *security.AuditLogger
 	ConfigHome  string
+	NodeAddRunner nodeAddRunner
 
 	MemoryStore *memory.Store
 }
@@ -94,6 +95,7 @@ type Model struct {
 	reviewer        *security.Reviewer
 	auditLog        *security.AuditLogger
 	configHome      string
+	nodeAddRunner   nodeAddRunner
 	pendingToolCall *llm.ToolCall
 	pendingRisk     *security.RiskAssessment
 	confirmChoice   int // 0=Allow, 1=Deny
@@ -151,6 +153,7 @@ func NewModel(cfg ModelConfig) Model {
 		reviewer:      cfg.Reviewer,
 		auditLog:      cfg.AuditLogger,
 		configHome:    cfg.ConfigHome,
+		nodeAddRunner: cfg.NodeAddRunner,
 		memStore:      cfg.MemoryStore,
 		toolCache:     newToolCache(),
 	}
@@ -1199,19 +1202,9 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 	case metaToolCallTool:
 		return m.dispatchCallTool(streamID, call)
 	case metaToolNodeAdd:
-		return m.dispatchNodeAddNotImplemented(streamID, call)
+		return m.dispatchNodeAdd(streamID, call)
 	default:
 		return m.dispatchMemoryOrDirectTool(streamID, call)
-	}
-}
-
-func (m Model) dispatchNodeAddNotImplemented(streamID uint64, call llm.ToolCall) tea.Cmd {
-	return func() tea.Msg {
-		return multiToolResultMsg{
-			streamID: streamID,
-			Call:     call,
-			Results:  []nodeToolResult{{Node: "local", Output: "node_add is not implemented yet", Success: false}},
-		}
 	}
 }
 

@@ -906,10 +906,10 @@ func TestNodeToolExposureDispatchesNodeAddLocally(t *testing.T) {
 		t.Fatalf("results = %#v, want one local result", result.Results)
 	}
 	if result.Results[0].Success {
-		t.Fatal("node_add placeholder dispatch should fail until implemented")
+		t.Fatal("node_add dispatch should fail when node tools are disabled")
 	}
-	if !strings.Contains(result.Results[0].Output, "not implemented") {
-		t.Fatalf("output = %q, want not implemented message", result.Results[0].Output)
+	if !strings.Contains(result.Results[0].Output, "node_add is not enabled") {
+		t.Fatalf("output = %q, want authorization error", result.Results[0].Output)
 	}
 }
 
