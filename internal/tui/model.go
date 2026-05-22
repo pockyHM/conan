@@ -1016,8 +1016,25 @@ func (m Model) startStream() (Model, tea.Cmd) {
 	provider := m.provider
 	streamID := m.activeStreamID
 
-	allTools := make([]llm.ToolDef, len(metaToolDefs))
-	copy(allTools, metaToolDefs)
+	allTools := m.availableToolDefs()
+
+	req := &llm.ChatRequest{
+		SystemPrompt: m.buildSystemPromptWithMemory(),
+		Messages:     m.conv.Messages(),
+		Tools:        allTools,
+	}
+	return m, func() tea.Msg {
+		ch, err := provider.ChatStream(ctx, req)
+		return streamReadyMsg{streamID: streamID, ch: ch, err: err}
+	}
+}
+
+func (m Model) availableToolDefs() []llm.ToolDef {
+	allTools := make([]llm.ToolDef, 0, len(metaToolDefs)+len(nodeManagementToolDefs)+5)
+	allTools = append(allTools, metaToolDefs...)
+	if m.nodeToolsEnabled {
+		allTools = append(allTools, nodeManagementToolDefs...)
+	}
 	if m.memStore != nil {
 		for _, td := range memory.ToolDefs() {
 			b, err := json.Marshal(td)
@@ -1031,16 +1048,7 @@ func (m Model) startStream() (Model, tea.Cmd) {
 			allTools = append(allTools, def)
 		}
 	}
-
-	req := &llm.ChatRequest{
-		SystemPrompt: m.buildSystemPromptWithMemory(),
-		Messages:     m.conv.Messages(),
-		Tools:        allTools,
-	}
-	return m, func() tea.Msg {
-		ch, err := provider.ChatStream(ctx, req)
-		return streamReadyMsg{streamID: streamID, ch: ch, err: err}
-	}
+	return allTools
 }
 
 func (m Model) waitForEvent(streamID uint64) tea.Cmd {

@@ -18,6 +18,7 @@ const (
 	metaToolExec       = "exec"
 	metaToolToolSearch = "tool_search"
 	metaToolCallTool   = "call_tool"
+	metaToolNodeAdd    = "node_add"
 )
 
 var metaToolDefs = []llm.ToolDef{
@@ -56,6 +57,29 @@ var metaToolDefs = []llm.ToolDef{
 				"arguments": {"type": "object", "description": "Arguments to pass to the tool"}
 			},
 			"required": ["node", "tool"]
+		}`),
+	},
+}
+
+var nodeManagementToolDefs = []llm.ToolDef{
+	{
+		Name:        metaToolNodeAdd,
+		Description: "Add or update a node, write local cluster configuration, deploys or updates conan-agent over SSH, and verifies the agent health endpoint. This is a high-impact node management operation and requires user confirmation.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"cluster": {"type": "string", "description": "Cluster name. Omit to use the current TUI cluster."},
+				"host": {"type": "string", "description": "Hostname or IP address to add."},
+				"name": {"type": "string", "description": "Node name override. Defaults to host."},
+				"user": {"type": "string", "description": "SSH username. Omit to prompt or use saved credentials."},
+				"password": {"type": "string", "description": "SSH password. Omit to prompt or use saved credentials."},
+				"ssh_port": {"type": "integer", "description": "SSH port. Defaults to cluster node_defaults.ssh_port, then 22."},
+				"agent_port": {"type": "integer", "description": "conan-agent listen port. Defaults to 9280."},
+				"agent_bin": {"type": "string", "description": "Local conan-agent binary override for this deployment."},
+				"update": {"type": "boolean", "description": "Update an existing node instead of failing on duplicate name."},
+				"rotate_token": {"type": "boolean", "description": "Generate a new per-node agent token while updating."}
+			},
+			"required": ["host"]
 		}`),
 	},
 }
