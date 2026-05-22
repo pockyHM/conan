@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1096,6 +1097,26 @@ func (m *Model) clearNodeToolExposure() {
 	m.nodeToolsEnabled = false
 }
 
+func (m Model) debugLogStreamEvent(event llm.ChatEvent) {
+	switch e := event.(type) {
+	case llm.TextDeltaEvent:
+		slog.Debug("llm stream text_delta", "stream_id", m.activeStreamID, "delta", e.Delta, "delta_len", len(e.Delta))
+	case llm.ToolCallEvent:
+		sanitizedArgs := sanitizeToolArguments(e.Name, e.Arguments)
+		slog.Debug("llm stream tool_call", "stream_id", m.activeStreamID, "id", e.ID, "name", e.Name, "arguments", string(sanitizedArgs))
+	case llm.StopEvent:
+		slog.Debug("llm stream stop", "stream_id", m.activeStreamID, "reason", e.Reason, "buffer_len", len(m.streamBuf), "tool_calls", m.streamToolExpected)
+	case llm.ErrorEvent:
+		errText := ""
+		if e.Err != nil {
+			errText = e.Err.Error()
+		}
+		slog.Debug("llm stream error", "stream_id", m.activeStreamID, "error", errText, "buffer_len", len(m.streamBuf))
+	default:
+		slog.Debug("llm stream event", "stream_id", m.activeStreamID, "type", fmt.Sprintf("%T", event))
+	}
+}
+
 func (m *Model) markStreamToolDone(streamID uint64) {
 	if streamID != 0 && !m.isActiveStream(streamID) {
 		return
@@ -1482,9 +1503,10 @@ func (m Model) logAuditDecision(call llm.ToolCall, assessment security.RiskAsses
 	if m.auditLog == nil {
 		return
 	}
+	sanitizedArgs := sanitizeToolArguments(call.Name, call.Arguments)
 	m.auditLog.Log(security.AuditEntry{
 		Tool:    call.Name,
-		Input:   string(call.Arguments),
+		Input:   string(sanitizedArgs),
 		Risk:    auditRiskName(assessment.Level),
 		Outcome: outcome,
 		Reason:  assessment.Reason,
@@ -1503,9 +1525,10 @@ func (m Model) logAuditExecution(call llm.ToolCall, results []nodeToolResult) {
 			break
 		}
 	}
+	sanitizedArgs := sanitizeToolArguments(call.Name, call.Arguments)
 	m.auditLog.Log(security.AuditEntry{
 		Tool:    call.Name,
-		Input:   string(call.Arguments),
+		Input:   string(sanitizedArgs),
 		Risk:    "EXECUTE",
 		Outcome: outcome,
 		Nodes:   resultNodeNames(results),

@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -919,6 +921,67 @@ func TestNodeToolExposureClearedOnFinishStream(t *testing.T) {
 
 	if model.nodeToolsEnabled {
 		t.Fatal("finishStream should clear node tool exposure")
+	}
+}
+
+func TestNodeAddAuditLogsRedactPassword(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	auditLog, err := security.NewAuditLogger(auditPath)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	defer auditLog.Close()
+
+	model := NewModel(ModelConfig{AuditLogger: auditLog})
+	call := llm.ToolCall{
+		Name:      metaToolNodeAdd,
+		Arguments: json.RawMessage(`{"host":"10.0.0.5","password":"secret"}`),
+	}
+
+	model.logAuditDecision(call, security.RiskAssessment{Level: security.RiskConfirm, Reason: "node add"}, "denied")
+	model.logAuditExecution(call, []nodeToolResult{{Node: "local", Output: "not implemented", Success: false}})
+
+	if err := auditLog.Close(); err != nil {
+		t.Fatalf("close audit log: %v", err)
+	}
+	contents, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	text := string(contents)
+	if strings.Contains(text, "secret") {
+		t.Fatalf("audit log should not contain raw password: %s", text)
+	}
+	if !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("audit log should contain redacted password marker: %s", text)
+	}
+	if !strings.Contains(text, "10.0.0.5") {
+		t.Fatalf("audit log should preserve host: %s", text)
+	}
+}
+
+func TestDebugLogStreamEventRedactsNodeAddPassword(t *testing.T) {
+	var buf bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	model := NewModel(ModelConfig{})
+	model.debugLogStreamEvent(llm.ToolCallEvent{
+		ID:        "node-add-1",
+		Name:      metaToolNodeAdd,
+		Arguments: json.RawMessage(`{"host":"10.0.0.5","password":"secret"}`),
+	})
+
+	logText := buf.String()
+	if strings.Contains(logText, "secret") {
+		t.Fatalf("debug log should not contain raw password: %s", logText)
+	}
+	if !strings.Contains(logText, "[REDACTED]") {
+		t.Fatalf("debug log should contain redacted password marker: %s", logText)
+	}
+	if !strings.Contains(logText, "10.0.0.5") {
+		t.Fatalf("debug log should preserve host: %s", logText)
 	}
 }
 
