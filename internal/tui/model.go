@@ -82,8 +82,9 @@ type Model struct {
 	tools      []llm.ToolDef
 	toolCache  *toolCache
 
-	nodes         []NodeInfo
-	selectedNodes map[string]bool
+	nodes            []NodeInfo
+	selectedNodes    map[string]bool
+	nodeToolsEnabled bool
 
 	mode         tuiMode
 	nodeSelector nodeSelector
@@ -889,7 +890,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: "Conan: /help /clear /exit /cluster [name] /model [name] /nodes /memory /resume /config",
+			content: "Conan: /help /clear /exit /cluster [name] /model [name] /node [off] /nodes /memory /resume /config",
 		})
 		m.status = "Help shown"
 	case CommandClear:
@@ -913,6 +914,17 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 			m.status = "Model switched to " + cmd.Arg
 		} else {
 			m.status = "Current model: " + m.model
+		}
+	case CommandNode:
+		switch strings.TrimSpace(cmd.Arg) {
+		case "":
+			m.nodeToolsEnabled = true
+			m.status = "Node management enabled for next model response"
+		case "off":
+			m.nodeToolsEnabled = false
+			m.status = "Node management disabled"
+		default:
+			m.status = "Usage: /node [off]"
 		}
 	case CommandNodes:
 		if len(m.nodes) == 0 {

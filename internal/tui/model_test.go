@@ -857,6 +857,32 @@ func TestNodesCommandOpensSelector(t *testing.T) {
 	}
 }
 
+func TestNodeCommandEnablesNodeToolsForNextResponse(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	next, _ := model.applyCommand(SlashCommand{Kind: CommandNode})
+
+	if !next.nodeToolsEnabled {
+		t.Fatal("/node should enable node tools")
+	}
+	if next.status != "Node management enabled for next model response" {
+		t.Fatalf("status = %q", next.status)
+	}
+}
+
+func TestNodeCommandOffDisablesNodeTools(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	model.nodeToolsEnabled = true
+
+	next, _ := model.applyCommand(SlashCommand{Kind: CommandNode, Arg: "off"})
+
+	if next.nodeToolsEnabled {
+		t.Fatal("/node off should disable node tools")
+	}
+	if next.status != "Node management disabled" {
+		t.Fatalf("status = %q", next.status)
+	}
+}
+
 func TestNodeSelectConfirm(t *testing.T) {
 	nodes := []NodeInfo{
 		{Name: "node-01", Host: "10.0.1.1", Online: true},

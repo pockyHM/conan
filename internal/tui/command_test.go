@@ -13,6 +13,8 @@ func TestParseSlashCommand(t *testing.T) {
 		{input: "/exit", kind: CommandExit},
 		{input: "/cluster production", kind: CommandCluster, arg: "production"},
 		{input: "/model claude-sonnet", kind: CommandModel, arg: "claude-sonnet"},
+		{input: "/node", kind: CommandNode},
+		{input: "/node off", kind: CommandNode, arg: "off"},
 		{input: "/nodes", kind: CommandNodes},
 		{input: "/memory", kind: CommandMemory},
 		{input: "/resume", kind: CommandResume},
