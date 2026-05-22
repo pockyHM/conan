@@ -10,9 +10,20 @@ import (
 )
 
 var (
-	userStyle = lipgloss.NewStyle().
+	userPromptStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("12")).
 			Bold(true)
+
+	userMessageStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252")).
+				Background(lipgloss.Color("236"))
+
+	thinkingStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("209")).
+			Bold(true)
+
+	reasoningStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245"))
 
 	toolStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243"))
@@ -48,6 +59,8 @@ var (
 
 var mdRenderer *glamour.TermRenderer
 
+var thinkingFrames = []string{"◐", "◓", "◑", "◒"}
+
 func init() {
 	var err error
 	mdRenderer, err = glamour.NewTermRenderer(
@@ -70,28 +83,127 @@ func renderMarkdown(text string) string {
 	return strings.TrimSpace(rendered)
 }
 
-func renderUserMsg(content string) string {
-	return userStyle.Render("❯ ") + content
+func renderUserMsg(content string, width int) string {
+	style := userMessageStyle
+	if width > 0 {
+		style = style.Width(width)
+	}
+	return style.Render(userPromptStyle.Render("❯ ") + content)
 }
 
 func renderAssistantMsg(content string) string {
 	return renderMarkdown(content)
 }
 
+func renderThinkingMsg(frame int, elapsed time.Duration) string {
+	if len(thinkingFrames) == 0 {
+		return thinkingStyle.Render("◦ Thinking... " + renderThinkingMeta(elapsed))
+	}
+	icon := thinkingFrames[frame%len(thinkingFrames)]
+	return thinkingStyle.Render(icon + " Thinking... " + renderThinkingMeta(elapsed))
+}
+
+func renderThinkingMeta(elapsed time.Duration) string {
+	label := formatElapsed(elapsed)
+	if label == "" {
+		return "Esc to interrupt"
+	}
+	return label + "  Esc to interrupt"
+}
+
 func renderStreamingMsg(content string) string {
 	return renderMarkdown(content) + "▌"
 }
 
-func renderMessageDivider(elapsed time.Duration) string {
-	label := formatElapsed(elapsed)
-	if label == "" {
-		return statusStyle.Render(strings.Repeat("─", 32))
+func renderReasoningMsg(content string) string {
+	line := lastNonEmptyLine(content)
+	if line == "" {
+		line = strings.TrimSpace(content)
 	}
-	return statusStyle.Render(strings.Repeat("─", 12) + " " + label + " " + strings.Repeat("─", 12))
+	return reasoningStyle.Render("◦ Thinking: " + line)
 }
 
-func renderInputBox(input string) string {
-	return inputBoxStyle.Render(inputPromptStyle.Render("❯ ") + input)
+func lastNonEmptyLine(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func renderElapsedFooter(elapsed time.Duration) string {
+	label := formatElapsed(elapsed)
+	if label == "" {
+		return ""
+	}
+	return statusStyle.Render("✱ Took " + label)
+}
+
+func renderInputBox(input string, width int) string {
+	style := inputBoxStyle
+	if width > 0 {
+		style = style.Width(max(width-2, 1))
+	}
+	return style.Render(inputPromptStyle.Render("❯ ") + input + "█")
+}
+
+func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map[string]bool) string {
+	const maxNodeRows = 5
+	wordmark := strings.Join([]string{
+		" ██████╗ ██████╗ ███╗   ██╗ █████╗ ███╗   ██╗",
+		"██╔════╝██╔═══██╗████╗  ██║██╔══██╗████╗  ██║",
+		"██║     ██║   ██║██╔██╗ ██║███████║██╔██╗ ██║",
+		"██║     ██║   ██║██║╚██╗██║██╔══██║██║╚██╗██║",
+		"╚██████╗╚██████╔╝██║ ╚████║██║  ██║██║ ╚████║",
+		" ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═══╝",
+	}, "\n")
+
+	selectedCount := 0
+	for _, ok := range selected {
+		if ok {
+			selectedCount++
+		}
+	}
+	onlineCount := 0
+	for _, node := range nodes {
+		if node.Online {
+			onlineCount++
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(inputPromptStyle.Render(wordmark))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("Cluster   %s\n", cluster))
+	b.WriteString(fmt.Sprintf("Model     %s\n", model))
+	b.WriteString(fmt.Sprintf("Nodes     %d/%d selected, %d online\n", selectedCount, len(nodes), onlineCount))
+
+	nodeLimit := min(len(nodes), maxNodeRows)
+	for i := 0; i < nodeLimit; i++ {
+		node := nodes[i]
+		icon := toolSuccess.Render("●")
+		status := "Online"
+		if !node.Online {
+			icon = statusStyle.Render("○")
+			status = "Offline"
+		}
+		selection := "unselected"
+		if selected[node.Name] {
+			selection = "selected"
+		}
+		b.WriteString(fmt.Sprintf("%s %s  %s  %-7s  %s\n", icon, node.Name, node.Host, status, selection))
+	}
+	if remaining := len(nodes) - nodeLimit; remaining > 0 {
+		b.WriteString(statusStyle.Render(fmt.Sprintf("... %d more node(s)", remaining)))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(statusStyle.Render("Type a message or /help"))
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func formatElapsed(elapsed time.Duration) string {

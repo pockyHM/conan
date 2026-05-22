@@ -2,7 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -22,12 +26,31 @@ var commandRegistry = []commandInfo{
 	{Name: "nodes", Description: "Open node selector"},
 	{Name: "memory", Description: "View memory summary"},
 	{Name: "resume", Description: "Resume session", ArgHint: "[id]"},
+	{Name: "thinking", Description: "Send one message with thinking enabled", ArgHint: "<message>"},
+	{Name: "agent", Description: "Run a local subagent", ArgHint: "<role> <task>"},
+	{Name: "subagents", Description: "Manage local subagents", ArgHint: "[on|off|limit]"},
 }
 
 type autocomplete struct {
-	visible  bool
-	selected int
-	prefix   string
+	visible     bool
+	selected    int
+	prefix      string
+	mode        autocompleteMode
+	input       string
+	tokenStart  int
+	fileMatches []fileCompletion
+}
+
+type autocompleteMode int
+
+const (
+	autocompleteCommands autocompleteMode = iota
+	autocompleteFiles
+)
+
+type fileCompletion struct {
+	Path  string
+	IsDir bool
 }
 
 func newAutocomplete() autocomplete {
@@ -35,11 +58,20 @@ func newAutocomplete() autocomplete {
 }
 
 func (a autocomplete) update(input string) autocomplete {
+	return a.updateWithRoot(input, "")
+}
+
+func (a autocomplete) updateWithRoot(input string, root string) autocomplete {
+	a.input = input
+	a.fileMatches = nil
 	if !strings.HasPrefix(input, "/") || strings.Contains(input, " ") {
-		a.visible = false
-		return a
+		if updated, ok := a.updateFileRefs(input, root); ok {
+			return updated
+		}
+		return a.hide()
 	}
 	a.visible = true
+	a.mode = autocompleteCommands
 	a.prefix = strings.TrimPrefix(input, "/")
 	if a.selected >= len(a.filtered()) {
 		a.selected = 0
@@ -47,7 +79,111 @@ func (a autocomplete) update(input string) autocomplete {
 	return a
 }
 
+func (a autocomplete) hide() autocomplete {
+	a.visible = false
+	a.prefix = ""
+	a.fileMatches = nil
+	a.tokenStart = 0
+	return a
+}
+
+func (a autocomplete) updateFileRefs(input string, root string) (autocomplete, bool) {
+	if root == "" {
+		root = "."
+	}
+	start, prefix, ok := activeAtToken(input)
+	if !ok {
+		return a, false
+	}
+	matches := fileCompletions(root, prefix)
+	if len(matches) == 0 {
+		return a.hide(), true
+	}
+	a.visible = true
+	a.mode = autocompleteFiles
+	a.prefix = prefix
+	a.tokenStart = start
+	a.fileMatches = matches
+	if a.selected >= len(matches) {
+		a.selected = 0
+	}
+	return a, true
+}
+
+func activeAtToken(input string) (int, string, bool) {
+	runes := []rune(input)
+	for i := len(runes) - 1; i >= 0; i-- {
+		if unicode.IsSpace(runes[i]) {
+			break
+		}
+		if runes[i] != '@' {
+			continue
+		}
+		if i > 0 && runes[i-1] == '@' {
+			return 0, "", false
+		}
+		if i > 0 && !unicode.IsSpace(runes[i-1]) {
+			return 0, "", false
+		}
+		prefix := string(runes[i+1:])
+		if strings.Contains(prefix, "\"") {
+			return 0, "", false
+		}
+		return len(string(runes[:i])), prefix, true
+	}
+	return 0, "", false
+}
+
+func fileCompletions(root string, prefix string) []fileCompletion {
+	cleanPrefix := filepath.Clean(prefix)
+	if prefix == "" {
+		cleanPrefix = "."
+	}
+	if filepath.IsAbs(cleanPrefix) || cleanPrefix == ".." || strings.HasPrefix(cleanPrefix, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	dirPart := filepath.Dir(cleanPrefix)
+	basePart := filepath.Base(cleanPrefix)
+	if strings.HasSuffix(prefix, "/") || prefix == "" {
+		dirPart = cleanPrefix
+		basePart = ""
+	}
+	if dirPart == "." {
+		dirPart = ""
+	}
+	dir := filepath.Join(root, dirPart)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var matches []fileCompletion
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !strings.HasPrefix(name, basePart) {
+			continue
+		}
+		path := filepath.ToSlash(filepath.Join(dirPart, name))
+		if entry.IsDir() {
+			path += "/"
+		}
+		matches = append(matches, fileCompletion{Path: path, IsDir: entry.IsDir()})
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].IsDir != matches[j].IsDir {
+			return matches[i].IsDir
+		}
+		return matches[i].Path < matches[j].Path
+	})
+	return matches
+}
+
 func (a autocomplete) filtered() []commandInfo {
+	if a.mode == autocompleteFiles {
+		return nil
+	}
 	if a.prefix == "" {
 		return commandRegistry
 	}
@@ -68,14 +204,23 @@ func (a autocomplete) moveUp() autocomplete {
 }
 
 func (a autocomplete) moveDown() autocomplete {
-	filtered := a.filtered()
-	if a.selected < len(filtered)-1 {
+	count := len(a.filtered())
+	if a.mode == autocompleteFiles {
+		count = len(a.fileMatches)
+	}
+	if a.selected < count-1 {
 		a.selected++
 	}
 	return a
 }
 
 func (a autocomplete) completion() string {
+	if a.mode == autocompleteFiles {
+		if a.selected < len(a.fileMatches) {
+			return a.input[:a.tokenStart] + "@" + a.fileMatches[a.selected].Path + completionSuffix(a.fileMatches[a.selected])
+		}
+		return ""
+	}
 	filtered := a.filtered()
 	if a.selected < len(filtered) {
 		return "/" + filtered[a.selected].Name + " "
@@ -83,15 +228,29 @@ func (a autocomplete) completion() string {
 	return ""
 }
 
-func (a autocomplete) View() string {
+func (a autocomplete) View(width int) string {
 	if !a.visible {
 		return ""
 	}
-	filtered := a.filtered()
-	if len(filtered) == 0 {
-		return ""
+	var lines []string
+	if a.mode == autocompleteFiles {
+		if len(a.fileMatches) == 0 {
+			return ""
+		}
+		lines = a.fileLines()
+	} else {
+		filtered := a.filtered()
+		if len(filtered) == 0 {
+			return ""
+		}
+		lines = a.commandLines(filtered)
 	}
+	panel := strings.Join(lines, "\n")
+	style := strings.TrimSpace(panelStyle(width).Render(panel))
+	return style
+}
 
+func (a autocomplete) commandLines(filtered []commandInfo) []string {
 	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
@@ -111,11 +270,44 @@ func (a autocomplete) View() string {
 		line := fmt.Sprintf("%s%s  %s", cursor, nameStyle.Render("/"+cmd.Name+hint), descStyle.Render(cmd.Description))
 		lines = append(lines, line)
 	}
+	return lines
+}
 
-	panel := strings.Join(lines, "\n")
-	return lipgloss.NewStyle().
+func (a autocomplete) fileLines() []string {
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	var lines []string
+	for i, match := range a.fileMatches {
+		cursor := "  "
+		nameStyle := normalStyle
+		if i == a.selected {
+			cursor = "▸ "
+			nameStyle = selectedStyle
+		}
+		kind := "file"
+		if match.IsDir {
+			kind = "dir"
+		}
+		lines = append(lines, fmt.Sprintf("%s%s  %s", cursor, nameStyle.Render("@"+match.Path), descStyle.Render(kind)))
+	}
+	return lines
+}
+
+func panelStyle(width int) lipgloss.Style {
+	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
-		Padding(0, 1).
-		Render(panel)
+		Padding(0, 1)
+	if width > 0 {
+		style = style.Width(max(width-2, 1))
+	}
+	return style
+}
+
+func completionSuffix(match fileCompletion) string {
+	if match.IsDir {
+		return ""
+	}
+	return " "
 }

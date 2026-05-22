@@ -4,32 +4,37 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/localtools"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
 var readOnlyTools = map[string]bool{
-	"fs/read": true, "fs/list": true, "fs/stat": true, "fs/download": true,
+	"fs/read": true, "fs/list": true, "fs/stat": true,
 	"sys/cpu": true, "sys/mem": true, "sys/disk": true, "sys/net": true, "sys/processes": true,
 	"svc/status": true, "svc/list": true,
 	"log/read": true, "log/journalctl": true,
 	"net/ping": true, "net/traceroute": true, "net/portcheck": true, "net/curl": true,
+	"web/search": true, "web/fetch": true,
 	"docker/ps": true, "docker/images": true, "docker/logs": true,
 	"k8s/pods": true, "k8s/logs": true, "k8s/events": true, "k8s/describe": true,
 	"pkg/list": true, "pkg/search": true,
 	"cron/list": true, "cron/show": true,
-	"tool_search": true,
+	"tool_search":   true,
+	"local/fs/read": true, "local/fs/list": true, "local/fs/stat": true,
 }
 
 // ReviewerConfig holds configuration for creating a new Reviewer.
 type ReviewerConfig struct {
-	NodeWhitelists map[string][]string
-	Blacklist      []string
-	Provider       llm.Provider
-	ModelName      string
+	NodeWhitelists     map[string][]string
+	Blacklist          []string
+	LocalFileWhitelist []string
+	Provider           llm.Provider
+	ModelName          string
 }
 
 // Reviewer implements the two-stage security review pipeline:
@@ -39,6 +44,7 @@ type ReviewerConfig struct {
 type Reviewer struct {
 	nodeWhitelists map[string]Whitelist
 	blacklist      Blacklist
+	localFiles     Whitelist
 	provider       llm.Provider
 	modelName      string
 	cache          map[string]RiskAssessment
@@ -53,6 +59,7 @@ func NewReviewer(cfg ReviewerConfig) *Reviewer {
 	return &Reviewer{
 		nodeWhitelists: nodeWhitelists,
 		blacklist:      NewBlacklist(cfg.Blacklist),
+		localFiles:     NewWhitelist(normalizeLocalFileWhitelist(cfg.LocalFileWhitelist)),
 		provider:       cfg.Provider,
 		modelName:      cfg.ModelName,
 		cache:          make(map[string]RiskAssessment),
@@ -66,6 +73,18 @@ func (r *Reviewer) Review(ctx context.Context, toolName, toolInput string, targe
 	// Stage 1: read-only tools are always allowed
 	if readOnlyTools[toolName] {
 		return RiskAssessment{Level: RiskAllow, Reason: "read-only tool"}, nil
+	}
+
+	if localtools.IsLocalTool(toolName) {
+		path := normalizeLocalFilePath(localtools.PathFromCall(toolName, json.RawMessage(toolInput)))
+		if path != "" && r.localFiles.Match(path) {
+			return RiskAssessment{Level: RiskAllow, Reason: "local file allowlist"}, nil
+		}
+		return RiskAssessment{Level: RiskConfirm, Reason: "local file mutation requires confirmation"}, nil
+	}
+
+	if toolName == "file_put" || toolName == "file_get" {
+		return RiskAssessment{Level: RiskConfirm, Reason: "managed file transfer requires confirmation"}, nil
 	}
 
 	// Stage 2: whitelist check for shell commands
@@ -150,6 +169,43 @@ func (r *Reviewer) AddNodeWhitelist(node, command string) {
 	}
 	entries = append(entries, command)
 	r.nodeWhitelists[node] = NewWhitelist(entries)
+}
+
+func (r *Reviewer) AddLocalFileWhitelist(path string) {
+	path = normalizeLocalFilePath(path)
+	if path == "" {
+		return
+	}
+	entries := append([]string(nil), r.localFiles.entries...)
+	for _, entry := range entries {
+		if entry == path {
+			return
+		}
+	}
+	entries = append(entries, path)
+	r.localFiles = NewWhitelist(entries)
+}
+
+func normalizeLocalFileWhitelist(paths []string) []string {
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if normalized := normalizeLocalFilePath(path); normalized != "" {
+			result = append(result, normalized)
+		}
+	}
+	return result
+}
+
+func normalizeLocalFilePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "." || strings.HasPrefix(path, "../") || path == ".." || strings.HasPrefix(path, "/") {
+		return ""
+	}
+	return path
 }
 
 func sortedCopy(values []string) []string {

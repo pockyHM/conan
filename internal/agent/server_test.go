@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +111,51 @@ func TestServerToolCall(t *testing.T) {
 	first := content[0].(map[string]interface{})
 	if first["text"] != "integration" {
 		t.Errorf("text = %v, want integration", first["text"])
+	}
+}
+
+func TestServerDownloadsFileViaHTTP(t *testing.T) {
+	dir := t.TempDir()
+	file := dir + "/artifact.bin"
+	if err := os.WriteFile(file, []byte("streamed bytes"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	base := newTestServer(t)
+
+	resp, err := http.Get(base + "/files/download?path=" + url.QueryEscape(file))
+	if err != nil {
+		t.Fatalf("download request: %v", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(data) != "streamed bytes" {
+		t.Fatalf("status=%d body=%q", resp.StatusCode, data)
+	}
+}
+
+func TestServerUploadsFileViaHTTP(t *testing.T) {
+	dir := t.TempDir()
+	dst := dir + "/nested/artifact.bin"
+	base := newTestServer(t)
+
+	req, err := http.NewRequest(http.MethodPut, base+"/files/upload?path="+url.QueryEscape(dst)+"&mkdirs=true", strings.NewReader("streamed upload"))
+	if err != nil {
+		t.Fatalf("upload request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("upload do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read uploaded file: %v", err)
+	}
+	if string(data) != "streamed upload" {
+		t.Fatalf("uploaded data = %q", data)
 	}
 }

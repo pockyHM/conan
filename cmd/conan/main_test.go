@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,6 +45,75 @@ func TestToolsListHelpShowsRequiredNode(t *testing.T) {
 	}
 }
 
+func TestFilesPutUploadsLocalFileToAgent(t *testing.T) {
+	var uploadedPath string
+	var uploadedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/files/upload" {
+			t.Fatalf("request = %s %s, want PUT /files/upload", r.Method, r.URL.Path)
+		}
+		uploadedPath = r.URL.Query().Get("path")
+		var err error
+		uploadedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upload body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	home := writeSingleNodeHome(t, srv.URL)
+	local := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(local, []byte("hello world"), 0644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "files", "put", "node-a", local, "/remote/file.txt")
+	if err != nil {
+		t.Fatalf("files put: %v", err)
+	}
+	if !strings.Contains(stdout, "node-a\tuploaded\t/remote/file.txt\t11 bytes") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	if uploadedPath != "/remote/file.txt" || string(uploadedBody) != "hello world" {
+		t.Fatalf("uploaded path=%q body=%q", uploadedPath, uploadedBody)
+	}
+}
+
+func TestFilesGetDownloadsAgentFileToLocalPath(t *testing.T) {
+	var requestedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/files/download" {
+			t.Fatalf("request = %s %s, want GET /files/download", r.Method, r.URL.Path)
+		}
+		requestedPath = r.URL.Query().Get("path")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hello world"))
+	}))
+	defer srv.Close()
+
+	home := writeSingleNodeHome(t, srv.URL)
+	local := filepath.Join(t.TempDir(), "downloaded", "file.txt")
+
+	stdout, _, err := executeCommand("--home", home, "files", "get", "node-a", "/remote/file.txt", local)
+	if err != nil {
+		t.Fatalf("files get: %v", err)
+	}
+	if !strings.Contains(stdout, "node-a\tdownloaded\t/remote/file.txt\t11 bytes") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	data, err := os.ReadFile(local)
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if string(data) != "hello world" {
+		t.Fatalf("local data = %q", data)
+	}
+	if requestedPath != "/remote/file.txt" {
+		t.Fatalf("requested path = %q", requestedPath)
+	}
+}
+
 func TestTUICommandRegistered(t *testing.T) {
 	stdout, _, err := executeCommand("tui", "--help")
 	if err != nil {
@@ -52,6 +122,30 @@ func TestTUICommandRegistered(t *testing.T) {
 	if !strings.Contains(stdout, "Start the interactive TUI") {
 		t.Fatalf("help output = %q", stdout)
 	}
+}
+
+func writeSingleNodeHome(t *testing.T, serverURL string) string {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "clusters", "test"), 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: test\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "clusters", "test", "cluster.yaml"), []byte("name: test\n"), 0644); err != nil {
+		t.Fatalf("write cluster: %v", err)
+	}
+	portText := serverURL[strings.LastIndex(serverURL, ":")+1:]
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+	nodes := "nodes:\n  - name: node-a\n    host: 127.0.0.1\n    agent:\n      port: " + strconv.Itoa(port) + "\n"
+	if err := os.WriteFile(filepath.Join(home, "clusters", "test", "nodes.yaml"), []byte(nodes), 0644); err != nil {
+		t.Fatalf("write nodes: %v", err)
+	}
+	return home
 }
 
 func TestTUICommandUsesConfiguredStreams(t *testing.T) {

@@ -18,15 +18,16 @@ func ExpandEnv(s string) string {
 // --- Agent-side config ---
 
 type AgentConfig struct {
-	Listen        string   `yaml:"listen"`
-	Token         string   `yaml:"token"`
-	TLS           bool     `yaml:"tls"`
-	TLSCert       string   `yaml:"tls_cert,omitempty"`
-	TLSKey        string   `yaml:"tls_key,omitempty"`
-	AuditLog      string   `yaml:"audit_log"`
-	RateLimit     int      `yaml:"rate_limit"`
-	DisabledTools []string `yaml:"disabled_tools"`
-	LogLevel      string   `yaml:"log_level"`
+	Listen        string    `yaml:"listen"`
+	Token         string    `yaml:"token"`
+	TLS           bool      `yaml:"tls"`
+	TLSCert       string    `yaml:"tls_cert,omitempty"`
+	TLSKey        string    `yaml:"tls_key,omitempty"`
+	AuditLog      string    `yaml:"audit_log"`
+	RateLimit     int       `yaml:"rate_limit"`
+	DisabledTools []string  `yaml:"disabled_tools"`
+	LogLevel      string    `yaml:"log_level"`
+	Web           WebConfig `yaml:"web"`
 }
 
 func DefaultAgentConfig() *AgentConfig {
@@ -36,6 +37,16 @@ func DefaultAgentConfig() *AgentConfig {
 		RateLimit: 10,
 		LogLevel:  "info",
 	}
+}
+
+type WebConfig struct {
+	SearchProvider      string `yaml:"search_provider"`
+	SearchAPIKey        string `yaml:"search_api_key,omitempty"`
+	SearchAPIKeyEnv     string `yaml:"search_api_key_env,omitempty"`
+	SearchEndpoint      string `yaml:"search_endpoint,omitempty"`
+	FetchMaxBytes       int64  `yaml:"fetch_max_bytes,omitempty"`
+	FetchMaxChars       int    `yaml:"fetch_max_chars,omitempty"`
+	AllowPrivateNetwork bool   `yaml:"allow_private_network,omitempty"`
 }
 
 // --- CLI-side config ---
@@ -48,6 +59,7 @@ type GlobalConfig struct {
 	Memory         MemoryConfig      `yaml:"memory"`
 	Logging        LoggingConfig     `yaml:"logging"`
 	AgentDeploy    AgentDeployConfig `yaml:"agent_deploy"`
+	Subagents      SubagentConfig    `yaml:"subagents"`
 }
 
 type ModelConfig struct {
@@ -56,11 +68,13 @@ type ModelConfig struct {
 	Endpoint string `yaml:"endpoint"`
 	Model    string `yaml:"model"`
 	APIKey   string `yaml:"api_key"`
+	Thinking *bool  `yaml:"thinking,omitempty"`
 }
 
 type SecurityConfig struct {
 	RiskAssessmentModel string   `yaml:"risk_assessment_model"`
 	CommandBlacklist    []string `yaml:"command_blacklist"`
+	LocalFileWhitelist  []string `yaml:"local_file_whitelist"`
 }
 
 type MemoryConfig struct {
@@ -84,6 +98,14 @@ type AgentDeployConfig struct {
 type AgentBinaryConfig struct {
 	AMD64 string `yaml:"amd64"`
 	ARM64 string `yaml:"arm64"`
+}
+
+type SubagentConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	MaxParallel    int    `yaml:"max_parallel"`
+	DefaultModel   string `yaml:"default_model"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	Debug          bool   `yaml:"debug"`
 }
 
 // --- Cluster config ---

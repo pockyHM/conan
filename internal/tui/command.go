@@ -5,16 +5,19 @@ import "strings"
 type CommandKind string
 
 const (
-	CommandHelp    CommandKind = "help"
-	CommandClear   CommandKind = "clear"
-	CommandExit    CommandKind = "exit"
-	CommandCluster CommandKind = "cluster"
-	CommandModel   CommandKind = "model"
-	CommandNode    CommandKind = "node"
-	CommandNodes   CommandKind = "nodes"
-	CommandMemory  CommandKind = "memory"
-	CommandResume  CommandKind = "resume"
-	CommandUnknown CommandKind = "unknown"
+	CommandHelp      CommandKind = "help"
+	CommandClear     CommandKind = "clear"
+	CommandExit      CommandKind = "exit"
+	CommandCluster   CommandKind = "cluster"
+	CommandModel     CommandKind = "model"
+	CommandNode      CommandKind = "node"
+	CommandNodes     CommandKind = "nodes"
+	CommandMemory    CommandKind = "memory"
+	CommandResume    CommandKind = "resume"
+	CommandThinking  CommandKind = "thinking"
+	CommandAgent     CommandKind = "agent"
+	CommandSubagents CommandKind = "subagents"
+	CommandUnknown   CommandKind = "unknown"
 )
 
 type SlashCommand struct {
@@ -60,6 +63,12 @@ func ParseSlashCommand(input string) (SlashCommand, bool) {
 		return SlashCommand{Kind: CommandMemory, Arg: arg}, true
 	case "resume":
 		return SlashCommand{Kind: CommandResume, Arg: arg}, true
+	case "thinking":
+		return SlashCommand{Kind: CommandThinking, Arg: arg}, true
+	case "agent":
+		return SlashCommand{Kind: CommandAgent, Arg: arg}, true
+	case "subagents", "agents":
+		return SlashCommand{Kind: CommandSubagents, Arg: arg}, true
 	default:
 		if arg != "" {
 			return SlashCommand{Kind: CommandUnknown, Arg: name + " " + arg}, true

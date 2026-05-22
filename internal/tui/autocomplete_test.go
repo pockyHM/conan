@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -71,7 +73,7 @@ func TestAutocompleteCompletion(t *testing.T) {
 
 func TestAutocompleteRenders(t *testing.T) {
 	a := newAutocomplete().update("/")
-	view := a.View()
+	view := a.View(0)
 	if view == "" {
 		t.Fatal("autocomplete view should not be empty")
 	}
@@ -82,8 +84,59 @@ func TestAutocompleteRenders(t *testing.T) {
 
 func TestAutocompleteEmptyForNoMatch(t *testing.T) {
 	a := newAutocomplete().update("/zzz")
-	view := a.View()
+	view := a.View(0)
 	if view != "" {
 		t.Fatalf("autocomplete should be empty for no match, got:\n%s", view)
+	}
+}
+
+func TestAutocompleteShowsFileRefsAfterAt(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "tui"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("readme"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+
+	a := newAutocomplete().updateWithRoot("please read @RE", root)
+	if !a.visible {
+		t.Fatal("autocomplete should be visible for @ file ref")
+	}
+	if got := a.completion(); got != "please read @README.md " {
+		t.Fatalf("completion = %q", got)
+	}
+	view := a.View(80)
+	if !strings.Contains(view, "@README.md") {
+		t.Fatalf("view missing file candidate:\n%s", view)
+	}
+}
+
+func TestAutocompleteCompletesDirectoriesWithSlash(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "tui"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	a := newAutocomplete().updateWithRoot("inspect @int", root)
+	if got := a.completion(); got != "inspect @internal/" {
+		t.Fatalf("completion = %q", got)
+	}
+
+	a = newAutocomplete().updateWithRoot("inspect @internal/t", root)
+	if got := a.completion(); got != "inspect @internal/tui/" {
+		t.Fatalf("nested completion = %q", got)
+	}
+}
+
+func TestAutocompleteIgnoresEscapedAt(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("readme"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+
+	a := newAutocomplete().updateWithRoot("literal @@RE", root)
+	if a.visible {
+		t.Fatal("autocomplete should ignore escaped @@ references")
 	}
 }

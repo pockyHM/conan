@@ -13,17 +13,19 @@ import (
 )
 
 type OpenAIConfig struct {
-	APIKey  string
-	Model   string
-	BaseURL string
-	Client  *http.Client
+	APIKey   string
+	Model    string
+	BaseURL  string
+	Client   *http.Client
+	Thinking *bool
 }
 
 type OpenAIProvider struct {
-	apiKey  string
-	model   string
-	baseURL string
-	client  *http.Client
+	apiKey   string
+	model    string
+	baseURL  string
+	client   *http.Client
+	thinking *bool
 }
 
 func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
@@ -36,10 +38,11 @@ func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
 		client = http.DefaultClient
 	}
 	return &OpenAIProvider{
-		apiKey:  cfg.APIKey,
-		model:   cfg.Model,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  client,
+		apiKey:   cfg.APIKey,
+		model:    cfg.Model,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		client:   client,
+		thinking: cfg.Thinking,
 	}
 }
 
@@ -92,6 +95,9 @@ func (p *OpenAIProvider) buildBody(req *ChatRequest, stream bool) ([]byte, error
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
 	}
+	if thinking := p.thinkingSetting(req); thinking != nil {
+		body["thinking"] = map[string]any{"type": thinkingType(*thinking)}
+	}
 	if req.SystemPrompt != "" {
 		systemMsg := jsonMarshal(map[string]any{"role": "system", "content": req.SystemPrompt})
 		msgs = append([]json.RawMessage{systemMsg}, msgs...)
@@ -104,6 +110,20 @@ func (p *OpenAIProvider) buildBody(req *ChatRequest, stream bool) ([]byte, error
 		body["stream"] = true
 	}
 	return json.Marshal(body)
+}
+
+func (p *OpenAIProvider) thinkingSetting(req *ChatRequest) *bool {
+	if req != nil && req.Thinking != nil {
+		return req.Thinking
+	}
+	return p.thinking
+}
+
+func thinkingType(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func (p *OpenAIProvider) doRequest(ctx context.Context, body []byte) (*http.Response, error) {
@@ -175,8 +195,9 @@ func (p *OpenAIProvider) handleStream(reader io.ReadCloser, ch chan<- ChatEvent)
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Type     string `json:"type"`
@@ -200,6 +221,9 @@ func (p *OpenAIProvider) handleStream(reader io.ReadCloser, ch chan<- ChatEvent)
 
 		if choice.Delta.Content != "" {
 			ch <- TextDeltaEvent{Delta: choice.Delta.Content}
+		}
+		if choice.Delta.Content == "" && choice.Delta.ReasoningContent != "" {
+			ch <- ReasoningDeltaEvent{Delta: choice.Delta.ReasoningContent}
 		}
 		for _, tc := range choice.Delta.ToolCalls {
 			if toolCalls[tc.Index] == nil {

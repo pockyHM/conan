@@ -167,6 +167,10 @@ func (f *fsStatTool) Execute(ctx context.Context, input json.RawMessage) (*mcppr
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(result)}}, nil
 }
 
+func toolError(message string) *mcpproto.ToolResult {
+	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.ErrorContent(message)}, IsError: true}
+}
+
 func NewFsTools() []Tool {
 	return []Tool{&fsReadTool{}, &fsWriteTool{}, &fsEditTool{}, &fsListTool{}, &fsStatTool{}}
 }

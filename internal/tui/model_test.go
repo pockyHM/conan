@@ -16,10 +16,14 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/logging"
 	"github.com/pockyHM/conan/internal/mcp"
+	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/security"
+	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
 )
@@ -44,6 +48,34 @@ func (f *fakeProvider) ChatStream(_ context.Context, _ *llm.ChatRequest) (<-chan
 	return ch, nil
 }
 
+type captureStreamProvider struct {
+	req *llm.ChatRequest
+}
+
+func (p *captureStreamProvider) Chat(_ context.Context, _ *llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{Message: models.Message{Role: "assistant", Content: "ok"}, StopReason: llm.StopEndTurn}, nil
+}
+
+func (p *captureStreamProvider) ChatStream(_ context.Context, req *llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	p.req = req
+	ch := make(chan llm.ChatEvent, 2)
+	ch <- llm.TextDeltaEvent{Delta: "ok"}
+	ch <- llm.StopEvent{Reason: llm.StopEndTurn}
+	close(ch)
+	return ch, nil
+}
+
+type stubMemoryExtractor struct {
+	candidates []memory.MemoryCandidate
+	err        error
+	inputs     []MemoryExtractionInput
+}
+
+func (s *stubMemoryExtractor) ExtractMemory(_ context.Context, input MemoryExtractionInput) ([]memory.MemoryCandidate, error) {
+	s.inputs = append(s.inputs, input)
+	return s.candidates, s.err
+}
+
 func TestInitialModelView(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
 	view := model.View()
@@ -54,20 +86,750 @@ func TestInitialModelView(t *testing.T) {
 	}
 }
 
+func TestSystemPromptPrefersSpecializedToolsBeforeExec(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "production",
+		Model:   "claude-sonnet",
+		Nodes:   []NodeInfo{{Name: "node-01", Online: true}},
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	for _, want := range []string{
+		"high-discipline infrastructure operations agent",
+		"Tool routing contract:",
+		"call tool_search first unless the user explicitly asked for shell",
+		"use file_put or file_get directly",
+		"Do not call tool_search first for file transfer",
+		"use call_tool with a discovered specialized tool",
+		"Use exec only as fallback",
+		"Do not use ad hoc scp, rsync, curl, or wget for file transfer",
+		"For resource-changing operations, first use read-only tools",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSubmitMessageInjectsReferencedLocalFileContext(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("project notes"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	provider := &captureStreamProvider{}
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{
+		Cluster:            "test",
+		Model:              "m",
+		Provider:           provider,
+		Conv:               conv,
+		LocalWorkspaceRoot: workspace,
+	})
+
+	next, cmd := model.submitMessage("summarize @README.md", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submit should start stream")
+	}
+	execMaybeBatch(t, cmd)
+	if provider.req == nil {
+		t.Fatal("provider did not receive request")
+	}
+	msgs := provider.req.Messages
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %#v, want one user message", msgs)
+	}
+	if !strings.Contains(msgs[0].Content, "summarize @README.md") ||
+		!strings.Contains(msgs[0].Content, `<file path="README.md">`) ||
+		!strings.Contains(msgs[0].Content, "project notes") {
+		t.Fatalf("message missing referenced file context:\n%s", msgs[0].Content)
+	}
+	if len(model.messages) != 1 || model.messages[0].content != "summarize @README.md" {
+		t.Fatalf("visible messages = %#v, want original user input", model.messages)
+	}
+}
+
+func TestSubmitMessageWithInvalidReferenceDoesNotCallProvider(t *testing.T) {
+	workspace := t.TempDir()
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:            "test",
+		Model:              "m",
+		Provider:           provider,
+		Conv:               conversation.New("test", nil, "model"),
+		LocalWorkspaceRoot: workspace,
+	})
+
+	next, cmd := model.submitMessage("read @missing.md", nil)
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatal("invalid file reference should not start stream")
+	}
+	if provider.req != nil {
+		t.Fatal("provider should not be called for invalid file reference")
+	}
+	if !strings.Contains(model.status, "File reference error") {
+		t.Fatalf("status = %q", model.status)
+	}
+}
+
+func TestSystemPromptIncludesSubagentPolicyWhenEnabled(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "production",
+		Model:   "claude-sonnet",
+		Subagents: configschema.SubagentConfig{
+			Enabled: true,
+		},
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	for _, want := range []string{
+		"Subagent policy:",
+		"Use subagents_run",
+		"Do not delegate destructive actions",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSubagentsRunToolOnlyExposedWhenEnabled(t *testing.T) {
+	disabled := NewModel(ModelConfig{})
+	for _, tool := range disabled.availableToolDefs() {
+		if tool.Name == metaToolSubagentsRun {
+			t.Fatal("subagents_run exposed while subagents are disabled")
+		}
+	}
+
+	enabled := NewModel(ModelConfig{Subagents: configschema.SubagentConfig{Enabled: true}})
+	found := false
+	for _, tool := range enabled.availableToolDefs() {
+		if tool.Name == metaToolSubagentsRun {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("subagents_run not exposed while subagents are enabled")
+	}
+}
+
+func TestSystemPromptExplainsMemoryPolicy(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		Conv:        conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore: store,
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	for _, want := range []string{
+		"Memory policy:",
+		"Use memory_patch or memory_write_note when the user explicitly asks you to remember",
+		"Save durable operational facts",
+		"Do not save casual chat",
+		"Use memory_search",
+		"Use memory_read",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, legacy := range []string{"memory/save", "memory/search"} {
+		if strings.Contains(prompt, legacy) {
+			t.Fatalf("system prompt should not mention legacy tool name %q:\n%s", legacy, prompt)
+		}
+	}
+}
+
+func TestSystemPromptInjectsCoreRulesAndClusterMemory(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "rules"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "clusters"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "MEMORY.md"), []byte("core preference: keep responses terse"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "rules", "ops.md"), []byte("ops rule: require production health checks"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "clusters", "production.md"), []byte("production topology: api runs on node-01"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		Conv:        conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore: store,
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	for _, want := range []string{
+		"core preference: keep responses terse",
+		"ops rule: require production health checks",
+		"production topology: api runs on node-01",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestSystemPromptDoesNotFollowClusterMemorySymlink(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "clusters"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	if err := os.WriteFile(outside, []byte("SECRET cluster data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(memoryRoot, "clusters", "production.md")); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		MemoryStore: store,
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	if strings.Contains(prompt, "SECRET") {
+		t.Fatalf("system prompt followed cluster memory symlink:\n%s", prompt)
+	}
+}
+
+func TestSystemPromptBoundsMarkdownAndSQLiteMemory(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "clusters"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	longCluster := strings.Repeat("cluster-prefix ", 400) + "CLUSTER_LONG_TAIL"
+	if err := os.WriteFile(filepath.Join(memoryRoot, "clusters", "production.md"), []byte(longCluster), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMemory(memory.MemoryEntry{
+		ID:       models.NewID(),
+		Category: "experience",
+		Title:    "long sqlite",
+		Content:  strings.Repeat("sqlite-prefix ", 120) + "SQLITE_LONG_TAIL",
+		Tags:     `["test"]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		MemoryStore: store,
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	for _, tail := range []string{"CLUSTER_LONG_TAIL", "SQLITE_LONG_TAIL"} {
+		if strings.Contains(prompt, tail) {
+			t.Fatalf("system prompt included unbounded memory tail %q:\n%s", tail, prompt)
+		}
+	}
+	if len(prompt) > 7000 {
+		t.Fatalf("system prompt length = %d, want bounded prompt under 7000", len(prompt))
+	}
+}
+
+func TestSystemPromptSkipsSQLiteMemoryDuplicatedInMarkdown(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "clusters"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := "api runs on node-01"
+	if err := os.WriteFile(filepath.Join(memoryRoot, "clusters", "production.md"), []byte(duplicate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMemory(memory.MemoryEntry{
+		ID:       models.NewID(),
+		Category: "topology",
+		Title:    "api location",
+		Content:  duplicate,
+		Tags:     `["test"]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		MemoryStore: store,
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	if count := strings.Count(prompt, duplicate); count != 1 {
+		t.Fatalf("duplicate memory appeared %d times, want once:\n%s", count, prompt)
+	}
+	if strings.Contains(prompt, "[Memory Context]") {
+		t.Fatalf("duplicate SQLite memory should be skipped when markdown already contains it:\n%s", prompt)
+	}
+}
+
+func TestExplicitRememberMessageAutoSavesMemory(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		Conv:        conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore: store,
+	})
+
+	next, _ := model.submitMessage("记住生产集群 API 地址是 https://api.example.com", nil)
+	model = next.(Model)
+
+	data, err := os.ReadFile(filepath.Join(store.Dir(), "memory", "clusters", "production.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "生产集群 API 地址是 https://api.example.com") {
+		t.Fatalf("cluster markdown did not contain explicit memory:\n%s", string(data))
+	}
+
+	results, err := store.SearchMemories("api.example.com", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("topology explicit remember should route to markdown, got SQLite results: %#v", results)
+	}
+}
+
+func TestExplicitRememberNameWritesProfileMarkdown(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		Conv:        conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore: store,
+	})
+
+	next, _ := model.submitMessage("记住我叫小王", nil)
+	model = next.(Model)
+
+	data, err := os.ReadFile(filepath.Join(store.Dir(), "memory", "profile.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "我叫小王") {
+		t.Fatalf("profile markdown did not contain explicit memory:\n%s", string(data))
+	}
+
+	results, err := store.SearchMemories("小王", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("profile explicit remember should route to markdown, got SQLite results: %#v", results)
+	}
+}
+
+func TestExplicitRememberEventWritesSQLiteMemoryWithSourceConversation(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conv := conversation.New("production", nil, "claude-sonnet")
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		Conv:        conv,
+		MemoryStore: store,
+	})
+
+	next, _ := model.submitMessage("remember that deploy v2 happened today", nil)
+	model = next.(Model)
+
+	results, err := store.SearchMemories("deploy v2", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 SQLite memory, got %d: %#v", len(results), results)
+	}
+	got := results[0]
+	if got.ID == "" {
+		t.Fatalf("memory ID is empty: %#v", got)
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(got.Tags), &tags); err != nil {
+		t.Fatalf("memory tags are not valid JSON: %q: %v", got.Tags, err)
+	}
+	for _, want := range []string{"user", "explicit"} {
+		if !stringSliceContains(tags, want) {
+			t.Fatalf("memory tags = %#v, want %q", tags, want)
+		}
+	}
+	if got.SourceConv != conv.ID() {
+		t.Fatalf("SourceConv = %q, want %q", got.SourceConv, conv.ID())
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].Role != "user" || msgs[0].Content != "remember that deploy v2 happened today" {
+		t.Fatalf("conversation messages = %#v, want source user message", msgs)
+	}
+}
+
+func TestExplicitRememberRejectsSecretLikeContent(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		Conv:        conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore: store,
+	})
+
+	next, _ := model.submitMessage("remember that my token is abc", nil)
+	model = next.(Model)
+
+	results, err := store.ListMemories("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("secret-like explicit remember should not create SQLite memory: %#v", results)
+	}
+	if _, err := os.Stat(filepath.Join(store.Dir(), "memory")); !os.IsNotExist(err) {
+		t.Fatalf("secret-like explicit remember should not create markdown memory dir, stat err=%v", err)
+	}
+}
+
+func TestPostTurnExtractionWritesIncidentNote(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	extractor := &stubMemoryExtractor{
+		candidates: []memory.MemoryCandidate{{
+			ID:       models.NewID(),
+			Category: "incident",
+			Title:    "API OOM",
+			Content:  "Root cause was cache pressure.",
+			Tags:     []string{"api", "oom"},
+		}},
+	}
+	model := NewModel(ModelConfig{
+		Cluster:         "production",
+		Model:           "claude-sonnet",
+		Conv:            conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore:     store,
+		MemoryExtractor: extractor,
+	})
+
+	model.runMemoryExtraction("api oom", "Root cause was cache pressure.")
+
+	if len(extractor.inputs) != 1 {
+		t.Fatalf("extractor calls = %d, want 1", len(extractor.inputs))
+	}
+	entries, err := os.ReadDir(filepath.Join(store.Dir(), "memory", "incidents"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("incident note count = %d, want 1", len(entries))
+	}
+	data, err := os.ReadFile(filepath.Join(store.Dir(), "memory", "incidents", entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := string(data)
+	for _, want := range []string{"API OOM", "Root cause was cache pressure.", "api", "oom"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("incident note missing %q:\n%s", want, note)
+		}
+	}
+}
+
+func TestPostTurnExtractionRejectsSecretLikeCandidate(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	extractor := &stubMemoryExtractor{
+		candidates: []memory.MemoryCandidate{{
+			ID:       models.NewID(),
+			Category: "event",
+			Title:    "Credential",
+			Content:  "password=abc",
+			Tags:     []string{"security"},
+		}},
+	}
+	model := NewModel(ModelConfig{
+		Cluster:         "production",
+		Model:           "claude-sonnet",
+		Conv:            conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore:     store,
+		MemoryExtractor: extractor,
+	})
+
+	model.runMemoryExtraction("we rotated credentials", "Do not store the password value.")
+
+	results, err := store.ListMemories("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("secret-like extraction candidate should not persist: %#v", results)
+	}
+}
+
+func TestPostTurnExtractionRequiresEvidence(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	extractor := &stubMemoryExtractor{
+		candidates: []memory.MemoryCandidate{{
+			ID:       models.NewID(),
+			Category: "incident",
+			Title:    "Invented Incident",
+			Content:  "Root cause was a database failover.",
+			Tags:     []string{"api"},
+		}},
+	}
+	model := NewModel(ModelConfig{
+		Cluster:         "production",
+		Model:           "claude-sonnet",
+		Conv:            conversation.New("production", nil, "claude-sonnet"),
+		MemoryStore:     store,
+		MemoryExtractor: extractor,
+	})
+
+	model.runMemoryExtraction("api oom", "Root cause was cache pressure.")
+
+	if _, err := os.Stat(filepath.Join(store.Dir(), "memory", "incidents")); !os.IsNotExist(err) {
+		t.Fatalf("unsupported evidence candidate should not create incidents dir, stat err=%v", err)
+	}
+	results, err := store.ListMemories("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("unsupported evidence candidate should not create SQLite memory: %#v", results)
+	}
+}
+
+func TestPostTurnExtractionStopEventPassesTurnInput(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	extractor := &stubMemoryExtractor{}
+	conv := conversation.New("production", nil, "claude-sonnet")
+	model := NewModel(ModelConfig{
+		Cluster:         "production",
+		Model:           "claude-sonnet",
+		Conv:            conv,
+		MemoryStore:     store,
+		MemoryExtractor: extractor,
+	})
+	model.messages = append(model.messages, chatMsg{role: "user", content: "api oom"})
+	conv.AddUser("api oom")
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamBuf = "Root cause was cache pressure."
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("normal stop should not return a command")
+	}
+	if len(extractor.inputs) != 1 {
+		t.Fatalf("extractor calls = %d, want 1", len(extractor.inputs))
+	}
+	want := MemoryExtractionInput{
+		Cluster:   "production",
+		Model:     "claude-sonnet",
+		User:      "api oom",
+		Assistant: "Root cause was cache pressure.",
+	}
+	if extractor.inputs[0] != want {
+		t.Fatalf("extractor input = %#v, want %#v", extractor.inputs[0], want)
+	}
+	if len(model.messages) != 2 || model.messages[1].role != "assistant" || model.messages[1].content != want.Assistant {
+		t.Fatalf("messages = %#v, want assistant content appended before extraction", model.messages)
+	}
+}
+
+func TestInitialModelViewRendersStartupOverview(t *testing.T) {
+	nodes := []NodeInfo{
+		{Name: "node-01", Host: "10.0.1.1", Online: true},
+		{Name: "node-02", Host: "10.0.1.2", Online: false},
+		{Name: "node-03", Host: "10.0.1.3", Online: true},
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet", Nodes: nodes})
+	model.selectedNodes = map[string]bool{"node-01": true, "node-03": true}
+
+	view := model.View()
+
+	for _, want := range []string{
+		"██████╗ ██████╗ ███╗   ██╗ █████╗ ███╗   ██╗",
+		"Cluster   production",
+		"Model     claude-sonnet",
+		"Nodes     2/3 selected, 2 online",
+		"● node-01  10.0.1.1  Online   selected",
+		"○ node-02  10.0.1.2  Offline  unselected",
+		"● node-03  10.0.1.3  Online   selected",
+		"Type a message or /help",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing startup overview part %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestInputRendersAsBox(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model = next.(Model)
 	model.input = "hello"
 
 	view := model.View()
 
-	for _, want := range []string{"╭", "│ ❯ hello", "╰"} {
+	for _, want := range []string{"╭──────────────────────────────────────╮", "│ ❯ hello", "╰──────────────────────────────────────╯"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing input box part %q:\n%s", want, view)
 		}
 	}
 }
 
-func TestAssistantMessageRendersDividerWithElapsed(t *testing.T) {
+func TestInputRendersCursor(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	model.input = "hello"
+
+	view := model.View()
+
+	if !strings.Contains(view, "❯ hello█") {
+		t.Fatalf("view missing input cursor:\n%s", view)
+	}
+}
+
+func TestAutocompleteRendersBelowInputBox(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = next.(Model)
+	for _, r := range "/cl" {
+		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+
+	view := model.View()
+	inputIndex := strings.Index(view, "│ ❯ /cl")
+	acIndex := strings.Index(view, "▸ /clear")
+	if inputIndex == -1 || acIndex == -1 {
+		t.Fatalf("view missing input or autocomplete:\n%s", view)
+	}
+	if inputIndex > acIndex {
+		t.Fatalf("autocomplete rendered above input:\n%s", view)
+	}
+	if !strings.Contains(view, "╭──────────────────────────────────────╮") {
+		t.Fatalf("view missing full-width autocomplete border:\n%s", view)
+	}
+}
+
+func TestEnterCompletesVisibleAutocompleteBeforeSubmit(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	for _, r := range "/ex" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("Enter should complete autocomplete before submitting")
+	}
+	if model.input != "/exit " {
+		t.Fatalf("input = %q, want completed /exit", model.input)
+	}
+	if model.ac.visible {
+		t.Fatal("autocomplete should hide after Enter completion")
+	}
+
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("second Enter should submit completed command")
+	}
+}
+
+func TestTabCompletesFileReferenceAutocomplete(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("readme"), 0644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", LocalWorkspaceRoot: workspace})
+	model = typeRunes(t, model, "read @RE")
+	if !model.ac.visible {
+		t.Fatal("file reference autocomplete should be visible")
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = next.(Model)
+
+	if model.input != "read @README.md " {
+		t.Fatalf("input = %q, want file reference completion", model.input)
+	}
+	if model.ac.visible {
+		t.Fatal("autocomplete should hide after file completion")
+	}
+}
+
+func TestAssistantMessageRendersElapsedAfterOutput(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
 	model.messages = []chatMsg{
 		{role: "user", content: "hello"},
@@ -76,12 +838,192 @@ func TestAssistantMessageRendersDividerWithElapsed(t *testing.T) {
 
 	view := model.View()
 
-	if !strings.Contains(view, "1.2s") {
-		t.Fatalf("view missing elapsed divider:\n%s", view)
+	if strings.Contains(view, "── 1.2s ──") {
+		t.Fatalf("view should not render elapsed as divider:\n%s", view)
 	}
-	if !strings.Contains(view, "──") {
-		t.Fatalf("view missing divider line:\n%s", view)
+	if !strings.Contains(view, "hi\n\n✱ Took 1.2s") {
+		t.Fatalf("view missing elapsed footer after assistant output:\n%s", view)
 	}
+}
+
+func TestToolMessageRendersElapsedAfterOutput(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.messages = []chatMsg{
+		{
+			role:       "tool",
+			toolName:   "shell/run",
+			toolOutput: "exit_code: 0\nstdout:\nok\n",
+			elapsed:    3200 * time.Millisecond,
+		},
+	}
+
+	view := model.View()
+
+	if strings.Contains(view, "── 3.2s ──") {
+		t.Fatalf("view should not render elapsed as divider:\n%s", view)
+	}
+	outputIndex := strings.Index(view, "ok")
+	elapsedIndex := strings.Index(view, "✱ Took 3.2s")
+	if outputIndex == -1 || elapsedIndex == -1 || elapsedIndex < outputIndex {
+		t.Fatalf("view missing elapsed footer after tool output:\n%s", view)
+	}
+}
+
+func TestUserMessageRendersFullWidthHighlight(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model = next.(Model)
+	model.messages = []chatMsg{{role: "user", content: "hello"}}
+
+	view := model.View()
+
+	line := findLineContaining(view, "❯ hello")
+	if line == "" {
+		t.Fatalf("view missing user message:\n%s", view)
+	}
+	if got := lipgloss.Width(line); got != 40 {
+		t.Fatalf("user message width = %d, want 40:\n%q\nfull view:\n%s", got, line, view)
+	}
+}
+
+func TestStreamingThinkingRendersInBodyOnly(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model = next.(Model)
+	model.messages = []chatMsg{{role: "user", content: "hello"}}
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.status = "Thinking..."
+
+	view := model.View()
+
+	if !strings.Contains(view, "Thinking...") {
+		t.Fatalf("view missing body thinking indicator:\n%s", view)
+	}
+	if count := strings.Count(view, "Thinking..."); count != 1 {
+		t.Fatalf("Thinking... rendered %d times, want body-only once:\n%s", count, view)
+	}
+	thinkingIndex := strings.Index(view, "Thinking...")
+	inputIndex := strings.Index(view, "│ ❯")
+	if inputIndex == -1 || thinkingIndex > inputIndex {
+		t.Fatalf("thinking indicator should render in body before input:\n%s", view)
+	}
+}
+
+func TestSubmittingMessageSchedulesThinkingTick(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
+	for _, r := range "hello" {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if !model.streaming {
+		t.Fatal("model should be streaming after submit")
+	}
+	msg := execCmd(t, cmd)
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("submit command returned %T, want tea.BatchMsg", msg)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("batch has %d commands, want stream start and thinking tick", len(batch))
+	}
+}
+
+func TestThinkingTickAnimatesWhileWaitingForFirstToken(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	initial := model.View()
+	next, cmd := model.Update(thinkingTickMsg{streamID: 1})
+	model = next.(Model)
+	animated := model.View()
+
+	if initial == animated {
+		t.Fatalf("thinking tick should change rendered frame:\n%s", animated)
+	}
+	if cmd == nil {
+		t.Fatal("thinking tick should schedule another tick while waiting")
+	}
+
+	model.streamBuf = "hello"
+	next, cmd = model.Update(thinkingTickMsg{streamID: 1})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatal("thinking tick should stop after first token arrives")
+	}
+}
+
+func TestThinkingRendersElapsedAndEscInterruptHint(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamStartedAt = time.Now().Add(-2300 * time.Millisecond)
+	model.status = "Thinking..."
+
+	view := model.View()
+
+	for _, want := range []string{"Thinking...", "2.", "Esc to interrupt"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+	if count := strings.Count(view, "Thinking..."); count != 1 {
+		t.Fatalf("Thinking... rendered %d times, want body-only once:\n%s", count, view)
+	}
+}
+
+func TestStreamingReasoningRendersOnlyLastLineInLightStyle(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamReasoningBuf = "first line\nsecond line\nfinal thought"
+
+	view := model.View()
+
+	if !strings.Contains(view, "Thinking: final thought") {
+		t.Fatalf("view missing last reasoning line:\n%s", view)
+	}
+	if strings.Contains(view, "first line") || strings.Contains(view, "second line") {
+		t.Fatalf("view should only render last reasoning line:\n%s", view)
+	}
+	if strings.Contains(view, "final thought▌") {
+		t.Fatalf("reasoning should not use normal streaming cursor style:\n%s", view)
+	}
+}
+
+func findLineContaining(text, needle string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, needle) {
+			return line
+		}
+	}
+	return ""
+}
+
+func typeRunes(t *testing.T, model Model, input string) Model {
+	t.Helper()
+	for _, r := range input {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = next.(Model)
+	}
+	return model
+}
+
+func typeAndEnter(t *testing.T, model Model, input string) Model {
+	t.Helper()
+	model = typeRunes(t, model, input)
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(Model)
 }
 
 func TestTypingAndEnterAddsUserMessage(t *testing.T) {
@@ -127,6 +1069,71 @@ func TestTypingSpaceAddsInputSpace(t *testing.T) {
 
 	if model.input != "hi there" {
 		t.Fatalf("input = %q, want space preserved", model.input)
+	}
+}
+
+func TestUpDownNavigatesInputHistoryAndRestoresDraft(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model = typeAndEnter(t, model, "first")
+	model = typeAndEnter(t, model, "second")
+	model = typeRunes(t, model, "draft")
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.input != "second" {
+		t.Fatalf("after first Up input = %q, want second", model.input)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.input != "first" {
+		t.Fatalf("after second Up input = %q, want first", model.input)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.input != "first" {
+		t.Fatalf("extra Up input = %q, want first", model.input)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	if model.input != "second" {
+		t.Fatalf("after first Down input = %q, want second", model.input)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	if model.input != "draft" {
+		t.Fatalf("after second Down input = %q, want restored draft", model.input)
+	}
+}
+
+func TestThinkingCommandSendsMessageWithThinkingOverride(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: provider, Conv: conv})
+	model = typeRunes(t, model, "/thinking 你好")
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/thinking should start a stream")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider did not receive request")
+	}
+	if provider.req.Thinking == nil || !*provider.req.Thinking {
+		t.Fatalf("request Thinking = %#v, want true", provider.req.Thinking)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].Role != "user" || msgs[0].Content != "你好" {
+		t.Fatalf("conversation messages = %#v, want /thinking arg as user message", msgs)
+	}
+	if len(model.messages) != 1 || model.messages[0].content != "你好" {
+		t.Fatalf("ui messages = %#v, want /thinking arg as user message", model.messages)
 	}
 }
 
@@ -196,6 +1203,122 @@ func TestViewportScrollsWhileStreaming(t *testing.T) {
 
 	if model.vp.YOffset == 0 {
 		t.Fatal("PageUp should scroll while a response is streaming")
+	}
+}
+
+func TestViewportFollowsStreamingDeltasWhenAtBottom(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+	model = next.(Model)
+	for i := 0; i < 8; i++ {
+		model.messages = append(model.messages, chatMsg{
+			role:    "assistant",
+			content: strings.Repeat("line\n", 3) + "message",
+		})
+	}
+	model.updateViewportContent()
+	model.vp.GotoBottom()
+	before := model.vp.YOffset
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ = model.Update(streamEventMsg{streamID: 1, Event: llm.TextDeltaEvent{Delta: strings.Repeat("new line\n", 8)}})
+	model = next.(Model)
+
+	if model.vp.YOffset <= before {
+		t.Fatalf("viewport did not follow streaming output: before=%d after=%d", before, model.vp.YOffset)
+	}
+	if !model.vp.AtBottom() {
+		t.Fatalf("viewport should remain at bottom while streaming, offset=%d", model.vp.YOffset)
+	}
+}
+
+func TestViewportFollowsSubmittedMessageWhenAtBottom(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet", Provider: &fakeProvider{}, Conv: conv})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+	model = next.(Model)
+	for i := 0; i < 8; i++ {
+		model.messages = append(model.messages, chatMsg{
+			role:    "assistant",
+			content: strings.Repeat("line\n", 3) + "message",
+		})
+	}
+	model.updateViewportContent()
+	model.vp.GotoBottom()
+	before := model.vp.YOffset
+	model = typeRunes(t, model, "hello")
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.vp.YOffset <= before {
+		t.Fatalf("viewport did not follow submitted message: before=%d after=%d", before, model.vp.YOffset)
+	}
+	if !model.vp.AtBottom() {
+		t.Fatalf("viewport should remain at bottom after submit, offset=%d", model.vp.YOffset)
+	}
+}
+
+func TestViewportFollowsThinkingTickWhenAtBottom(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+	model = next.(Model)
+	for i := 0; i < 8; i++ {
+		model.messages = append(model.messages, chatMsg{
+			role:    "assistant",
+			content: strings.Repeat("line\n", 3) + "message",
+		})
+	}
+	model.updateViewportContent()
+	model.vp.GotoBottom()
+	before := model.vp.YOffset
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.status = "Thinking..."
+
+	next, _ = model.Update(thinkingTickMsg{streamID: 1})
+	model = next.(Model)
+
+	if model.vp.YOffset <= before {
+		t.Fatalf("viewport did not follow thinking tick: before=%d after=%d", before, model.vp.YOffset)
+	}
+	if !model.vp.AtBottom() {
+		t.Fatalf("viewport should remain at bottom during thinking, offset=%d", model.vp.YOffset)
+	}
+}
+
+func TestMouseWheelScrollsViewportWithoutNavigatingInputHistory(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	model = next.(Model)
+	model = typeAndEnter(t, model, "first")
+	model = typeAndEnter(t, model, "second")
+	model.input = "draft"
+	for i := 0; i < 30; i++ {
+		model.messages = append(model.messages, chatMsg{
+			role:    "assistant",
+			content: strings.Repeat("line\n", 3) + "message",
+		})
+	}
+	model.updateViewportContent()
+	model.vp.GotoBottom()
+	bottomOffset := model.vp.YOffset
+
+	next, _ = model.Update(tea.MouseMsg{
+		Type:   tea.MouseWheelUp,
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+	})
+	model = next.(Model)
+
+	if model.input != "draft" {
+		t.Fatalf("mouse wheel changed input to %q, want draft", model.input)
+	}
+	if model.vp.YOffset >= bottomOffset {
+		t.Fatalf("mouse wheel did not scroll viewport up: before=%d after=%d", bottomOffset, model.vp.YOffset)
 	}
 }
 
@@ -402,6 +1525,244 @@ func TestStreamingUpdatesAccumulate(t *testing.T) {
 	}
 }
 
+func TestStreamReadyWithNilChannelStopsWithError(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(streamReadyMsg{streamID: 1, ch: nil})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("nil stream channel should not return a wait command")
+	}
+	if model.streaming {
+		t.Fatal("nil stream channel should stop streaming")
+	}
+	if !strings.Contains(model.status, "Stream error") || !strings.Contains(model.status, "nil") {
+		t.Fatalf("status = %q, want nil stream error", model.status)
+	}
+}
+
+func TestStopEventWithEmptyResponseShowsVisibleError(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("empty stop should not return a command")
+	}
+	if model.streaming {
+		t.Fatal("empty stop should end streaming")
+	}
+	if !strings.Contains(model.status, "empty response") {
+		t.Fatalf("status = %q, want empty response error", model.status)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Model returned an empty response") {
+		t.Fatalf("view missing visible empty response error:\n%s", view)
+	}
+	if len(conv.Messages()) != 0 {
+		t.Fatalf("conversation messages = %#v, want no synthetic assistant error", conv.Messages())
+	}
+}
+
+func TestReasoningOnlyStreamIsTreatedAsEmptyResponse(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ReasoningDeltaEvent{Delta: "Hello"}})
+	model = next.(Model)
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("reasoning-only stop should not return a command")
+	}
+	if model.streaming {
+		t.Fatal("reasoning-only stop should end streaming")
+	}
+	if !strings.Contains(model.status, "empty response") {
+		t.Fatalf("status = %q, want empty response status", model.status)
+	}
+	for _, msg := range model.messages {
+		if strings.Contains(msg.content, "Hello") {
+			t.Fatalf("reasoning leaked into assistant message: %#v", msg)
+		}
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 0 {
+		t.Fatalf("conversation messages = %#v, want no reasoning content", msgs)
+	}
+}
+
+func TestStreamDoneWithEmptyResponseShowsVisibleError(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(streamDoneMsg{streamID: 1})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("empty stream done should not return a command")
+	}
+	if model.streaming {
+		t.Fatal("empty stream done should end streaming")
+	}
+	if !strings.Contains(model.status, "empty response") {
+		t.Fatalf("status = %q, want empty response error", model.status)
+	}
+	if !strings.Contains(model.View(), "Model returned an empty response") {
+		t.Fatalf("view missing visible empty response error:\n%s", model.View())
+	}
+	if len(conv.Messages()) != 0 {
+		t.Fatalf("conversation messages = %#v, want no synthetic assistant error", conv.Messages())
+	}
+}
+
+func TestDebugLoggingRecordsLLMRequestAndStreamEvents(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
+	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
+		t.Fatalf("setup logging: %v", err)
+	}
+	defer logging.Close()
+
+	conv := conversation.New("test", nil, "model")
+	conv.AddUser("hello")
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Provider: &fakeProvider{},
+		Conv:     conv,
+		Tools: []llm.ToolDef{{
+			Name:        "log/read",
+			Description: "Read logs",
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	})
+
+	model, _ = model.startStream()
+	next, _ := model.Update(streamEventMsg{streamID: model.activeStreamID, Event: llm.TextDeltaEvent{Delta: "Hi"}})
+	model = next.(Model)
+	next, _ = model.Update(streamEventMsg{streamID: model.activeStreamID, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+	logging.Close()
+
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logText := string(contents)
+	for _, want := range []string{
+		"llm request",
+		"system_prompt",
+		"messages",
+		"tools",
+		"tool_search",
+		"call_tool",
+		"llm stream text_delta",
+		"Hi",
+		"llm stream stop",
+		"end_turn",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("debug log missing %q:\n%s", want, logText)
+		}
+	}
+}
+
+func TestDebugLoggingRecordsEmptyResponse(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
+	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
+		t.Fatalf("setup logging: %v", err)
+	}
+	defer logging.Close()
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+	logging.Close()
+
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logText := string(contents)
+	for _, want := range []string{
+		"llm stream stop",
+		"llm empty response",
+		"end_turn",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("debug log missing %q:\n%s", want, logText)
+		}
+	}
+}
+
+func TestStreamTimeoutStopsWaitingWithError(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEventSeq = 3
+	cancelled := false
+	model.streamCancel = func() { cancelled = true }
+
+	next, cmd := model.Update(streamTimeoutMsg{streamID: 1, eventSeq: 3})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("stream timeout should not return a command")
+	}
+	if !cancelled {
+		t.Fatal("stream timeout should cancel active stream")
+	}
+	if model.streaming {
+		t.Fatal("stream timeout should stop streaming")
+	}
+	if !strings.Contains(model.status, "Stream timeout") {
+		t.Fatalf("status = %q, want stream timeout", model.status)
+	}
+}
+
+func TestStaleStreamTimeoutIsIgnoredAfterEventProgress(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEventSeq = 4
+
+	next, cmd := model.Update(streamTimeoutMsg{streamID: 1, eventSeq: 3})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("stale stream timeout should not return a command")
+	}
+	if !model.streaming {
+		t.Fatal("stale stream timeout should not stop streaming")
+	}
+}
+
 func TestStreamErrorPreservesPartialContent(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
@@ -456,8 +1817,8 @@ func TestToolCallReturnsCommandThatContinuesStreamWaiting(t *testing.T) {
 	if !ok {
 		t.Fatalf("tool call command returned %T, want tea.BatchMsg", msg)
 	}
-	if len(batch) != 2 {
-		t.Fatalf("batch has %d commands, want 2", len(batch))
+	if len(batch) != 3 {
+		t.Fatalf("batch has %d commands, want tool work, stream wait, and stream timeout", len(batch))
 	}
 
 	go func() {
@@ -466,6 +1827,213 @@ func TestToolCallReturnsCommandThatContinuesStreamWaiting(t *testing.T) {
 	continuedMsg := execCmd(t, batch[1])
 	if _, ok := continuedMsg.(streamEventMsg); !ok {
 		t.Fatalf("continued wait command returned %T, want streamEventMsg", continuedMsg)
+	}
+}
+
+func TestMemoryToolCallIsHiddenFromNormalChat(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", MemoryStore: store})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ := model.Update(streamEventMsg{
+		streamID: 1,
+		Event: llm.ToolCallEvent{
+			ID:        "mem1",
+			Name:      "memory_patch",
+			Arguments: json.RawMessage(`{"path":"profile.md","section":"Identity","content":"User name is Alice."}`),
+		},
+	})
+	model = next.(Model)
+
+	view := model.View()
+	if strings.Contains(view, "memory_patch") || strings.Contains(view, "User name is Alice") {
+		t.Fatalf("memory tool leaked into normal chat:\n%s", view)
+	}
+}
+
+func TestInternalToolSearchAndCallToolAreHiddenFromNormalChat(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ := model.Update(streamEventMsg{
+		streamID: 1,
+		Event: llm.ToolCallEvent{
+			ID:        "search1",
+			Name:      metaToolToolSearch,
+			Arguments: json.RawMessage(`{"query":"cpu process"}`),
+		},
+	})
+	model = next.(Model)
+
+	view := model.View()
+	if strings.Contains(view, "tool_search") || strings.Contains(view, "cpu process") {
+		t.Fatalf("tool_search leaked into normal chat:\n%s", view)
+	}
+	if model.status != "Inspecting..." {
+		t.Fatalf("status = %q, want generic inspecting status", model.status)
+	}
+
+	next, _ = model.Update(multiToolResultMsg{
+		streamID: 1,
+		Call:     llm.ToolCall{ID: "search1", Name: metaToolToolSearch, Arguments: json.RawMessage(`{"query":"cpu process"}`)},
+		Results:  []nodeToolResult{{Node: "-", Output: `[{"name":"sys/processes"}]`, Success: true}},
+	})
+	model = next.(Model)
+
+	next, _ = model.Update(streamEventMsg{
+		streamID: 1,
+		Event: llm.ToolCallEvent{
+			ID:        "call1",
+			Name:      metaToolCallTool,
+			Arguments: json.RawMessage(`{"node":"node-01","tool":"sys/processes","arguments":{}}`),
+		},
+	})
+	model = next.(Model)
+
+	next, _ = model.Update(multiToolResultMsg{
+		streamID: 1,
+		Call:     llm.ToolCall{ID: "call1", Name: metaToolCallTool, Arguments: json.RawMessage(`{"node":"node-01","tool":"sys/processes","arguments":{}}`)},
+		Results:  []nodeToolResult{{Node: "node-01", Output: "postgres 86%", Success: true}},
+	})
+	model = next.(Model)
+
+	view = model.View()
+	for _, leaked := range []string{"tool_search", "call_tool", "sys/processes", "postgres 86%"} {
+		if strings.Contains(view, leaked) {
+			t.Fatalf("internal tool detail %q leaked into normal chat:\n%s", leaked, view)
+		}
+	}
+}
+
+func TestHiddenInternalToolStopToolUseDoesNotShowRunningToolStatus(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamCh = make(chan llm.ChatEvent)
+	model.streamCtx = context.Background()
+
+	next, _ := model.Update(streamEventMsg{
+		streamID: 1,
+		Event: llm.ToolCallEvent{
+			ID:        "search1",
+			Name:      metaToolToolSearch,
+			Arguments: json.RawMessage(`{"query":"logs"}`),
+		},
+	})
+	model = next.(Model)
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopToolUse}})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatal("StopToolUse should wait for hidden internal tool result before continuing")
+	}
+	if strings.Contains(model.status, "Running tool") {
+		t.Fatalf("status leaked hidden internal tool activity: %q", model.status)
+	}
+	if model.status != "Inspecting..." {
+		t.Fatalf("status = %q, want Inspecting...", model.status)
+	}
+}
+
+func TestExecToolCallRemainsVisibleInNormalChat(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ := model.Update(streamEventMsg{
+		streamID: 1,
+		Event: llm.ToolCallEvent{
+			ID:        "exec1",
+			Name:      metaToolExec,
+			Arguments: json.RawMessage(`{"command":"systemctl restart nginx"}`),
+		},
+	})
+	model = next.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, metaToolExec) || !strings.Contains(view, "systemctl restart nginx") {
+		t.Fatalf("exec tool should remain visible:\n%s", view)
+	}
+}
+
+func TestMemoryToolFallbackPlaceholderIsHiddenFromNormalChat(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	call := llm.ToolCall{
+		ID:        "mem1",
+		Name:      "memory_patch",
+		Arguments: json.RawMessage(`{"path":"profile.md","section":"Identity","content":"User name is Alice."}`),
+	}
+
+	next, _ := model.Update(multiToolResultMsg{
+		Call:    call,
+		Results: []nodeToolResult{{Node: "local", Output: "patched profile with User name is Alice.", Success: true}},
+	})
+	model = next.(Model)
+
+	view := model.View()
+	if strings.Contains(view, "memory_patch") || strings.Contains(view, "User name is Alice") {
+		t.Fatalf("fallback memory tool leaked into normal chat:\n%s", view)
+	}
+}
+
+func TestMemoryToolStopToolUseDoesNotShowRunningToolStatus(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	provider := &captureStreamProvider{}
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: provider, Conv: conv, MemoryStore: store})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamCh = make(chan llm.ChatEvent)
+	model.streamCtx = context.Background()
+
+	next, _ := model.Update(streamEventMsg{
+		streamID: 1,
+		Event: llm.ToolCallEvent{
+			ID:        "mem1",
+			Name:      "memory_patch",
+			Arguments: json.RawMessage(`{"path":"profile.md","section":"Identity","content":"User name is Alice."}`),
+		},
+	})
+	model = next.(Model)
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopToolUse}})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatal("StopToolUse should wait for hidden memory tool result before continuing")
+	}
+	if strings.Contains(model.status, "Running tool") {
+		t.Fatalf("status leaked hidden memory tool activity: %q", model.status)
+	}
+
+	next, cmd = model.Update(multiToolResultMsg{
+		streamID: 1,
+		Call:     llm.ToolCall{ID: "mem1", Name: "memory_patch", Arguments: json.RawMessage(`{"path":"profile.md","section":"Identity","content":"User name is Alice."}`)},
+		Results:  []nodeToolResult{{Node: "local", Output: "patched profile with User name is Alice.", Success: true}},
+	})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("hidden memory tool result should continue the stream after StopToolUse")
+	}
+	execMaybeBatch(t, cmd)
+	if provider.req == nil {
+		t.Fatal("hidden memory tool did not continue the stream")
 	}
 }
 
@@ -509,6 +2077,70 @@ func TestToolCallPreservesPrecedingAssistantText(t *testing.T) {
 	}
 	if msgs[1].ToolCallID != "tc1" || msgs[1].ToolName != "shell/run" {
 		t.Fatalf("conversation second message = %#v, want tool call", msgs[1])
+	}
+}
+
+func TestReasoningOnlyStopDoesNotBecomeAssistantMessage(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ReasoningDeltaEvent{Delta: "private chain"}})
+	model = next.(Model)
+	next, _ = model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+
+	if model.streaming {
+		t.Fatal("should not be streaming after stop")
+	}
+	if model.streamReasoningBuf != "" {
+		t.Fatalf("streamReasoningBuf = %q, want cleared", model.streamReasoningBuf)
+	}
+	for _, msg := range model.messages {
+		if strings.Contains(msg.content, "private chain") {
+			t.Fatalf("reasoning leaked into assistant message: %#v", msg)
+		}
+	}
+	if got := conv.Messages(); len(got) != 0 {
+		t.Fatalf("conversation messages = %#v, want none", got)
+	}
+	if !strings.Contains(model.status, "empty response") {
+		t.Fatalf("status = %q, want empty response status", model.status)
+	}
+}
+
+func TestReasoningBeforeToolCallIsNotPersistedOrRendered(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamReasoningBuf = "I should upload the file"
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID:        "tc1",
+		Name:      metaToolFilePut,
+		Arguments: []byte(`{"node":"node-a","local_path":"tmp/a.sh","remote_path":"/tmp/a.sh"}`),
+	}})
+	model = next.(Model)
+
+	if model.streamReasoningBuf != "" {
+		t.Fatalf("streamReasoningBuf = %q, want cleared after tool call", model.streamReasoningBuf)
+	}
+	view := model.View()
+	if strings.Contains(view, "I should upload the file") {
+		t.Fatalf("reasoning leaked into view:\n%s", view)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("conversation messages = %#v, want only tool call", msgs)
+	}
+	if msgs[0].Role != "assistant" || msgs[0].ToolCallID != "tc1" || msgs[0].ToolName != metaToolFilePut {
+		t.Fatalf("conversation message = %#v, want tool call only", msgs[0])
 	}
 }
 
@@ -597,6 +2229,33 @@ func TestInterruptedStreamIgnoresLateEvents(t *testing.T) {
 	}
 	if len(conv.Messages()) != 0 {
 		t.Fatalf("conversation messages = %#v, want none after stale stop", conv.Messages())
+	}
+}
+
+func TestEscInterruptsStreaming(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}})
+	model.streaming = true
+	model.status = "Thinking..."
+	model.streamCh = make(chan llm.ChatEvent)
+	cancelled := false
+	model.streamCancel = func() { cancelled = true }
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("Esc interrupt should not return a command")
+	}
+	if !cancelled {
+		t.Fatal("Esc interrupt did not call stream cancel")
+	}
+	if model.streaming {
+		t.Fatal("should not be streaming after Esc interrupt")
+	}
+	if model.status != "Interrupted" {
+		t.Fatalf("status = %q, want Interrupted", model.status)
 	}
 }
 
@@ -887,7 +2546,7 @@ func TestNodeCommandOffDisablesNodeTools(t *testing.T) {
 
 func TestNodeToolExposureDispatchesNodeAddLocally(t *testing.T) {
 	model := NewModel(ModelConfig{})
-	rawArgs := json.RawMessage(`{"host":"10.0.0.5","password":"secret"}`)
+	rawArgs := json.RawMessage(`{"host":"10.0.0.5","user":"deploy","password":"secret"}`)
 	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: rawArgs}
 
 	msg := execCmd(t, model.dispatchTool(7, call))
@@ -910,6 +2569,123 @@ func TestNodeToolExposureDispatchesNodeAddLocally(t *testing.T) {
 	}
 	if !strings.Contains(result.Results[0].Output, "node_add is not enabled") {
 		t.Fatalf("output = %q, want authorization error", result.Results[0].Output)
+	}
+}
+
+func TestFilePutDispatchesManagedUpload(t *testing.T) {
+	workspace := t.TempDir()
+	localPath := filepath.Join(workspace, "payload.txt")
+	if err := os.WriteFile(localPath, []byte("payload data"), 0644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	var gotPath string
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/files/upload" {
+			t.Fatalf("request = %s %s, want PUT /files/upload", r.Method, r.URL.Path)
+		}
+		gotPath = r.URL.Query().Get("path")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		gotBody = string(body)
+		w.Header().Set("X-Conan-Bytes-Written", "12")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	model := NewModel(ModelConfig{
+		LocalWorkspaceRoot: workspace,
+		Clients: map[string]*mcp.Client{
+			"node-a": mcp.NewClient(mcp.Config{BaseURL: server.URL}),
+		},
+	})
+	call := llm.ToolCall{
+		ID:        "put1",
+		Name:      metaToolFilePut,
+		Arguments: json.RawMessage(`{"node":"node-a","local_path":"payload.txt","remote_path":"/tmp/payload.txt"}`),
+	}
+
+	msg := execCmd(t, model.dispatchTool(7, call))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("dispatchTool returned %T, want multiToolResultMsg", msg)
+	}
+	if gotPath != "/tmp/payload.txt" {
+		t.Fatalf("upload path = %q, want remote path", gotPath)
+	}
+	if gotBody != "payload data" {
+		t.Fatalf("upload body = %q", gotBody)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success || result.Results[0].Node != "node-a" {
+		t.Fatalf("results = %#v, want successful node-a upload", result.Results)
+	}
+	if !strings.Contains(result.Results[0].Output, "uploaded payload.txt to node-a:/tmp/payload.txt") {
+		t.Fatalf("output = %q", result.Results[0].Output)
+	}
+}
+
+func TestFileGetDispatchesManagedDownload(t *testing.T) {
+	workspace := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/files/download" {
+			t.Fatalf("request = %s %s, want GET /files/download", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("path"); got != "/var/log/app.log" {
+			t.Fatalf("download path = %q", got)
+		}
+		_, _ = w.Write([]byte("remote log"))
+	}))
+	defer server.Close()
+
+	model := NewModel(ModelConfig{
+		LocalWorkspaceRoot: workspace,
+		Clients: map[string]*mcp.Client{
+			"node-a": mcp.NewClient(mcp.Config{BaseURL: server.URL}),
+		},
+	})
+	call := llm.ToolCall{
+		ID:        "get1",
+		Name:      metaToolFileGet,
+		Arguments: json.RawMessage(`{"node":"node-a","remote_path":"/var/log/app.log","local_path":"downloads/app.log"}`),
+	}
+
+	msg := execCmd(t, model.dispatchTool(7, call))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("dispatchTool returned %T, want multiToolResultMsg", msg)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, "downloads", "app.log"))
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(data) != "remote log" {
+		t.Fatalf("downloaded data = %q", data)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success || result.Results[0].Node != "node-a" {
+		t.Fatalf("results = %#v, want successful node-a download", result.Results)
+	}
+	if !strings.Contains(result.Results[0].Output, "downloaded node-a:/var/log/app.log to downloads/app.log") {
+		t.Fatalf("output = %q", result.Results[0].Output)
+	}
+}
+
+func TestFileTransferRequiresConfirmationWithoutReviewer(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	call := llm.ToolCall{
+		ID:        "put1",
+		Name:      metaToolFilePut,
+		Arguments: json.RawMessage(`{"node":"node-a","local_path":"payload.txt","remote_path":"/tmp/payload.txt"}`),
+	}
+
+	msg := execCmd(t, model.assessToolRisk(7, call))
+	result, ok := msg.(riskAssessmentMsg)
+	if !ok {
+		t.Fatalf("assessToolRisk returned %T, want riskAssessmentMsg", msg)
+	}
+	if result.assessment.Level != security.RiskConfirm {
+		t.Fatalf("risk level = %v, want confirm", result.assessment.Level)
 	}
 }
 
@@ -1185,6 +2961,50 @@ func TestToolOutputCollapsesAndTogglesLastToolWithCtrlO(t *testing.T) {
 	}
 }
 
+func TestToolOutputToggleSkipsHiddenMemoryTools(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	visibleOutput := "visible 1\nvisible 2\nvisible 3\nvisible 4\nvisible 5\nvisible 6"
+	model.messages = []chatMsg{
+		{
+			role:       "tool",
+			toolCallID: "tc1",
+			toolName:   "shell/run",
+			toolOutput: visibleOutput,
+			nodeResults: []nodeToolResult{{
+				Node:    "node-01",
+				Output:  visibleOutput,
+				Success: true,
+			}},
+		},
+		{
+			role:       "tool",
+			toolCallID: "mem1",
+			toolName:   "memory_patch",
+			toolOutput: "hidden memory output: User name is Alice.",
+			nodeResults: []nodeToolResult{{
+				Node:    "local",
+				Output:  "hidden memory output: User name is Alice.",
+				Success: true,
+			}},
+			hidden: true,
+		},
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	model = next.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "visible 6") {
+		t.Fatalf("Ctrl+O did not expand visible tool output:\n%s", view)
+	}
+	if strings.Contains(view, "memory_patch") || strings.Contains(view, "User name is Alice") {
+		t.Fatalf("hidden memory details leaked after Ctrl+O:\n%s", view)
+	}
+	if model.status != "Last tool output expanded" {
+		t.Fatalf("status = %q, want visible tool expanded status", model.status)
+	}
+}
+
 func TestShellRunOutputShowsStatusWithoutStdoutStderrLabels(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
 	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"pwd"}`)}
@@ -1337,6 +3157,18 @@ func execCmd(t *testing.T, cmd tea.Cmd) tea.Msg {
 		return nil
 	}
 	return cmd()
+}
+
+func execMaybeBatch(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	msg := execCmd(t, cmd)
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, c := range batch {
+		execCmd(t, c)
+	}
 }
 
 func writeTestFile(t *testing.T, path string, content string) {
@@ -1616,7 +3448,7 @@ func TestMultipleToolCallsResumeOnlyAfterAllResults(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("second tool result should resume stream")
 	}
-	execCmd(t, cmd)
+	execMaybeBatch(t, cmd)
 	if provider.calls != 1 {
 		t.Fatalf("ChatStream calls = %d, want one resume after all tool results", provider.calls)
 	}
@@ -1902,6 +3734,66 @@ func TestConfirmAllowAndAddWritesNodeAllowlist(t *testing.T) {
 	}
 	if assessment.Level != security.RiskAllow {
 		t.Fatalf("updated reviewer should allow command, got %#v", assessment)
+	}
+}
+
+func TestConfirmAllowAndAddWritesLocalFileAllowlist(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), `default_cluster: test
+`)
+	writeTestFile(t, filepath.Join(workspace, "README.md"), "old content")
+
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{})
+	model := NewModel(ModelConfig{
+		Cluster:            "test",
+		Model:              "m",
+		Conv:               conv,
+		Reviewer:           reviewer,
+		ConfigHome:         home,
+		LocalWorkspaceRoot: workspace,
+	})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "tc1", Name: "local/fs/write", Arguments: []byte(`{"path":"README.md","content":"new content"}`),
+	}})
+	model = result.(Model)
+	msg := execCmd(t, cmd)
+	result, _ = model.Update(msg)
+	model = result.(Model)
+
+	if model.mode != modeConfirm {
+		t.Fatalf("mode = %v, want confirm", model.mode)
+	}
+	if !strings.Contains(model.View(), "Allow and add to allowlist") {
+		t.Fatalf("confirm view missing local file allowlist option:\n%s", model.View())
+	}
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = result.(Model)
+	result, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = result.(Model)
+	if cmd == nil {
+		t.Fatal("allow and add should dispatch local file tool")
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "local_file_whitelist") || !strings.Contains(string(data), "README.md") {
+		t.Fatalf("config missing local file allowlist:\n%s", data)
+	}
+
+	assessment, err := reviewer.Review(context.Background(), "local/fs/write", `{"path":"README.md","content":"again"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.Level != security.RiskAllow {
+		t.Fatalf("updated reviewer should allow local file write, got %#v", assessment)
 	}
 }
 

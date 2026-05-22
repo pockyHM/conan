@@ -5,10 +5,10 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/spf13/cobra"
 	"github.com/pockyHM/conan/internal/agent"
 	"github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/configschema"
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,7 +36,7 @@ func main() {
 			slog.Info("conan-agent starting", "version", version)
 
 			registry := tools.NewRegistry()
-			registerAllTools(registry)
+			registerAllTools(registry, cfg)
 			registry.DisableAll(cfg.DisabledTools)
 
 			srv := agent.NewServer(cfg, registry, version)
@@ -69,33 +69,49 @@ func loadConfig(path string) (*configschema.AgentConfig, error) {
 	return cfg, nil
 }
 
-func registerAllTools(r *tools.Registry) {
+func registerAllTools(r *tools.Registry, cfg *configschema.AgentConfig) {
 	r.Register(&tools.ShellTool{})
-	for _, t := range tools.NewFsTools() {
-		r.Register(t)
-	}
+	registerToolsByName(r, tools.NewFsTools(), "fs/read", "fs/list", "fs/stat")
 	for _, t := range tools.NewSysTools() {
 		r.Register(t)
 	}
-	for _, t := range tools.NewSvcTools() {
-		r.Register(t)
-	}
+	registerToolsByName(r, tools.NewSvcTools(), "svc/list", "svc/status")
 	for _, t := range tools.NewLogTools() {
 		r.Register(t)
 	}
-	for _, t := range tools.NewNetTools() {
+	registerToolsByName(r, tools.NewNetTools(), "net/ping", "net/traceroute", "net/portcheck")
+	for _, t := range tools.NewWebTools(webToolConfig(cfg.Web)) {
 		r.Register(t)
 	}
-	for _, t := range tools.NewK8sTools() {
-		r.Register(t)
+	registerToolsByName(r, tools.NewK8sTools(), "k8s/pods", "k8s/logs", "k8s/events", "k8s/describe")
+	registerToolsByName(r, tools.NewPkgTools(), "pkg/list", "pkg/search")
+	registerToolsByName(r, tools.NewCronTools(), "cron/list", "cron/show")
+	registerToolsByName(r, tools.NewDockerTools(), "docker/ps", "docker/images", "docker/logs")
+}
+
+func registerToolsByName(r *tools.Registry, candidates []tools.Tool, names ...string) {
+	allowed := make(map[string]bool, len(names))
+	for _, name := range names {
+		allowed[name] = true
 	}
-	for _, t := range tools.NewPkgTools() {
-		r.Register(t)
+	for _, t := range candidates {
+		if allowed[t.Name()] {
+			r.Register(t)
+		}
 	}
-	for _, t := range tools.NewCronTools() {
-		r.Register(t)
+}
+
+func webToolConfig(cfg configschema.WebConfig) tools.WebToolConfig {
+	apiKey := configschema.ExpandEnv(cfg.SearchAPIKey)
+	if apiKey == "" && cfg.SearchAPIKeyEnv != "" {
+		apiKey = os.Getenv(cfg.SearchAPIKeyEnv)
 	}
-	for _, t := range tools.NewDockerTools() {
-		r.Register(t)
+	return tools.WebToolConfig{
+		SearchProvider:      cfg.SearchProvider,
+		SearchAPIKey:        apiKey,
+		SearchEndpoint:      cfg.SearchEndpoint,
+		FetchMaxBytes:       cfg.FetchMaxBytes,
+		FetchMaxChars:       cfg.FetchMaxChars,
+		AllowPrivateNetwork: cfg.AllowPrivateNetwork,
 	}
 }

@@ -387,14 +387,16 @@ func newRootCommand() *cobra.Command {
 				}
 			}
 
-			var reviewer *security.Reviewer
-			if provider != nil {
-				reviewer = security.NewReviewer(security.ReviewerConfig{
-					NodeWhitelists: nodeWhitelists,
-					Blacklist:      global.Security.CommandBlacklist,
-					Provider:       provider,
-					ModelName:      modelName,
-				})
+			reviewer := security.NewReviewer(security.ReviewerConfig{
+				NodeWhitelists:     nodeWhitelists,
+				Blacklist:          global.Security.CommandBlacklist,
+				LocalFileWhitelist: global.Security.LocalFileWhitelist,
+				Provider:           provider,
+				ModelName:          modelName,
+			})
+			workspaceRoot, err := os.Getwd()
+			if err != nil {
+				workspaceRoot = "."
 			}
 
 			memDir := filepath.Join(loader.Home(), "memory")
@@ -406,24 +408,26 @@ func newRootCommand() *cobra.Command {
 
 			conv := conversation.New(selectedCluster, nil, modelName)
 			model := tui.NewModel(tui.ModelConfig{
-				Cluster:     selectedCluster,
-				Model:       modelName,
-				Version:     version,
-				Provider:    provider,
-				Conv:        conv,
-				Clients:     clients,
-				Tools:       agentTools,
-				Nodes:       nodeInfos,
-				Reviewer:    reviewer,
-				AuditLogger: auditLog,
-				ConfigHome:  loader.Home(),
-				MemoryStore: memStore,
+				Cluster:            selectedCluster,
+				Model:              modelName,
+				Version:            version,
+				Provider:           provider,
+				Conv:               conv,
+				Clients:            clients,
+				Tools:              agentTools,
+				Nodes:              nodeInfos,
+				Reviewer:           reviewer,
+				AuditLogger:        auditLog,
+				ConfigHome:         loader.Home(),
+				MemoryStore:        memStore,
+				Subagents:          global.Subagents,
+				LocalWorkspaceRoot: workspaceRoot,
 			})
 			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 
-	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, newModelCommand(modelCommandConfig{home: &home}))
+	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
 }
 

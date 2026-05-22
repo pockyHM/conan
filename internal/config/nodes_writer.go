@@ -126,6 +126,25 @@ func (w *NodeWriter) AddCommandWhitelist(clusterName, nodeName, command string) 
 	return fmt.Errorf("node not found: %s", nodeName)
 }
 
+func (w *NodeWriter) AddLocalFileWhitelist(path string) error {
+	path = strings.TrimSpace(filepath.ToSlash(filepath.Clean(path)))
+	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "../") || strings.HasPrefix(path, "/") {
+		return fmt.Errorf("local file path must be relative to workspace")
+	}
+	loader := NewLoader(w.home)
+	cfg, err := loader.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	for _, existing := range cfg.Security.LocalFileWhitelist {
+		if strings.TrimSpace(filepath.ToSlash(filepath.Clean(existing))) == path {
+			return loader.SaveGlobal(cfg)
+		}
+	}
+	cfg.Security.LocalFileWhitelist = append(cfg.Security.LocalFileWhitelist, path)
+	return loader.SaveGlobal(cfg)
+}
+
 func writeNodeList(path string, nodes configschema.NodeList) error {
 	data, err := yaml.Marshal(nodes)
 	if err != nil {

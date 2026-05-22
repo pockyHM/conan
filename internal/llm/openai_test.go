@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -86,6 +87,80 @@ func TestOpenAIStream(t *testing.T) {
 	}
 	if stopReason != StopEndTurn {
 		t.Fatalf("stopReason = %q", stopReason)
+	}
+}
+
+func TestOpenAIStreamUsesReasoningContentAsReasoningDelta(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"reasoning_content":"Hello"},"finish_reason":null}]}`)
+		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"reasoning_content":" there"},"finish_reason":null}]}`)
+		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"content":""},"finish_reason":"stop"}]}`)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider(OpenAIConfig{
+		APIKey:  "test-key",
+		Model:   "glm-4.7",
+		BaseURL: server.URL,
+	})
+	ch, err := p.ChatStream(context.Background(), &ChatRequest{
+		Messages: []models.Message{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	var reasoning string
+	var stopReason string
+	for event := range ch {
+		switch e := event.(type) {
+		case ReasoningDeltaEvent:
+			reasoning += e.Delta
+		case StopEvent:
+			stopReason = e.Reason
+		case ErrorEvent:
+			t.Fatalf("error: %v", e.Err)
+		}
+	}
+	if reasoning != "Hello there" {
+		t.Fatalf("reasoning = %q", reasoning)
+	}
+	if stopReason != StopEndTurn {
+		t.Fatalf("stopReason = %q", stopReason)
+	}
+}
+
+func TestOpenAIBuildBodyIncludesThinkingSetting(t *testing.T) {
+	disabled := false
+	p := NewOpenAIProvider(OpenAIConfig{Model: "glm-4.7", Thinking: &disabled})
+
+	body, err := p.buildBody(&ChatRequest{Messages: []models.Message{{Role: "user", Content: "hi"}}}, true)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	thinking, ok := decoded["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "disabled" {
+		t.Fatalf("thinking = %#v, want disabled", decoded["thinking"])
+	}
+
+	enabled := true
+	body, err = p.buildBody(&ChatRequest{Thinking: &enabled, Messages: []models.Message{{Role: "user", Content: "hi"}}}, true)
+	if err != nil {
+		t.Fatalf("buildBody override: %v", err)
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode override body: %v", err)
+	}
+	thinking, ok = decoded["thinking"].(map[string]any)
+	if !ok || thinking["type"] != "enabled" {
+		t.Fatalf("thinking override = %#v, want enabled", decoded["thinking"])
 	}
 }
 

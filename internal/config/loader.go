@@ -238,6 +238,12 @@ func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
 	if cfg.Logging.Level == "" {
 		cfg.Logging.Level = "info"
 	}
+	if cfg.Subagents.MaxParallel == 0 {
+		cfg.Subagents.MaxParallel = 3
+	}
+	if cfg.Subagents.TimeoutSeconds == 0 {
+		cfg.Subagents.TimeoutSeconds = 120
+	}
 }
 
 func applyAgentDeployDefaults(cfg *configschema.GlobalConfig, home string) {
@@ -351,6 +357,31 @@ func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfi
 	}
 	if override.LogLevel != "" {
 		base.LogLevel = override.LogLevel
+	}
+	mergeWeb(&base.Web, override.Web)
+}
+
+func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig) {
+	if override.SearchProvider != "" {
+		base.SearchProvider = override.SearchProvider
+	}
+	if override.SearchAPIKey != "" {
+		base.SearchAPIKey = override.SearchAPIKey
+	}
+	if override.SearchAPIKeyEnv != "" {
+		base.SearchAPIKeyEnv = override.SearchAPIKeyEnv
+	}
+	if override.SearchEndpoint != "" {
+		base.SearchEndpoint = override.SearchEndpoint
+	}
+	if override.FetchMaxBytes != 0 {
+		base.FetchMaxBytes = override.FetchMaxBytes
+	}
+	if override.FetchMaxChars != 0 {
+		base.FetchMaxChars = override.FetchMaxChars
+	}
+	if override.AllowPrivateNetwork {
+		base.AllowPrivateNetwork = override.AllowPrivateNetwork
 	}
 }
 

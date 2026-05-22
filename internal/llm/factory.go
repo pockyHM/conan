@@ -29,9 +29,10 @@ func NewProvider(models []configschema.ModelConfig, name string) (Provider, stri
 		}), cfg.Name, nil
 	case "openai":
 		return NewOpenAIProvider(OpenAIConfig{
-			APIKey:  cfg.APIKey,
-			Model:   cfg.Model,
-			BaseURL: cfg.Endpoint,
+			APIKey:   cfg.APIKey,
+			Model:    cfg.Model,
+			BaseURL:  cfg.Endpoint,
+			Thinking: cfg.Thinking,
 		}), cfg.Name, nil
 	default:
 		return nil, "", fmt.Errorf("unknown model type: %s", cfg.Type)

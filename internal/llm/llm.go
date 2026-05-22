@@ -37,6 +37,7 @@ type ChatRequest struct {
 	Messages     []models.Message
 	Tools        []ToolDef
 	MaxTokens    int
+	Thinking     *bool
 }
 
 type ChatResponse struct {
@@ -62,6 +63,12 @@ type TextDeltaEvent struct {
 }
 
 func (TextDeltaEvent) chatEvent() {}
+
+type ReasoningDeltaEvent struct {
+	Delta string
+}
+
+func (ReasoningDeltaEvent) chatEvent() {}
 
 type ToolCallEvent struct {
 	ID        string

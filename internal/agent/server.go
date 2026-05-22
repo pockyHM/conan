@@ -24,13 +24,20 @@ type Server struct {
 func NewServer(cfg *configschema.AgentConfig, registry *tools.Registry, version string) *Server {
 	handler := NewHandler(registry, version)
 
-	var h http.Handler = handler
-	h = auditMiddleware(cfg.AuditLog)(h)
-	h = rateLimitMiddleware(cfg.RateLimit)(h)
-	h = authMiddleware(cfg.Token)(h)
+	var rpcHandler http.Handler = handler
+	rpcHandler = auditMiddleware(cfg.AuditLog)(rpcHandler)
+	rpcHandler = rateLimitMiddleware(cfg.RateLimit)(rpcHandler)
+	rpcHandler = authMiddleware(cfg.Token)(rpcHandler)
+
+	var filesHandler http.Handler = fileHandler{}
+	filesHandler = auditMiddleware(cfg.AuditLog)(filesHandler)
+	filesHandler = rateLimitMiddleware(cfg.RateLimit)(filesHandler)
+	filesHandler = authMiddleware(cfg.Token)(filesHandler)
 
 	mux := http.NewServeMux()
-	mux.Handle("/rpc", h)
+	mux.Handle("/rpc", rpcHandler)
+	mux.Handle("/files/download", filesHandler)
+	mux.Handle("/files/upload", filesHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")

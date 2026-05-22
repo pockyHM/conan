@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -107,6 +109,61 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 		return nil, err
 	}
 	return &result, nil
+}
+
+func (c *Client) DownloadFile(ctx context.Context, path string, dst io.Writer) (int64, error) {
+	u := c.baseURL + "/files/download?path=" + url.QueryEscape(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	c.authorize(req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, &rpcError{
+			Code:       resp.StatusCode,
+			HTTPStatus: resp.StatusCode,
+			Message:    fmt.Sprintf("file download failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+		}
+	}
+	return io.Copy(dst, resp.Body)
+}
+
+func (c *Client) UploadFile(ctx context.Context, path string, src io.Reader) (int64, error) {
+	u := c.baseURL + "/files/upload?mkdirs=true&path=" + url.QueryEscape(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, src)
+	if err != nil {
+		return 0, err
+	}
+	c.authorize(req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return 0, &rpcError{
+			Code:       resp.StatusCode,
+			HTTPStatus: resp.StatusCode,
+			Message:    fmt.Sprintf("file upload failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+		}
+	}
+	bytesWritten, _ := strconv.ParseInt(resp.Header.Get("X-Conan-Bytes-Written"), 10, 64)
+	if bytesWritten == 0 && len(body) > 0 {
+		fmt.Sscanf(string(body), "uploaded %d bytes", &bytesWritten)
+	}
+	return bytesWritten, nil
 }
 
 func (c *Client) rpc(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {

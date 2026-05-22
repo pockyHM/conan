@@ -16,7 +16,6 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/nodeadd"
-	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
@@ -168,27 +167,6 @@ func TestNodeAddPreparePromptsForMissingPassword(t *testing.T) {
 	}
 }
 
-func TestNodeAddPrepareRequiresAuthorizationBeforePrompt(t *testing.T) {
-	model := NewModel(ModelConfig{})
-	call := llm.ToolCall{
-		ID:        "node-add-1",
-		Name:      metaToolNodeAdd,
-		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy"}`),
-	}
-
-	msg := execCmd(t, model.prepareNodeAddOrPrompt(7, call))
-	result, ok := msg.(multiToolResultMsg)
-	if !ok {
-		t.Fatalf("prepareNodeAddOrPrompt returned %T, want multiToolResultMsg", msg)
-	}
-	if len(result.Results) != 1 || result.Results[0].Success {
-		t.Fatalf("results = %#v, want one failed local result", result.Results)
-	}
-	if !strings.Contains(result.Results[0].Output, "node_add is not enabled") {
-		t.Fatalf("output = %q, want authorization error", result.Results[0].Output)
-	}
-}
-
 func TestNodePromptSubmitPasswordDoesNotAddSecretToConversation(t *testing.T) {
 	const secret = "super-secret"
 	var gotReq nodeadd.Request
@@ -297,7 +275,6 @@ func TestNodePromptEscCancelsWithoutLeakingPassword(t *testing.T) {
 	model.activeStreamID = 1
 	model.streamEnded = true
 	model.streamToolExpected = 1
-	model.nodeToolsEnabled = true
 	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name, toolInput: string(sanitizeToolArguments(call.Name, call.Arguments))})
 
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -317,96 +294,6 @@ func TestNodePromptEscCancelsWithoutLeakingPassword(t *testing.T) {
 	}
 	if strings.Contains(fmt.Sprintf("%#v", conv.Messages()), secret) {
 		t.Fatalf("conversation leaked password: %#v", conv.Messages())
-	}
-	if model.nodeToolsEnabled {
-		t.Fatal("node_add exposure should be cleared after prompt cancellation")
-	}
-}
-
-func TestRiskDenyNodeAddClearsExposure(t *testing.T) {
-	call := llm.ToolCall{
-		ID:        "node-add-1",
-		Name:      metaToolNodeAdd,
-		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy"}`),
-	}
-	model := NewModel(ModelConfig{})
-	model.nodeToolsEnabled = true
-	model.streaming = true
-	model.streamID = 1
-	model.activeStreamID = 1
-	model.streamEnded = true
-	model.streamToolExpected = 1
-	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name})
-
-	next, _ := model.Update(riskAssessmentMsg{
-		streamID: 1,
-		call:     call,
-		assessment: security.RiskAssessment{
-			Level:  security.RiskDeny,
-			Reason: "not allowed",
-		},
-	})
-	model = next.(Model)
-
-	if model.nodeToolsEnabled {
-		t.Fatal("node_add exposure should be cleared after denial")
-	}
-}
-
-func TestConfirmCancelNodeAddClearsExposure(t *testing.T) {
-	call := llm.ToolCall{
-		ID:        "node-add-1",
-		Name:      metaToolNodeAdd,
-		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy"}`),
-	}
-	model := NewModel(ModelConfig{})
-	model.nodeToolsEnabled = true
-	model.mode = modeConfirm
-	model.pendingToolCall = &call
-	model.pendingRisk = &security.RiskAssessment{Level: security.RiskConfirm, Reason: "confirm"}
-	model.streaming = true
-	model.streamID = 1
-	model.activeStreamID = 1
-	model.streamEnded = true
-	model.streamToolExpected = 1
-	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name})
-
-	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	model = next.(Model)
-
-	if model.nodeToolsEnabled {
-		t.Fatal("node_add exposure should be cleared after confirmation cancellation")
-	}
-}
-
-func TestNodeAddResultClearsExposureBeforeResume(t *testing.T) {
-	call := llm.ToolCall{
-		ID:        "node-add-1",
-		Name:      metaToolNodeAdd,
-		Arguments: json.RawMessage(`{"host":"10.0.0.12","user":"deploy","password":"secret"}`),
-	}
-	model := NewModel(ModelConfig{})
-	model.nodeToolsEnabled = true
-	model.streaming = true
-	model.streamID = 1
-	model.activeStreamID = 1
-	model.streamEnded = true
-	model.streamToolExpected = 1
-	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name})
-
-	next, _ := model.Update(nodeAddResultMsg{
-		streamID: 1,
-		Call:     call,
-		Result: nodeadd.Result{
-			Node: configschema.NodeConfig{Name: "web-1", Host: "10.0.0.12"},
-		},
-		Cluster: "prod",
-		Output:  "node added and deployed: web-1",
-	})
-	model = next.(Model)
-
-	if model.nodeToolsEnabled {
-		t.Fatal("node_add exposure should be cleared after node_add result")
 	}
 }
 

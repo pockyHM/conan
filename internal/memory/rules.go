@@ -3,8 +3,11 @@ package memory
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
+
+const memoryRuleReadLimitBytes = int64(maxMemoryContentRunes*4 + len("\n[truncated]"))
 
 type RulesContent struct {
 	Core  string
@@ -13,16 +16,14 @@ type RulesContent struct {
 
 func LoadRules(memoryDir string) (*RulesContent, error) {
 	rc := &RulesContent{Rules: make(map[string]string)}
+	store := NewMarkdownStore(memoryDir)
 
-	corePath := filepath.Join(memoryDir, "MEMORY.md")
-	data, err := os.ReadFile(corePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return rc, nil
-		}
+	core, err := store.ReadLimited("MEMORY.md", memoryRuleReadLimitBytes)
+	if err == nil {
+		rc.Core = limitMemoryRuleContent(core)
+	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
-	rc.Core = string(data)
 
 	rulesDir := filepath.Join(memoryDir, "rules")
 	entries, err := os.ReadDir(rulesDir)
@@ -36,14 +37,22 @@ func LoadRules(memoryDir string) (*RulesContent, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(rulesDir, entry.Name()))
+		content, err := store.ReadLimited(filepath.ToSlash(filepath.Join("rules", entry.Name())), memoryRuleReadLimitBytes)
 		if err != nil {
 			continue
 		}
-		rc.Rules[entry.Name()] = string(data)
+		rc.Rules[entry.Name()] = limitMemoryRuleContent(content)
 	}
 
 	return rc, nil
+}
+
+func limitMemoryRuleContent(content string) string {
+	runes := []rune(content)
+	if len(runes) <= maxMemoryContentRunes {
+		return content
+	}
+	return string(runes[:maxMemoryContentRunes]) + "\n[truncated]"
 }
 
 func (rc *RulesContent) Format() string {
@@ -51,7 +60,13 @@ func (rc *RulesContent) Format() string {
 	if rc.Core != "" {
 		parts = append(parts, rc.Core)
 	}
-	for name, content := range rc.Rules {
+	names := make([]string, 0, len(rc.Rules))
+	for name := range rc.Rules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		content := rc.Rules[name]
 		parts = append(parts, "\n## "+name+"\n"+content)
 	}
 	return strings.Join(parts, "\n")
@@ -62,9 +77,13 @@ func (rc *RulesContent) Empty() bool {
 }
 
 func EnsureMemoryDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	rulesDir := filepath.Join(dir, "rules")
-	return os.MkdirAll(rulesDir, 0o755)
+	for _, name := range []string{"rules", "clusters", "runbooks", "incidents"} {
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
 }

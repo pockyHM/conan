@@ -29,6 +29,7 @@ models:
     endpoint: https://api.anthropic.com/
     model: claude-sonnet-4-6
     api_key: ${TEST_CONAN_API_KEY}
+    thinking: false
 `)
 
 	loader := NewLoader(home)
@@ -45,6 +46,9 @@ models:
 	if cfg.Models[0].Endpoint != "https://api.anthropic.com" {
 		t.Fatalf("Endpoint = %q", cfg.Models[0].Endpoint)
 	}
+	if cfg.Models[0].Thinking == nil || *cfg.Models[0].Thinking {
+		t.Fatalf("Thinking = %#v, want false", cfg.Models[0].Thinking)
+	}
 	if cfg.Security.RiskAssessmentModel != "claude-sonnet" {
 		t.Fatalf("RiskAssessmentModel = %q", cfg.Security.RiskAssessmentModel)
 	}
@@ -53,6 +57,15 @@ models:
 	}
 	if cfg.Memory.RulesTokenBudget != 2000 {
 		t.Fatalf("RulesTokenBudget = %d", cfg.Memory.RulesTokenBudget)
+	}
+	if cfg.Subagents.Enabled {
+		t.Fatal("Subagents.Enabled = true, want false by default")
+	}
+	if cfg.Subagents.MaxParallel != 3 {
+		t.Fatalf("Subagents.MaxParallel = %d, want 3", cfg.Subagents.MaxParallel)
+	}
+	if cfg.Subagents.TimeoutSeconds != 120 {
+		t.Fatalf("Subagents.TimeoutSeconds = %d, want 120", cfg.Subagents.TimeoutSeconds)
 	}
 }
 
@@ -323,6 +336,10 @@ inherits: base
 agent:
   tls: true
   rate_limit: 25
+  web:
+    search_provider: brave
+    search_api_key_env: BRAVE_SEARCH_API_KEY
+    fetch_max_chars: 8000
 node_defaults:
   user: deploy
 `)
@@ -357,6 +374,9 @@ node_defaults:
 	}
 	if cluster.Cluster.Agent.RateLimit != 25 {
 		t.Fatalf("rate_limit = %d", cluster.Cluster.Agent.RateLimit)
+	}
+	if cluster.Cluster.Agent.Web.SearchProvider != "brave" || cluster.Cluster.Agent.Web.SearchAPIKeyEnv != "BRAVE_SEARCH_API_KEY" || cluster.Cluster.Agent.Web.FetchMaxChars != 8000 {
+		t.Fatalf("web config = %+v", cluster.Cluster.Agent.Web)
 	}
 	if len(cluster.Nodes) != 2 {
 		t.Fatalf("nodes = %d", len(cluster.Nodes))

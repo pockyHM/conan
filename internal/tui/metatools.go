@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pockyHM/conan/internal/llm"
@@ -15,16 +17,19 @@ import (
 )
 
 const (
-	metaToolExec       = "exec"
-	metaToolToolSearch = "tool_search"
-	metaToolCallTool   = "call_tool"
-	metaToolNodeAdd    = "node_add"
+	metaToolExec         = "exec"
+	metaToolToolSearch   = "tool_search"
+	metaToolCallTool     = "call_tool"
+	metaToolSubagentsRun = "subagents_run"
+	metaToolNodeAdd      = "node_add"
+	metaToolFilePut      = "file_put"
+	metaToolFileGet      = "file_get"
 )
 
 var metaToolDefs = []llm.ToolDef{
 	{
 		Name:        metaToolExec,
-		Description: "Execute a shell command on a specific node. Use this for ad-hoc commands, diagnostics, or quick operations.",
+		Description: "Last-resort shell execution on selected nodes. Do not use this as the first choice for diagnostics, inspection, service checks, logs, containers, Kubernetes, packages, or filesystem tasks. For file transfer, use file_put or file_get directly instead of shell commands such as scp or rsync. First call tool_search to discover a safer specialized Conan/MCP tool unless the user explicitly asks for a shell command or provides an exact command to run. Use exec only when no specialized tool fits, specialized output is insufficient, or the operation must intentionally go through shell risk review.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -36,11 +41,11 @@ var metaToolDefs = []llm.ToolDef{
 	},
 	{
 		Name:        metaToolToolSearch,
-		Description: "Search for available tools on nodes. Returns matching tool names, descriptions, and parameter schemas. Use this before calling call_tool.",
+		Description: "Primary discovery step for node capabilities except first-class file transfer. Search specialized Conan/MCP tools by capability, noun, verb, and synonyms; examples: 'service status logs journalctl', 'docker container logs', 'kubernetes pod events'. Use this before exec for operational requests unless the user explicitly asked for shell. For file upload/download, use file_put or file_get directly. Returns matching tool names, descriptions, available nodes, and parameter schemas; then use call_tool for the selected tool.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"query": {"type": "string", "description": "Search query to match against tool names and descriptions"},
+				"query": {"type": "string", "description": "Capability search query using concrete verbs, nouns, and synonyms from the user's request"},
 				"node": {"type": "string", "description": "Search tools on a specific node. Omit to search across all selected nodes."}
 			},
 			"required": ["query"]
@@ -48,7 +53,7 @@ var metaToolDefs = []llm.ToolDef{
 	},
 	{
 		Name:        metaToolCallTool,
-		Description: "Call a discovered tool on a specific node. Use tool_search first to find available tools and their parameters.",
+		Description: "Call a specialized Conan/MCP tool discovered with tool_search. Prefer this over exec when the discovered tool can answer the request or perform the requested managed operation. Use the exact input schema returned by tool_search. Read-only tools may be called directly; mutating tools are subject to Conan risk review and user confirmation.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -57,6 +62,54 @@ var metaToolDefs = []llm.ToolDef{
 				"arguments": {"type": "object", "description": "Arguments to pass to the tool"}
 			},
 			"required": ["node", "tool"]
+		}`),
+	},
+	{
+		Name:        metaToolSubagentsRun,
+		Description: "Delegate bounded read-only investigation, review, or summarization tasks to local subagents. Use for independent multi-node investigation, review, or summarization. Do not use for destructive actions.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"tasks": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"properties": {
+							"role": {"type": "string", "enum": ["investigator", "reviewer", "summarizer"]},
+							"task": {"type": "string"},
+							"nodes": {"type": "array", "items": {"type": "string"}}
+						},
+						"required": ["role", "task"]
+					}
+				}
+			},
+			"required": ["tasks"]
+		}`),
+	},
+	{
+		Name:        metaToolFilePut,
+		Description: "Upload a local workspace file to a remote node through Conan's managed file transfer API. Use this directly for file upload, send, copy, put, transfer-to-node, or local-to-remote requests. Do not use tool_search, scp, rsync, curl, or shell for this. Requires user confirmation because it writes a remote file.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"node": {"type": "string", "description": "Target node name. Required."},
+				"local_path": {"type": "string", "description": "Local workspace file path to upload. Must be relative to the workspace."},
+				"remote_path": {"type": "string", "description": "Absolute or agent-visible destination path on the remote node."}
+			},
+			"required": ["node", "local_path", "remote_path"]
+		}`),
+	},
+	{
+		Name:        metaToolFileGet,
+		Description: "Download a remote node file into the local workspace through Conan's managed file transfer API. Use this directly for file download, fetch, get, copy-from-node, transfer-from-node, or remote-to-local requests. Do not use tool_search, scp, rsync, curl, or shell for this. Requires user confirmation because it writes a local file.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"node": {"type": "string", "description": "Source node name. Required."},
+				"remote_path": {"type": "string", "description": "Remote file path to download."},
+				"local_path": {"type": "string", "description": "Local workspace destination path. Must be relative to the workspace."}
+			},
+			"required": ["node", "remote_path", "local_path"]
 		}`),
 	},
 }
@@ -144,42 +197,207 @@ func (c *toolCache) Search(query string, nodes []string) []toolSearchResult {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	q := strings.ToLower(query)
-	var results []toolSearchResult
-	seen := make(map[string]bool)
+	queryTokens := tokenizeSearchText(query)
+	if len(queryTokens) == 0 {
+		return nil
+	}
 
+	docs := make([]toolSearchDoc, 0)
 	for _, node := range nodes {
 		tools, ok := c.tools[node]
 		if !ok {
 			continue
 		}
 		for _, t := range tools {
-			name := strings.ToLower(t.Name)
-			desc := strings.ToLower(t.Description)
-			if strings.Contains(name, q) || strings.Contains(desc, q) {
-				if !seen[t.Name] {
-					seen[t.Name] = true
-					results = append(results, toolSearchResult{
-						Name:        t.Name,
-						Description: t.Description,
-						Schema:      t.InputSchema,
-						Nodes:       []string{node},
-					})
-				} else {
-					for i := range results {
-						if results[i].Name == t.Name {
-							results[i].Nodes = append(results[i].Nodes, node)
-							break
-						}
-					}
-				}
+			docs = append(docs, newToolSearchDoc(node, t))
+		}
+	}
+	if len(docs) == 0 {
+		return nil
+	}
+
+	avgDocLen := averageToolSearchDocLength(docs)
+	docFreq := toolSearchDocFrequencies(docs, queryTokens)
+	type scoredResult struct {
+		result toolSearchResult
+		score  float64
+	}
+	resultsByName := make(map[string]*scoredResult)
+	for _, doc := range docs {
+		score := scoreToolSearchDoc(doc, query, queryTokens, docFreq, len(docs), avgDocLen)
+		if score <= 0 {
+			continue
+		}
+		existing, ok := resultsByName[doc.tool.Name]
+		if !ok {
+			resultsByName[doc.tool.Name] = &scoredResult{
+				result: toolSearchResult{
+					Name:        doc.tool.Name,
+					Description: doc.tool.Description,
+					Schema:      doc.tool.InputSchema,
+					Nodes:       []string{doc.node},
+				},
+				score: score,
+			}
+			continue
+		}
+		existing.result.Nodes = append(existing.result.Nodes, doc.node)
+		if score > existing.score {
+			existing.score = score
+			existing.result.Description = doc.tool.Description
+			existing.result.Schema = doc.tool.InputSchema
+		}
+	}
+
+	var scored []scoredResult
+	for _, result := range resultsByName {
+		sort.Strings(result.result.Nodes)
+		scored = append(scored, *result)
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].result.Name < scored[j].result.Name
+		}
+		return scored[i].score > scored[j].score
+	})
+
+	results := make([]toolSearchResult, 0, len(scored))
+	for _, result := range scored {
+		results = append(results, result.result)
+	}
+	return results
+}
+
+type toolSearchDoc struct {
+	node   string
+	tool   mcpproto.ToolDefinition
+	fields []weightedSearchField
+	length float64
+}
+
+type weightedSearchField struct {
+	weight float64
+	tokens []string
+}
+
+func newToolSearchDoc(node string, tool mcpproto.ToolDefinition) toolSearchDoc {
+	fields := []weightedSearchField{
+		{weight: 4.0, tokens: tokenizeSearchText(tool.Name)},
+		{weight: 2.0, tokens: tokenizeSearchText(tool.Description)},
+		{weight: 0.75, tokens: tokenizeSearchText(string(tool.InputSchema))},
+	}
+	length := 0.0
+	for _, field := range fields {
+		length += float64(len(field.tokens)) * field.weight
+	}
+	return toolSearchDoc{node: node, tool: tool, fields: fields, length: length}
+}
+
+func averageToolSearchDocLength(docs []toolSearchDoc) float64 {
+	total := 0.0
+	for _, doc := range docs {
+		total += doc.length
+	}
+	if total == 0 {
+		return 1
+	}
+	return total / float64(len(docs))
+}
+
+func toolSearchDocFrequencies(docs []toolSearchDoc, queryTokens []string) map[string]int {
+	frequencies := make(map[string]int)
+	for _, token := range uniqueTokens(queryTokens) {
+		for _, doc := range docs {
+			if toolSearchDocContains(doc, token) {
+				frequencies[token]++
 			}
 		}
 	}
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Name < results[j].Name
-	})
-	return results
+	return frequencies
+}
+
+func toolSearchDocContains(doc toolSearchDoc, token string) bool {
+	for _, field := range doc.fields {
+		for _, fieldToken := range field.tokens {
+			if fieldToken == token {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scoreToolSearchDoc(doc toolSearchDoc, query string, queryTokens []string, docFreq map[string]int, docCount int, avgDocLen float64) float64 {
+	const (
+		k1 = 1.2
+		b  = 0.75
+	)
+	score := 0.0
+	for _, token := range uniqueTokens(queryTokens) {
+		tf := weightedTermFrequency(doc, token)
+		if tf == 0 {
+			continue
+		}
+		df := docFreq[token]
+		idf := math.Log(1 + (float64(docCount)-float64(df)+0.5)/(float64(df)+0.5))
+		denom := tf + k1*(1-b+b*(doc.length/avgDocLen))
+		score += idf * ((tf * (k1 + 1)) / denom)
+	}
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	name := strings.ToLower(doc.tool.Name)
+	desc := strings.ToLower(doc.tool.Description)
+	if q != "" && strings.Contains(name, q) {
+		score += 5
+	}
+	if q != "" && strings.Contains(desc, q) {
+		score += 2
+	}
+	return score
+}
+
+func weightedTermFrequency(doc toolSearchDoc, token string) float64 {
+	tf := 0.0
+	for _, field := range doc.fields {
+		for _, fieldToken := range field.tokens {
+			if fieldToken == token {
+				tf += field.weight
+			}
+		}
+	}
+	return tf
+}
+
+func uniqueTokens(tokens []string) []string {
+	seen := make(map[string]bool, len(tokens))
+	var unique []string
+	for _, token := range tokens {
+		if token == "" || seen[token] {
+			continue
+		}
+		seen[token] = true
+		unique = append(unique, token)
+	}
+	return unique
+}
+
+func tokenizeSearchText(text string) []string {
+	var tokens []string
+	var b strings.Builder
+	for _, r := range strings.ToLower(text) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			continue
+		}
+		if b.Len() > 0 {
+			tokens = append(tokens, b.String())
+			b.Reset()
+		}
+	}
+	if b.Len() > 0 {
+		tokens = append(tokens, b.String())
+	}
+	return tokens
 }
 
 type toolSearchResult struct {

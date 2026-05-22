@@ -42,6 +42,25 @@ func TestReviewerWhitelistBypass(t *testing.T) {
 	}
 }
 
+func TestReviewerRequiresConfirmationForManagedFileTransfer(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{
+		Provider: &stubProvider{response: `{"risk_level":"allow","reason":"provider would allow"}`},
+	})
+
+	for _, toolName := range []string{"file_put", "file_get"} {
+		assessment, err := r.Review(context.Background(), toolName, `{"node":"node-a","local_path":"x","remote_path":"/tmp/x"}`, []string{"node-a"})
+		if err != nil {
+			t.Fatalf("%s review: %v", toolName, err)
+		}
+		if assessment.Level != RiskConfirm {
+			t.Fatalf("%s level = %v, want confirm", toolName, assessment.Level)
+		}
+		if assessment.Reason != "managed file transfer requires confirmation" {
+			t.Fatalf("%s reason = %q", toolName, assessment.Reason)
+		}
+	}
+}
+
 func TestReviewerWhitelistRequiresExactCommand(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{
 		NodeWhitelists: map[string][]string{"node-01": {"cat"}},
@@ -125,6 +144,47 @@ func TestReviewerAlwaysAllowReadOnlyTools(t *testing.T) {
 		if result.Level != RiskAllow {
 			t.Fatalf("%s should be auto-allowed, got %v", tc.name, result.Level)
 		}
+	}
+}
+
+func TestReviewerLocalFileReadAllowedAndWriteRequiresConfirm(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{})
+
+	read, err := r.Review(context.Background(), "local/fs/read", `{"path":"README.md"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Level != RiskAllow {
+		t.Fatalf("local read should be allowed, got %#v", read)
+	}
+
+	write, err := r.Review(context.Background(), "local/fs/write", `{"path":"README.md","content":"x"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if write.Level != RiskConfirm {
+		t.Fatalf("local write should require confirmation, got %#v", write)
+	}
+}
+
+func TestReviewerAllowsWhitelistedLocalFileMutation(t *testing.T) {
+	r := NewReviewer(ReviewerConfig{LocalFileWhitelist: []string{"README.md"}})
+
+	result, err := r.Review(context.Background(), "local/fs/patch", `{"path":"README.md","old_text":"a","new_text":"b"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Level != RiskAllow {
+		t.Fatalf("whitelisted local file should allow mutation, got %#v", result)
+	}
+
+	r.AddLocalFileWhitelist("docs/spec.md")
+	result, err = r.Review(context.Background(), "local/fs/delete", `{"path":"docs/spec.md"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Level != RiskAllow {
+		t.Fatalf("runtime local file allowlist should allow mutation, got %#v", result)
 	}
 }
 
