@@ -960,6 +960,35 @@ func TestNodeAddAuditLogsRedactPassword(t *testing.T) {
 	}
 }
 
+func TestNodeAddRiskReviewRedactsPasswordAndPreservesRawCall(t *testing.T) {
+	provider := &stubRiskProvider{response: `{"risk_level":"confirm","reason":"node add"}`}
+	reviewer := security.NewReviewer(security.ReviewerConfig{Provider: provider})
+	model := NewModel(ModelConfig{Reviewer: reviewer})
+	rawArgs := json.RawMessage(`{"host":"10.0.0.5","password":"secret"}`)
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: rawArgs}
+
+	msg := execCmd(t, model.assessToolRisk(7, call))
+	result, ok := msg.(riskAssessmentMsg)
+	if !ok {
+		t.Fatalf("assessToolRisk returned %T, want riskAssessmentMsg", msg)
+	}
+	if result.err != nil {
+		t.Fatalf("risk assessment error: %v", result.err)
+	}
+	if provider.req == nil {
+		t.Fatal("risk provider was not called")
+	}
+	if strings.Contains(provider.req.SystemPrompt, "secret") {
+		t.Fatalf("risk prompt should not contain raw password: %s", provider.req.SystemPrompt)
+	}
+	if !strings.Contains(provider.req.SystemPrompt, "[REDACTED]") {
+		t.Fatalf("risk prompt should contain redacted password marker: %s", provider.req.SystemPrompt)
+	}
+	if string(result.call.Arguments) != string(rawArgs) {
+		t.Fatalf("risk assessment call args = %s, want raw args", result.call.Arguments)
+	}
+}
+
 func TestDebugLogStreamEventRedactsNodeAddPassword(t *testing.T) {
 	var buf bytes.Buffer
 	previousLogger := slog.Default()
@@ -1343,12 +1372,14 @@ func execVersionCheckFromBatch(t *testing.T, cmd tea.Cmd) versionCheckMsg {
 type stubRiskProvider struct {
 	response string
 	err      error
+	req      *llm.ChatRequest
 	started  chan struct{}
 	block    chan struct{}
 	done     chan struct{}
 }
 
-func (s *stubRiskProvider) Chat(ctx context.Context, _ *llm.ChatRequest) (*llm.ChatResponse, error) {
+func (s *stubRiskProvider) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.ChatResponse, error) {
+	s.req = req
 	if s.started != nil {
 		close(s.started)
 	}

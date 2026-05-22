@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pockyHM/conan/internal/logging"
 )
 
 func TestReadSSEParsesEventsWithData(t *testing.T) {
@@ -72,5 +76,63 @@ func TestReadSSESendsDoneSentinel(t *testing.T) {
 	}
 	if collected[1].Data != "[DONE]" {
 		t.Fatalf("data[1] = %q", collected[1].Data)
+	}
+}
+
+func TestReadSSEDebugLogsRawEvents(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
+	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
+		t.Fatalf("setup logging: %v", err)
+	}
+	defer logging.Close()
+
+	input := "event: completion\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	events := ReadSSE(strings.NewReader(input))
+	for range events {
+	}
+	logging.Close()
+
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logText := string(contents)
+	for _, want := range []string{
+		"llm raw sse event",
+		"completion",
+		"finish_reason",
+		"stop",
+		"[DONE]",
+		"data_len",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("debug log missing %q:\n%s", want, logText)
+		}
+	}
+}
+
+func TestReadSSEDebugLogsRedactPasswordFields(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
+	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
+		t.Fatalf("setup logging: %v", err)
+	}
+	defer logging.Close()
+
+	input := "event: completion\ndata: {\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"host\\\":\\\"10.0.0.5\\\",\\\"password\\\":\\\"secret\\\"}\"}}]}\n\n"
+	events := ReadSSE(strings.NewReader(input))
+	for range events {
+	}
+	logging.Close()
+
+	contents, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	logText := string(contents)
+	if strings.Contains(logText, "secret") {
+		t.Fatalf("debug log should not contain raw password:\n%s", logText)
+	}
+	if !strings.Contains(logText, "[redacted]") {
+		t.Fatalf("debug log should contain redacted marker:\n%s", logText)
 	}
 }

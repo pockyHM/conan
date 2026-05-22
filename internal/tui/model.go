@@ -1159,7 +1159,8 @@ func (m Model) assessToolRisk(streamID uint64, call llm.ToolCall) tea.Cmd {
 	}
 	targetNodes := m.targetNodesForCall(call)
 	return func() tea.Msg {
-		assessment, err := reviewer.Review(ctx, call.Name, string(call.Arguments), targetNodes)
+		reviewInput := string(sanitizeToolArguments(call.Name, call.Arguments))
+		assessment, err := reviewer.Review(ctx, call.Name, reviewInput, targetNodes)
 		return riskAssessmentMsg{streamID: streamID, call: call, assessment: assessment, err: err}
 	}
 }

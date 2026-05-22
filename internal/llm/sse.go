@@ -3,8 +3,16 @@ package llm
 import (
 	"bufio"
 	"io"
+	"log/slog"
+	"regexp"
 	"strings"
 )
+
+var sseSensitiveFieldPattern = regexp.MustCompile(`(?i)(\\?"password\\?"\s*:\s*\\?")[^"\\]*(\\?")`)
+
+func sanitizeSSELogData(data string) string {
+	return sseSensitiveFieldPattern.ReplaceAllString(data, `${1}[redacted]${2}`)
+}
 
 // SSEEvent represents a single Server-Sent Event.
 type SSEEvent struct {
@@ -25,7 +33,9 @@ func ReadSSE(reader io.Reader) <-chan SSEEvent {
 			line := scanner.Text()
 			if line == "" {
 				if data.Len() > 0 {
-					ch <- SSEEvent{Event: event.String(), Data: data.String()}
+					ev := SSEEvent{Event: event.String(), Data: data.String()}
+					slog.Debug("llm raw sse event", "event", ev.Event, "data", sanitizeSSELogData(ev.Data), "data_len", len(ev.Data))
+					ch <- ev
 				}
 				event.Reset()
 				data.Reset()
