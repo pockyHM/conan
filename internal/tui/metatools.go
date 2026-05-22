@@ -84,6 +84,24 @@ var nodeManagementToolDefs = []llm.ToolDef{
 	},
 }
 
+func sanitizeToolArguments(toolName string, raw json.RawMessage) json.RawMessage {
+	if toolName != metaToolNodeAdd {
+		return raw
+	}
+	var args map[string]any
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return raw
+	}
+	if _, ok := args["password"]; ok {
+		args["password"] = "[REDACTED]"
+	}
+	sanitized, err := json.Marshal(args)
+	if err != nil {
+		return raw
+	}
+	return sanitized
+}
+
 type toolCache struct {
 	mu    sync.RWMutex
 	tools map[string][]mcpproto.ToolDefinition // node name -> tools

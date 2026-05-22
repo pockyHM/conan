@@ -883,6 +883,45 @@ func TestNodeCommandOffDisablesNodeTools(t *testing.T) {
 	}
 }
 
+func TestNodeToolExposureDispatchesNodeAddLocally(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	rawArgs := json.RawMessage(`{"host":"10.0.0.5","password":"secret"}`)
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: rawArgs}
+
+	msg := execCmd(t, model.dispatchTool(7, call))
+
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("dispatchTool returned %T, want multiToolResultMsg", msg)
+	}
+	if result.streamID != 7 {
+		t.Fatalf("streamID = %d, want 7", result.streamID)
+	}
+	if string(result.Call.Arguments) != string(rawArgs) {
+		t.Fatalf("dispatch should preserve raw arguments, got %s", string(result.Call.Arguments))
+	}
+	if len(result.Results) != 1 || result.Results[0].Node != "local" {
+		t.Fatalf("results = %#v, want one local result", result.Results)
+	}
+	if result.Results[0].Success {
+		t.Fatal("node_add placeholder dispatch should fail until implemented")
+	}
+	if !strings.Contains(result.Results[0].Output, "not implemented") {
+		t.Fatalf("output = %q, want not implemented message", result.Results[0].Output)
+	}
+}
+
+func TestNodeToolExposureClearedOnFinishStream(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	model.nodeToolsEnabled = true
+
+	model.finishStream(false)
+
+	if model.nodeToolsEnabled {
+		t.Fatal("finishStream should clear node tool exposure")
+	}
+}
+
 func TestNodeSelectConfirm(t *testing.T) {
 	nodes := []NodeInfo{
 		{Name: "node-01", Host: "10.0.1.1", Online: true},

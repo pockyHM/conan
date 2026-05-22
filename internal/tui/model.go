@@ -311,14 +311,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.streamBuf = ""
 			}
 			m.streamToolExpected++
+			sanitizedArgs := sanitizeToolArguments(e.Name, e.Arguments)
 			m.messages = append(m.messages, chatMsg{
 				role:       "tool",
 				toolCallID: e.ID,
 				toolName:   e.Name,
-				toolInput:  string(e.Arguments),
+				toolInput:  string(sanitizedArgs),
 			})
 			if m.conv != nil {
-				m.conv.AddToolCall(e.ID, e.Name, string(e.Arguments))
+				m.conv.AddToolCall(e.ID, e.Name, string(sanitizedArgs))
 			}
 			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
 			var toolCmd tea.Cmd
@@ -1078,6 +1079,7 @@ func (m *Model) finishStream(cancel bool) {
 	if cancel {
 		m.cancelActiveStream()
 	}
+	m.clearNodeToolExposure()
 	m.streaming = false
 	m.streamBuf = ""
 	m.streamCh = nil
@@ -1088,6 +1090,10 @@ func (m *Model) finishStream(cancel bool) {
 	m.streamToolExpected = 0
 	m.streamToolDone = 0
 	m.streamEnded = false
+}
+
+func (m *Model) clearNodeToolExposure() {
+	m.nodeToolsEnabled = false
 }
 
 func (m *Model) markStreamToolDone(streamID uint64) {
@@ -1170,8 +1176,20 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 		return m.dispatchToolSearch(streamID, call)
 	case metaToolCallTool:
 		return m.dispatchCallTool(streamID, call)
+	case metaToolNodeAdd:
+		return m.dispatchNodeAddNotImplemented(streamID, call)
 	default:
 		return m.dispatchMemoryOrDirectTool(streamID, call)
+	}
+}
+
+func (m Model) dispatchNodeAddNotImplemented(streamID uint64, call llm.ToolCall) tea.Cmd {
+	return func() tea.Msg {
+		return multiToolResultMsg{
+			streamID: streamID,
+			Call:     call,
+			Results:  []nodeToolResult{{Node: "local", Output: "node_add is not implemented yet", Success: false}},
+		}
 	}
 }
 
@@ -1448,12 +1466,13 @@ func (m *Model) fillToolPlaceholder(call llm.ToolCall, output string, results []
 			return
 		}
 	}
+	sanitizedArgs := sanitizeToolArguments(call.Name, call.Arguments)
 	m.messages = append(m.messages, chatMsg{
 		role:        "tool",
 		elapsed:     m.streamElapsed(),
 		toolCallID:  call.ID,
 		toolName:    call.Name,
-		toolInput:   string(call.Arguments),
+		toolInput:   string(sanitizedArgs),
 		toolOutput:  output,
 		nodeResults: results,
 	})
