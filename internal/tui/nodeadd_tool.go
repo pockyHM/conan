@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	cfgloader "github.com/pockyHM/conan/internal/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/pkg/configschema"
+	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
 type nodeAddArgs struct {
@@ -84,7 +86,13 @@ type nodeAddResultMsg struct {
 	Call     llm.ToolCall
 	Result   nodeadd.Result
 	Cluster  string
+	TLS      bool
 	Output   string
+}
+
+type nodeAddToolsFetchedMsg struct {
+	streamID uint64
+	updates  []toolCacheMsg
 }
 
 func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
@@ -184,11 +192,11 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 			result.Node.Agent.Port = agentPort
 		}
 		output := fmt.Sprintf("node added and deployed: %s\ncluster: %s\nhost: %s\nagent_port: %d\nhealth: ok", name, req.ClusterName, host, agentPort)
-		return nodeAddResultMsg{streamID: streamID, Call: call, Result: result, Cluster: req.ClusterName, Output: output}
+		return nodeAddResultMsg{streamID: streamID, Call: call, Result: result, Cluster: req.ClusterName, TLS: req.TLS, Output: output}
 	}
 }
 
-func (m Model) applyNodeAddResult(cluster string, result nodeadd.Result) Model {
+func (m Model) applyNodeAddResult(cluster string, result nodeadd.Result, tls bool) Model {
 	if cluster != "" {
 		m.cluster = cluster
 		m.clusterExplicit = true
@@ -227,7 +235,7 @@ func (m Model) applyNodeAddResult(cluster string, result nodeadd.Result) Model {
 			m.clients = make(map[string]*mcp.Client)
 		}
 		m.clients[name] = mcp.NewClient(mcp.Config{
-			BaseURL: mcp.URL(node.Host, node.Agent.Port, false),
+			BaseURL: nodeAddClientURL(node.Host, node.Agent.Port, tls),
 			Token:   node.Agent.Token,
 		})
 	}
@@ -241,6 +249,50 @@ func (m Model) applyNodeAddResult(cluster string, result nodeadd.Result) Model {
 	}
 
 	return m
+}
+
+func nodeAddClientURL(host string, port int, tls bool) string {
+	return mcp.URL(host, port, tls)
+}
+
+func fetchNodeToolsBeforeNodeAddResume(streamID uint64, clients map[string]*mcp.Client) tea.Cmd {
+	clientCopy := make(map[string]*mcp.Client, len(clients))
+	for name, client := range clients {
+		clientCopy[name] = client
+	}
+	return func() tea.Msg {
+		return nodeAddToolsFetchedMsg{streamID: streamID, updates: fetchNodeToolUpdates(clientCopy)}
+	}
+}
+
+func fetchNodeToolUpdates(clients map[string]*mcp.Client) []toolCacheMsg {
+	type nodeTools struct {
+		node  string
+		tools []mcpproto.ToolDefinition
+	}
+	ch := make(chan nodeTools, len(clients))
+	for name, client := range clients {
+		n, c := name, client
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			tools, err := c.ListTools(ctx)
+			if err != nil {
+				ch <- nodeTools{node: n, tools: nil}
+				return
+			}
+			ch <- nodeTools{node: n, tools: tools}
+		}()
+	}
+
+	updates := make([]toolCacheMsg, 0, len(clients))
+	for range clients {
+		nt := <-ch
+		if nt.tools != nil {
+			updates = append(updates, toolCacheMsg{node: nt.node, tools: nt.tools})
+		}
+	}
+	return updates
 }
 
 func redactNodeAddError(err error, args nodeAddArgs) string {

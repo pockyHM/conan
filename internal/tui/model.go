@@ -254,6 +254,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case nodeAddToolsFetchedMsg:
+		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
+			return m, nil
+		}
+		for _, u := range msg.updates {
+			m.toolCache.Set(u.node, u.tools)
+		}
+		return m.resumeAfterStreamTools(msg.streamID)
+
 	case riskAssessmentMsg:
 		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
 			return m, nil
@@ -412,7 +421,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		results := []nodeToolResult{{Node: "local", Output: msg.Output, Success: true}}
-		m = m.applyNodeAddResult(msg.Cluster, msg.Result)
+		m = m.applyNodeAddResult(msg.Cluster, msg.Result, msg.TLS)
 		m.fillToolPlaceholder(msg.Call, msg.Output, results)
 		if m.conv != nil {
 			m.conv.AddToolResult(msg.Call.ID, msg.Output)
@@ -421,22 +430,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.markStreamToolDone(msg.streamID)
 		m.status = "Node added and deployed"
 		m.updateViewportContent()
-		next, resumeCmd := m.resumeAfterStreamTools(msg.streamID)
-		nextModel, ok := next.(Model)
-		if !ok {
-			return next, resumeCmd
+		if len(m.clients) > 0 {
+			return m, fetchNodeToolsBeforeNodeAddResume(msg.streamID, m.clients)
 		}
-		var cmds []tea.Cmd
-		if resumeCmd != nil {
-			cmds = append(cmds, resumeCmd)
-		}
-		if len(nextModel.clients) > 0 {
-			cmds = append(cmds, fetchNodeTools(nextModel.clients))
-		}
-		if len(cmds) == 0 {
-			return nextModel, nil
-		}
-		return nextModel, tea.Batch(cmds...)
+		return m.resumeAfterStreamTools(msg.streamID)
 
 	case pingResultMsg:
 		m.markNodeOnline(msg.node, msg.online)

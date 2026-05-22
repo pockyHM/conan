@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,6 +16,7 @@ import (
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/pkg/configschema"
+	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
 func TestParseNodeAddArgsRequiresHost(t *testing.T) {
@@ -226,6 +231,45 @@ func TestDispatchNodeAddUsesGlobalDefaultClusterWhenModelClusterImplicit(t *test
 	}
 }
 
+func TestDispatchNodeAddCarriesClusterTLSForRefreshedClient(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), "default_cluster: prod\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), "name: prod\nagent:\n  tls: true\n")
+
+	var gotReq nodeadd.Request
+	model := NewModel(ModelConfig{
+		ConfigHome: home,
+		NodeAddRunner: nodeAddRunnerFunc(func(_ context.Context, req nodeadd.Request) (nodeadd.Result, error) {
+			gotReq = req
+			return nodeadd.Result{
+				Node: configschema.NodeConfig{
+					Name: "web-1",
+					Host: req.Input,
+					Agent: &configschema.NodeAgentOverride{
+						Port:  req.AgentPort,
+						Token: "agent-token",
+					},
+				},
+				Deployed: true,
+			}, nil
+		}),
+	})
+	model.nodeToolsEnabled = true
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"10.0.0.12","agent_port":9281}`)}
+
+	msg := execCmd(t, model.dispatchNodeAdd(7, call))
+	result, ok := msg.(nodeAddResultMsg)
+	if !ok {
+		t.Fatalf("dispatchNodeAdd returned %T, want nodeAddResultMsg", msg)
+	}
+	if !gotReq.TLS || !result.TLS {
+		t.Fatalf("TLS = req %v msg %v, want true", gotReq.TLS, result.TLS)
+	}
+	if got := nodeAddClientURL("10.0.0.12", 9281, result.TLS); got != "https://10.0.0.12:9281" {
+		t.Fatalf("nodeAddClientURL = %q, want https URL", got)
+	}
+}
+
 func TestApplyNodeAddResultSelectsNewNodeAndPreservesExistingSelectedNodes(t *testing.T) {
 	model := NewModel(ModelConfig{
 		Cluster: "old",
@@ -248,7 +292,7 @@ func TestApplyNodeAddResultSelectsNewNodeAndPreservesExistingSelectedNodes(t *te
 			},
 		},
 		Deployed: true,
-	})
+	}, false)
 
 	if model.cluster != "prod" || !model.clusterExplicit {
 		t.Fatalf("cluster = %q explicit=%v, want prod explicit", model.cluster, model.clusterExplicit)
@@ -314,5 +358,98 @@ func TestNodeAddResultUpdateFillsPlaceholderConversationAndStatus(t *testing.T) 
 	}
 	if !model.selectedNodes["web-1"] {
 		t.Fatalf("selectedNodes = %#v, want web-1 selected", model.selectedNodes)
+	}
+}
+
+func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
+	var toolListRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/rpc" {
+			t.Fatalf("request = %s %s, want POST /rpc", r.Method, r.URL.Path)
+		}
+		var req mcpproto.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "tools/list" {
+			t.Fatalf("method = %q, want tools/list", req.Method)
+		}
+		toolListRequests++
+		_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, map[string]interface{}{
+			"tools": []mcpproto.ToolDefinition{
+				{Name: "sys/uptime", Description: "uptime", InputSchema: json.RawMessage(`{"type":"object"}`)},
+			},
+		}))
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider := &captureStreamProvider{}
+	conv := conversation.New("test", nil, "m")
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"127.0.0.1"}`)}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: provider, Conv: conv})
+	model.messages = append(model.messages, chatMsg{role: "tool", toolCallID: call.ID, toolName: call.Name})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+
+	next, cmd := model.Update(nodeAddResultMsg{
+		streamID: 1,
+		Call:     call,
+		Cluster:  "prod",
+		Output:   "node added and deployed: web-1",
+		Result: nodeadd.Result{
+			Node: configschema.NodeConfig{
+				Name: "web-1",
+				Host: u.Hostname(),
+				Agent: &configschema.NodeAgentOverride{
+					Port:  port,
+					Token: "agent-token",
+				},
+			},
+			Deployed: true,
+		},
+	})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("node add update returned nil command, want fetch-before-resume command")
+	}
+	if provider.req != nil {
+		t.Fatal("provider was called before node tools were fetched")
+	}
+
+	msg := execCmd(t, cmd)
+	fetched, ok := msg.(nodeAddToolsFetchedMsg)
+	if !ok {
+		t.Fatalf("fetch command returned %T, want nodeAddToolsFetchedMsg", msg)
+	}
+	if toolListRequests != 1 {
+		t.Fatalf("tool list requests = %d, want 1", toolListRequests)
+	}
+
+	next, resumeCmd := model.Update(fetched)
+	model = next.(Model)
+	if tools, ok := model.toolCache.Get("web-1"); !ok || len(tools) != 1 || tools[0].Name != "sys/uptime" {
+		t.Fatalf("cached tools = %#v ok=%v, want sys/uptime before resume", tools, ok)
+	}
+	if provider.req != nil {
+		t.Fatal("provider was called before processing fetched tools")
+	}
+	if resumeCmd == nil {
+		t.Fatal("resume command = nil, want stream resume after tool fetch")
+	}
+	execMaybeBatch(t, resumeCmd)
+	if provider.req == nil {
+		t.Fatal("provider was not called after tool fetch and resume")
 	}
 }
