@@ -88,16 +88,17 @@ func sanitizeToolArguments(toolName string, raw json.RawMessage) json.RawMessage
 	if toolName != metaToolNodeAdd {
 		return raw
 	}
+	invalidNodeAddArgs := json.RawMessage(`{"error":"invalid node_add arguments"}`)
 	var args map[string]any
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return raw
+		return invalidNodeAddArgs
 	}
 	if _, ok := args["password"]; ok {
 		args["password"] = "[REDACTED]"
 	}
 	sanitized, err := json.Marshal(args)
 	if err != nil {
-		return raw
+		return invalidNodeAddArgs
 	}
 	return sanitized
 }

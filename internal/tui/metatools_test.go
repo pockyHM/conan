@@ -51,3 +51,29 @@ func TestSanitizeToolArgumentsRedactsNodeAddPassword(t *testing.T) {
 		t.Fatalf("password = %v, want [REDACTED]", got["password"])
 	}
 }
+
+func TestSanitizeToolArgumentsRejectsMalformedNodeAddArguments(t *testing.T) {
+	raw := json.RawMessage(`{"host":"10.0.0.5","password":"secret"`)
+
+	sanitized := sanitizeToolArguments(metaToolNodeAdd, raw)
+
+	if string(sanitized) == string(raw) {
+		t.Fatal("malformed node_add arguments should not be returned raw")
+	}
+	if strings.Contains(string(sanitized), "secret") {
+		t.Fatalf("sanitized arguments should not leak password: %s", string(sanitized))
+	}
+	if string(sanitized) != `{"error":"invalid node_add arguments"}` {
+		t.Fatalf("sanitized arguments = %s, want invalid node_add payload", string(sanitized))
+	}
+}
+
+func TestSanitizeToolArgumentsLeavesMalformedNonNodeToolArgumentsRaw(t *testing.T) {
+	raw := json.RawMessage(`{"password":"secret"`)
+
+	sanitized := sanitizeToolArguments(metaToolExec, raw)
+
+	if string(sanitized) != string(raw) {
+		t.Fatalf("non-node tool arguments should be unchanged: %s", string(sanitized))
+	}
+}
