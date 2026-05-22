@@ -75,14 +75,15 @@ type pingResultMsg struct {
 const toolOutputPreviewLines = 4
 
 type Model struct {
-	cluster    string
-	model      string
-	cliVersion string
-	provider   llm.Provider
-	conv       *conversation.Conversation
-	clients    map[string]*mcp.Client
-	tools      []llm.ToolDef
-	toolCache  *toolCache
+	cluster         string
+	clusterExplicit bool
+	model           string
+	cliVersion      string
+	provider        llm.Provider
+	conv            *conversation.Conversation
+	clients         map[string]*mcp.Client
+	tools           []llm.ToolDef
+	toolCache       *toolCache
 
 	nodes            []NodeInfo
 	selectedNodes    map[string]bool
@@ -129,6 +130,7 @@ type Model struct {
 }
 
 func NewModel(cfg ModelConfig) Model {
+	clusterExplicit := cfg.Cluster != ""
 	if cfg.Cluster == "" {
 		cfg.Cluster = "default"
 	}
@@ -140,22 +142,23 @@ func NewModel(cfg ModelConfig) Model {
 		selectedNodes[node.Name] = true
 	}
 	return Model{
-		cluster:       cfg.Cluster,
-		model:         cfg.Model,
-		cliVersion:    cfg.Version,
-		provider:      cfg.Provider,
-		conv:          cfg.Conv,
-		clients:       cfg.Clients,
-		tools:         cfg.Tools,
-		nodes:         cfg.Nodes,
-		selectedNodes: selectedNodes,
-		status:        "Ready",
-		reviewer:      cfg.Reviewer,
-		auditLog:      cfg.AuditLogger,
-		configHome:    cfg.ConfigHome,
-		nodeAddRunner: cfg.NodeAddRunner,
-		memStore:      cfg.MemoryStore,
-		toolCache:     newToolCache(),
+		cluster:         cfg.Cluster,
+		clusterExplicit: clusterExplicit,
+		model:           cfg.Model,
+		cliVersion:      cfg.Version,
+		provider:        cfg.Provider,
+		conv:            cfg.Conv,
+		clients:         cfg.Clients,
+		tools:           cfg.Tools,
+		nodes:           cfg.Nodes,
+		selectedNodes:   selectedNodes,
+		status:          "Ready",
+		reviewer:        cfg.Reviewer,
+		auditLog:        cfg.AuditLogger,
+		configHome:      cfg.ConfigHome,
+		nodeAddRunner:   cfg.NodeAddRunner,
+		memStore:        cfg.MemoryStore,
+		toolCache:       newToolCache(),
 	}
 }
 

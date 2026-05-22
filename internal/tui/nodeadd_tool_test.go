@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -142,5 +144,71 @@ func TestDispatchNodeAddRequiresAuthorization(t *testing.T) {
 	}
 	if !strings.Contains(result.Results[0].Output, "node_add is not enabled") {
 		t.Fatalf("output = %q, want authorization error", result.Results[0].Output)
+	}
+}
+
+func TestDispatchNodeAddRedactsPasswordFromRunnerError(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		ConfigHome: t.TempDir(),
+		NodeAddRunner: nodeAddRunnerFunc(func(context.Context, nodeadd.Request) (nodeadd.Result, error) {
+			return nodeadd.Result{}, fmt.Errorf("bad password secret")
+		}),
+	})
+	model.nodeToolsEnabled = true
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"10.0.0.12","password":"secret"}`)}
+
+	msg := execCmd(t, model.dispatchNodeAdd(7, call))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("dispatchNodeAdd returned %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success {
+		t.Fatalf("results = %#v, want one failed local result", result.Results)
+	}
+	output := result.Results[0].Output
+	if strings.Contains(output, "secret") {
+		t.Fatalf("output leaked password: %s", output)
+	}
+	if !strings.Contains(output, "[REDACTED]") {
+		t.Fatalf("output = %q, want redaction marker", output)
+	}
+}
+
+func TestDispatchNodeAddUsesGlobalDefaultClusterWhenModelClusterImplicit(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), "default_cluster: prod\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), "name: prod\n")
+
+	var gotReq nodeadd.Request
+	model := NewModel(ModelConfig{
+		ConfigHome: home,
+		NodeAddRunner: nodeAddRunnerFunc(func(_ context.Context, req nodeadd.Request) (nodeadd.Result, error) {
+			gotReq = req
+			return nodeadd.Result{
+				Node: configschema.NodeConfig{
+					Name: "web-1",
+					Host: req.Input,
+					Agent: &configschema.NodeAgentOverride{
+						Port: req.AgentPort,
+					},
+				},
+				Deployed: true,
+			}, nil
+		}),
+	})
+	model.nodeToolsEnabled = true
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"10.0.0.12"}`)}
+
+	msg := execCmd(t, model.dispatchNodeAdd(7, call))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("dispatchNodeAdd returned %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 || !result.Results[0].Success {
+		t.Fatalf("results = %#v, want one successful local result", result.Results)
+	}
+	if gotReq.ClusterName != "prod" {
+		t.Fatalf("cluster name = %q, want prod", gotReq.ClusterName)
 	}
 }

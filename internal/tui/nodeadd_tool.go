@@ -85,6 +85,7 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 		home = cfgloader.DefaultHome()
 	}
 	currentCluster := m.cluster
+	clusterExplicit := m.clusterExplicit
 	runner := m.nodeAddRunner
 	parentCtx := m.streamCtx
 	if parentCtx == nil {
@@ -107,11 +108,14 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 			return nodeAddLocalResult(streamID, call, "load global config: "+err.Error(), false)
 		}
 		clusterName := args.Cluster
-		if clusterName == "" {
+		if clusterName == "" && clusterExplicit {
 			clusterName = currentCluster
 		}
 		if clusterName == "" {
 			clusterName = global.DefaultCluster
+		}
+		if clusterName == "" {
+			clusterName = currentCluster
 		}
 		if clusterName == "" {
 			clusterName = "default"
@@ -140,7 +144,7 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 
 		result, err := runner.Add(parentCtx, req)
 		if err != nil {
-			return nodeAddLocalResult(streamID, call, "node_add failed: "+err.Error(), false)
+			return nodeAddLocalResult(streamID, call, "node_add failed: "+redactNodeAddError(err, args), false)
 		}
 
 		name := result.Node.Name
@@ -164,6 +168,17 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 		output := fmt.Sprintf("node added and deployed: %s\ncluster: %s\nhost: %s\nagent_port: %d\nhealth: ok", name, req.ClusterName, host, agentPort)
 		return nodeAddLocalResult(streamID, call, output, true)
 	}
+}
+
+func redactNodeAddError(err error, args nodeAddArgs) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if args.Password != "" {
+		msg = strings.ReplaceAll(msg, args.Password, "[REDACTED]")
+	}
+	return msg
 }
 
 func nodeAddLocalResult(streamID uint64, call llm.ToolCall, output string, success bool) multiToolResultMsg {
