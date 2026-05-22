@@ -12,11 +12,13 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
+	"github.com/pockyHM/conan/pkg/models"
 )
 
 func TestParseNodeAddArgsRequiresHost(t *testing.T) {
@@ -392,7 +394,7 @@ func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	provider := &captureStreamProvider{}
+	provider := &nodeAddCaptureStreamProvider{}
 	conv := conversation.New("test", nil, "m")
 	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{"host":"127.0.0.1"}`)}
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: provider, Conv: conv})
@@ -400,7 +402,6 @@ func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
 	model.streaming = true
 	model.streamID = 1
 	model.activeStreamID = 1
-	model.streamEnded = true
 	model.streamToolExpected = 1
 
 	next, cmd := model.Update(nodeAddResultMsg{
@@ -427,6 +428,21 @@ func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
 	if provider.req != nil {
 		t.Fatal("provider was called before node tools were fetched")
 	}
+	if model.streamToolDone != 0 {
+		t.Fatalf("streamToolDone = %d, want 0 before node tool refresh", model.streamToolDone)
+	}
+
+	next, prematureResumeCmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopToolUse}})
+	model = next.(Model)
+	if prematureResumeCmd != nil {
+		t.Fatal("StopToolUse before node tool refresh returned resume command")
+	}
+	if provider.req != nil {
+		t.Fatal("provider was called after StopToolUse before node tools were fetched")
+	}
+	if !model.streamEnded || model.streamToolDone != 0 {
+		t.Fatalf("streamEnded=%v streamToolDone=%d, want ended with pending node refresh", model.streamEnded, model.streamToolDone)
+	}
 
 	msg := execCmd(t, cmd)
 	fetched, ok := msg.(nodeAddToolsFetchedMsg)
@@ -448,8 +464,37 @@ func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
 	if resumeCmd == nil {
 		t.Fatal("resume command = nil, want stream resume after tool fetch")
 	}
-	execMaybeBatch(t, resumeCmd)
+	nodeAddExecMaybeBatch(t, resumeCmd)
 	if provider.req == nil {
 		t.Fatal("provider was not called after tool fetch and resume")
+	}
+}
+
+type nodeAddCaptureStreamProvider struct {
+	req *llm.ChatRequest
+}
+
+func (p *nodeAddCaptureStreamProvider) Chat(_ context.Context, _ *llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{Message: models.Message{Role: "assistant", Content: "ok"}, StopReason: llm.StopEndTurn}, nil
+}
+
+func (p *nodeAddCaptureStreamProvider) ChatStream(_ context.Context, req *llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	p.req = req
+	ch := make(chan llm.ChatEvent, 2)
+	ch <- llm.TextDeltaEvent{Delta: "ok"}
+	ch <- llm.StopEvent{Reason: llm.StopEndTurn}
+	close(ch)
+	return ch, nil
+}
+
+func nodeAddExecMaybeBatch(t *testing.T, cmd tea.Cmd) {
+	t.Helper()
+	msg := execCmd(t, cmd)
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return
+	}
+	for _, c := range batch {
+		execCmd(t, c)
 	}
 }

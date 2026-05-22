@@ -261,6 +261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, u := range msg.updates {
 			m.toolCache.Set(u.node, u.tools)
 		}
+		m.markStreamToolDone(msg.streamID)
 		return m.resumeAfterStreamTools(msg.streamID)
 
 	case riskAssessmentMsg:
@@ -427,12 +428,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conv.AddToolResult(msg.Call.ID, msg.Output)
 		}
 		m.logAuditExecution(msg.Call, results)
-		m.markStreamToolDone(msg.streamID)
 		m.status = "Node added and deployed"
 		m.updateViewportContent()
 		if len(m.clients) > 0 {
 			return m, fetchNodeToolsBeforeNodeAddResume(msg.streamID, m.clients)
 		}
+		m.markStreamToolDone(msg.streamID)
 		return m.resumeAfterStreamTools(msg.streamID)
 
 	case pingResultMsg:
