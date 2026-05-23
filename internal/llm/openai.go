@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -85,6 +86,43 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *ChatRequest) (<-ch
 	return ch, nil
 }
 
+func (p *OpenAIProvider) SupportsVision() bool {
+	model := strings.ToLower(p.model)
+	return strings.Contains(model, "gpt-4o") ||
+		strings.Contains(model, "gpt-4.1") ||
+		strings.Contains(model, "gpt-5") ||
+		strings.Contains(model, "o3") ||
+		strings.Contains(model, "o4") ||
+		strings.Contains(model, "vision")
+}
+
+func (p *OpenAIProvider) DescribeImages(ctx context.Context, req *VisionRequest) (*VisionResponse, error) {
+	if !p.SupportsVision() {
+		return nil, fmt.Errorf("model %q does not support image input", p.model)
+	}
+	body, err := p.buildVisionBody(req)
+	if err != nil {
+		return nil, err
+	}
+	httpResp, err := p.doRequest(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	defer httpResp.Body.Close()
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, &httpError{Status: httpResp.StatusCode, Body: strings.TrimSpace(string(data))}
+	}
+	resp, err := p.parseResponse(data)
+	if err != nil {
+		return nil, err
+	}
+	return &VisionResponse{Summary: strings.TrimSpace(resp.Message.Content)}, nil
+}
+
 func (p *OpenAIProvider) buildBody(req *ChatRequest, stream bool) ([]byte, error) {
 	msgs := messagesToOpenAI(req.Messages)
 	tools := toolsToOpenAI(req.Tools)
@@ -108,6 +146,38 @@ func (p *OpenAIProvider) buildBody(req *ChatRequest, stream bool) ([]byte, error
 	}
 	if stream {
 		body["stream"] = true
+	}
+	return json.Marshal(body)
+}
+
+func (p *OpenAIProvider) buildVisionBody(req *VisionRequest) ([]byte, error) {
+	if req == nil || len(req.Images) == 0 {
+		return nil, fmt.Errorf("vision request requires at least one image")
+	}
+	content := make([]any, 0, len(req.Images)+1)
+	if strings.TrimSpace(req.Prompt) != "" {
+		content = append(content, map[string]any{"type": "text", "text": req.Prompt})
+	}
+	for _, img := range req.Images {
+		if len(img.Data) == 0 {
+			return nil, fmt.Errorf("image %q is empty", img.Name)
+		}
+		content = append(content, map[string]any{
+			"type": "image_url",
+			"image_url": map[string]any{
+				"url":    "data:" + img.MediaType + ";base64," + base64.StdEncoding.EncodeToString(img.Data),
+				"detail": "auto",
+			},
+		})
+	}
+	body := map[string]any{
+		"model": p.model,
+		"messages": []any{
+			map[string]any{"role": "user", "content": content},
+		},
+	}
+	if req.MaxTokens > 0 {
+		body["max_tokens"] = req.MaxTokens
 	}
 	return json.Marshal(body)
 }

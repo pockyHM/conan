@@ -7,8 +7,10 @@ type CommandKind string
 const (
 	CommandHelp      CommandKind = "help"
 	CommandClear     CommandKind = "clear"
+	CommandCompact   CommandKind = "compact"
 	CommandExit      CommandKind = "exit"
 	CommandCluster   CommandKind = "cluster"
+	CommandLang      CommandKind = "lang"
 	CommandModel     CommandKind = "model"
 	CommandNode      CommandKind = "node"
 	CommandNodes     CommandKind = "nodes"
@@ -49,10 +51,14 @@ func ParseSlashCommand(input string) (SlashCommand, bool) {
 		return SlashCommand{Kind: CommandHelp, Arg: arg}, true
 	case "clear":
 		return SlashCommand{Kind: CommandClear, Arg: arg}, true
+	case "compact":
+		return SlashCommand{Kind: CommandCompact, Arg: arg}, true
 	case "exit":
 		return SlashCommand{Kind: CommandExit, Arg: arg}, true
 	case "cluster":
 		return SlashCommand{Kind: CommandCluster, Arg: arg}, true
+	case "lang", "language":
+		return SlashCommand{Kind: CommandLang, Arg: arg}, true
 	case "model":
 		return SlashCommand{Kind: CommandModel, Arg: arg}, true
 	case "node":

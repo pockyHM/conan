@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	cfgloader "github.com/pockyHM/conan/internal/config"
 	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/internal/fileguard"
 	"github.com/pockyHM/conan/internal/fileref"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/localtools"
@@ -42,8 +43,13 @@ type NodeInfo struct {
 type ModelConfig struct {
 	Cluster            string
 	Model              string
+	UILanguage         string
+	InitialSessionID   string
 	Version            string
 	Provider           llm.Provider
+	VisionProvider     llm.VisionProvider
+	VisionError        string
+	Vision             configschema.VisionConfig
 	Conv               *conversation.Conversation
 	Clients            map[string]*mcp.Client
 	Tools              []llm.ToolDef
@@ -91,6 +97,7 @@ const (
 	modeConfirm
 	modeSession
 	modeNodePrompt
+	modeLangSelect
 )
 
 type pingResultMsg struct {
@@ -110,17 +117,23 @@ const toolOutputPreviewLines = 4
 const streamEventTimeout = 60 * time.Second
 const markdownPromptMemoryLimit = 3700
 const sqlitePromptMemoryContentLimit = 900
+const maxResumedVisibleMessages = 20
 
 type Model struct {
-	cluster         string
-	clusterExplicit bool
-	model           string
-	cliVersion      string
-	provider        llm.Provider
-	conv            *conversation.Conversation
-	clients         map[string]*mcp.Client
-	tools           []llm.ToolDef
-	toolCache       *toolCache
+	cluster          string
+	clusterExplicit  bool
+	model            string
+	uiLanguage       uiLanguage
+	initialSessionID string
+	cliVersion       string
+	provider         llm.Provider
+	visionProvider   llm.VisionProvider
+	visionError      string
+	vision           configschema.VisionConfig
+	conv             *conversation.Conversation
+	clients          map[string]*mcp.Client
+	tools            []llm.ToolDef
+	toolCache        *toolCache
 
 	nodes            []NodeInfo
 	selectedNodes    map[string]bool
@@ -128,6 +141,7 @@ type Model struct {
 
 	mode         tuiMode
 	nodeSelector nodeSelector
+	langSelector langSelector
 	prevSelected map[string]bool
 
 	reviewer           *security.Reviewer
@@ -148,6 +162,8 @@ type Model struct {
 	ac              autocomplete
 
 	input              string
+	pendingImages      []imageAttachment
+	attachedImages     []imageAttachment
 	inputHistory       []string
 	inputHistoryIndex  int
 	inputHistoryDraft  string
@@ -187,6 +203,7 @@ func NewModel(cfg ModelConfig) Model {
 	if cfg.Model == "" {
 		cfg.Model = "default"
 	}
+	language := normalizeUILanguage(cfg.UILanguage)
 	selectedNodes := make(map[string]bool)
 	for _, node := range cfg.Nodes {
 		selectedNodes[node.Name] = true
@@ -195,14 +212,19 @@ func NewModel(cfg ModelConfig) Model {
 		cluster:            cfg.Cluster,
 		clusterExplicit:    clusterExplicit,
 		model:              cfg.Model,
+		uiLanguage:         language,
+		initialSessionID:   cfg.InitialSessionID,
 		cliVersion:         cfg.Version,
 		provider:           cfg.Provider,
+		visionProvider:     cfg.VisionProvider,
+		visionError:        cfg.VisionError,
+		vision:             normalizeVisionConfig(cfg.Vision),
 		conv:               cfg.Conv,
 		clients:            cfg.Clients,
 		tools:              cfg.Tools,
 		nodes:              cfg.Nodes,
 		selectedNodes:      selectedNodes,
-		status:             "Ready",
+		status:             language.tr("Ready", "就绪"),
 		reviewer:           cfg.Reviewer,
 		auditLog:           cfg.AuditLogger,
 		configHome:         cfg.ConfigHome,
@@ -212,6 +234,7 @@ func NewModel(cfg ModelConfig) Model {
 		memoryExtractor:    cfg.MemoryExtractor,
 		subagents:          normalizeSubagentConfig(cfg.Subagents),
 		toolCache:          newToolCache(),
+		ac:                 newAutocompleteWithLanguage(language),
 		inputHistoryIndex:  -1,
 	}
 }
@@ -226,13 +249,33 @@ func normalizeSubagentConfig(cfg configschema.SubagentConfig) configschema.Subag
 	return cfg
 }
 
+func normalizeVisionConfig(cfg configschema.VisionConfig) configschema.VisionConfig {
+	if cfg.MaxImages <= 0 {
+		cfg.MaxImages = 10
+	}
+	if cfg.MaxSummaryCharsPerImage <= 0 {
+		cfg.MaxSummaryCharsPerImage = 1200
+	}
+	return cfg
+}
+
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
+	if strings.TrimSpace(m.initialSessionID) != "" {
+		cmds = append(cmds, m.loadSession(strings.TrimSpace(m.initialSessionID)))
+	}
 	if len(m.clients) > 0 {
+		cmds = append(cmds, m.pingNodes())
 		cmds = append(cmds, fetchNodeTools(m.clients))
 	}
 	if m.cliVersion != "dev" {
 		cmds = append(cmds, m.checkAgentVersions())
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	if len(cmds) == 1 {
+		return cmds[0]
 	}
 	return tea.Batch(cmds...)
 }
@@ -286,6 +329,14 @@ type sessionLoadMsg struct {
 	err    error
 }
 
+type compactResultMsg struct {
+	oldMessages []models.Message
+	messages    []models.Message
+	oldCount    int
+	keptCount   int
+	err         error
+}
+
 type versionCheckMsg struct {
 	mismatches []mcp.Mismatch
 }
@@ -321,11 +372,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		content := renderSubagentCommandResult(msg.result)
 		m.messages = append(m.messages, chatMsg{role: "assistant", content: content, elapsed: msg.result.Elapsed})
 		if msg.result.Err != nil {
-			m.status = "Subagent failed: " + msg.result.Err.Error()
+			m.status = m.uiLanguage.tr("Subagent failed: ", "Subagent 失败: ") + msg.result.Err.Error()
 		} else {
-			m.status = "Subagent completed"
+			m.status = m.uiLanguage.tr("Subagent completed", "Subagent 已完成")
 		}
 		m.updateViewportContent()
+		return m, nil
+
+	case clipboardPasteMsg:
+		if msg.err != nil {
+			m.status = m.uiLanguage.tr("Clipboard paste failed: ", "剪贴板粘贴失败: ") + msg.err.Error()
+			return m, nil
+		}
+		if msg.image.Path != "" {
+			m.pendingImages = append(m.pendingImages, msg.image)
+			m.status = fmt.Sprintf(m.uiLanguage.tr("Attached image #%d (%dx%d)", "已附加图片 #%d (%dx%d)"), msg.image.ID, msg.image.Width, msg.image.Height)
+			return m, nil
+		}
+		if msg.text != "" {
+			m.input += msg.text
+			m.resetInputHistoryNavigation()
+			m.ac = m.updateAutocomplete()
+			return m, nil
+		}
 		return m, nil
 
 	case tea.MouseMsg:
@@ -366,8 +435,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			secret:   msg.secret,
 		}
 		m.input = ""
-		m.ac = autocomplete{}
-		m.status = msg.label + " required"
+		m.ac = newAutocompleteWithLanguage(m.uiLanguage)
+		m.status = msg.label + " " + m.uiLanguage.tr("required", "必填")
 		m.updateViewportContent()
 		return m, nil
 
@@ -377,7 +446,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = modeChat
 		m.nodePrompt = nodePromptState{}
-		m.status = "Running tool..."
+		m.status = m.uiLanguage.tr("Running tool...", "正在运行工具...")
 		return m, m.dispatchNodeAdd(msg.streamID, msg.call)
 
 	case riskAssessmentMsg:
@@ -404,7 +473,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingToolCall = &msg.call
 				m.pendingRisk = &msg.assessment
 				m.input = ""
-				m.status = "Use ↑↓ to choose, Enter to confirm"
+				m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
 				return m, nil
 			}
 			m.logAuditDecision(msg.call, msg.assessment, "dispatched")
@@ -423,7 +492,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingToolCall = &msg.call
 			m.pendingRisk = &msg.assessment
 			m.input = ""
-			m.status = "Use ↑↓ to choose, Enter to confirm"
+			m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
 			return m, nil
 		}
 
@@ -433,12 +502,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.finishStream(false)
-			m.status = "Error: " + msg.err.Error()
+			m.status = m.uiLanguage.tr("Error: ", "错误: ") + msg.err.Error()
 			return m, nil
 		}
 		if msg.ch == nil {
 			m.finishStream(false)
-			m.status = "Stream error: nil event stream"
+			m.status = m.uiLanguage.tr("Stream error: nil event stream", "流错误: 事件流为空")
 			return m, nil
 		}
 		m.streamCh = msg.ch
@@ -501,11 +570,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamEnded = true
 			if e.Reason == llm.StopToolUse {
 				if m.mode == modeNodePrompt {
-					m.status = m.nodePrompt.label + " required"
+					m.status = m.nodePrompt.label + " " + m.uiLanguage.tr("required", "必填")
 				} else if m.hasPendingVisibleTool() {
-					m.status = "Running tool..."
+					m.status = m.uiLanguage.tr("Running tool...", "正在运行工具...")
 				} else if m.hasPendingHiddenTool() {
-					m.status = "Inspecting..."
+					m.status = m.uiLanguage.tr("Inspecting...", "正在检查...")
 				}
 				m.updateViewportContent()
 				return m.resumeAfterStreamTools(msg.streamID)
@@ -514,14 +583,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if hadOutput {
 				m.runMemoryExtraction(m.latestUserMessage(), m.latestAssistantMessage())
 			}
-			m.status = "Ready"
+			m.status = m.uiLanguage.tr("Ready", "就绪")
 			m.updateViewportContent()
 			return m, nil
 		case llm.ErrorEvent:
 			if m.appendAssistantStreamContent() {
-				m.status = "Stream error; partial content preserved: " + e.Err.Error()
+				m.status = m.uiLanguage.tr("Stream error; partial content preserved: ", "流错误，已保留部分内容: ") + e.Err.Error()
 			} else {
-				m.status = "Stream error: " + e.Err.Error()
+				m.status = m.uiLanguage.tr("Stream error: ", "流错误: ") + e.Err.Error()
 			}
 			m.finishStream(false)
 			m.updateViewportContent()
@@ -597,7 +666,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conv.AddToolResult(msg.Call.ID, msg.Output)
 		}
 		m.logAuditExecution(msg.Call, results)
-		m.status = "Node added and deployed"
+		m.status = m.uiLanguage.tr("Node added and deployed", "节点已添加并部署")
 		m.updateViewportContent()
 		m.clearNodeToolExposure()
 		if len(m.clients) > 0 {
@@ -611,10 +680,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionLoadMsg:
 		if msg.err != nil {
-			m.status = "Error loading session: " + msg.err.Error()
+			m.status = m.uiLanguage.tr("Error loading session: ", "加载会话失败: ") + msg.err.Error()
 			return m, nil
 		}
-		m.status = fmt.Sprintf("Resumed session %s (%s)", msg.record.ID, msg.record.Cluster)
+		m.applyLoadedSession(msg.record)
+		m.status = fmt.Sprintf(m.uiLanguage.tr("Resumed session %s (%s)", "已恢复会话 %s (%s)"), msg.record.ID, msg.record.Cluster)
+		return m, nil
+
+	case compactResultMsg:
+		if msg.err != nil {
+			m.status = m.uiLanguage.tr("Compact failed: ", "压缩失败: ") + msg.err.Error()
+			return m, nil
+		}
+		if m.conv != nil {
+			if _, err := m.archiveCompaction(msg.oldMessages); err != nil {
+				m.status = m.uiLanguage.tr("Compact archive failed: ", "压缩归档失败: ") + err.Error()
+				return m, nil
+			}
+			m.conv.ReplaceMessages(msg.messages)
+		}
+		m.messages = chatMessagesFromModels(msg.messages)
+		m.messages = append(m.messages, chatMsg{
+			role:    "assistant",
+			content: fmt.Sprintf(m.uiLanguage.tr("Compacted %d message(s) into a structured summary and kept %d recent message(s).", "已将 %d 条消息压缩为结构化摘要，并保留 %d 条最近消息。"), msg.oldCount, msg.keptCount),
+		})
+		m.status = fmt.Sprintf(m.uiLanguage.tr("Compacted %d message(s)", "已压缩 %d 条消息"), msg.oldCount)
+		m.updateViewportContent()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -627,6 +718,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeNodePrompt {
 		return m.handleNodePromptKey(key)
+	}
+	if m.mode == modeLangSelect {
+		return m.handleLangSelectKey(key)
 	}
 	if m.mode == modeSession {
 		return m.handleSessionSelectKey(key)
@@ -644,7 +738,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.Type == tea.KeyCtrlC || key.Type == tea.KeyEsc {
 			m.finishStream(true)
-			m.status = "Interrupted"
+			m.status = m.uiLanguage.tr("Interrupted", "已中断")
 			return m, nil
 		}
 		if m.scrollViewportForKey(key) {
@@ -657,13 +751,15 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		m.saveCurrentConversation()
 		return m, tea.Quit
+	case tea.KeyCtrlV:
+		return m, clipboardImageOrTextCmd(m.attachmentDir(), len(m.attachedImages)+len(m.pendingImages)+1)
 	case tea.KeyCtrlO:
 		m.toggleLastToolOutputExpanded()
 		return m, nil
 	case tea.KeyCtrlL:
 		m.messages = nil
 		m.lastBodyContent = ""
-		m.status = "Conversation cleared"
+		m.status = m.uiLanguage.tr("Conversation cleared", "对话已清空")
 		return m, nil
 	case tea.KeyBackspace:
 		if len(m.input) > 0 {
@@ -720,9 +816,30 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollViewportForKey(key)
 		return m, nil
 	case tea.KeyRunes:
-		m.input += string(key.Runes)
+		added := string(key.Runes)
+		if key.Paste {
+			images, ok, err := imageAttachmentsFromPastedText(added, m.attachmentDir(), len(m.attachedImages)+len(m.pendingImages)+1)
+			if err != nil {
+				m.status = m.uiLanguage.tr("Image paste failed: ", "图片粘贴失败: ") + err.Error()
+				return m, nil
+			}
+			if ok {
+				m.pendingImages = append(m.pendingImages, images...)
+				m.status = fmt.Sprintf(m.uiLanguage.tr("Attached %d image(s)", "已附加 %d 张图片"), len(images))
+				return m, nil
+			}
+		}
+		m.input += added
 		m.resetInputHistoryNavigation()
 		m.ac = m.updateAutocomplete()
+		if key.Paste && strings.ContainsAny(added, "\r\n") {
+			lines := multilineInputLineCount(added)
+			label := m.uiLanguage.tr("lines", "行")
+			if lines == 1 {
+				label = m.uiLanguage.tr("line", "行")
+			}
+			m.status = fmt.Sprintf(m.uiLanguage.tr("Pasted %d %s into input", "已粘贴 %d %s 到输入框"), lines, label)
+		}
 		return m, nil
 	case tea.KeySpace:
 		m.input += " "
@@ -828,10 +945,10 @@ func (m Model) submitNodePrompt() (tea.Model, tea.Cmd) {
 	state := m.nodePrompt
 	value := m.input
 	m.input = ""
-	m.ac = autocomplete{}
+	m.ac = newAutocompleteWithLanguage(m.uiLanguage)
 	m.resetInputHistoryNavigation()
 	if strings.TrimSpace(value) == "" {
-		m.status = state.label + " required"
+		m.status = state.label + " " + m.uiLanguage.tr("required", "必填")
 		return m, nil
 	}
 	if !state.secret {
@@ -849,7 +966,7 @@ func (m Model) submitNodePrompt() (tea.Model, tea.Cmd) {
 	call.Arguments = updatedArgs
 	m.mode = modeChat
 	m.nodePrompt = nodePromptState{}
-	m.status = "Running tool..."
+	m.status = m.uiLanguage.tr("Running tool...", "正在运行工具...")
 	return m, m.prepareNodeAddOrPrompt(state.streamID, call)
 }
 
@@ -858,13 +975,13 @@ func (m Model) cancelNodePrompt() (tea.Model, tea.Cmd) {
 	m.mode = modeChat
 	m.nodePrompt = nodePromptState{}
 	m.input = ""
-	m.ac = autocomplete{}
-	output := "Cancelled by user"
+	m.ac = newAutocompleteWithLanguage(m.uiLanguage)
+	output := m.uiLanguage.tr("Cancelled by user", "用户已取消")
 	m.fillToolPlaceholder(state.call, output, []nodeToolResult{{Node: "-", Output: output, Success: false}})
 	if m.conv != nil {
-		m.conv.AddToolResult(state.call.ID, output)
+		m.conv.AddToolResult(state.call.ID, "Cancelled by user")
 	}
-	m.status = "Ready"
+	m.status = m.uiLanguage.tr("Ready", "就绪")
 	if state.call.Name == metaToolNodeAdd {
 		m.clearNodeToolExposure()
 	}
@@ -898,7 +1015,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.confirmChoice = 0
 
 		if choice == 0 {
-			m.status = "Approved — executing..."
+			m.status = m.uiLanguage.tr("Approved, executing...", "已批准，正在执行...")
 			m.logAuditDecision(call, derefRiskAssessment(assessment), "approved")
 			return m, m.dispatchTool(m.activeStreamID, call)
 		}
@@ -908,19 +1025,20 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.pendingRisk = assessment
 				m.mode = modeConfirm
 				m.confirmChoice = 1
-				m.status = "Allowlist update failed: " + err.Error()
+				m.status = m.uiLanguage.tr("Allowlist update failed: ", "白名单更新失败: ") + err.Error()
 				return m, nil
 			}
-			m.status = "Approved and added to allowlist — executing..."
+			m.status = m.uiLanguage.tr("Approved and added to allowlist, executing...", "已批准并加入白名单，正在执行...")
 			m.logAuditDecision(call, derefRiskAssessment(assessment), "approved and allowlisted")
 			return m, m.dispatchTool(m.activeStreamID, call)
 		}
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
-		m.fillToolPlaceholder(call, "Cancelled by user", []nodeToolResult{{Node: "-", Output: "Cancelled by user", Success: false}})
+		cancelled := m.uiLanguage.tr("Cancelled by user", "用户已取消")
+		m.fillToolPlaceholder(call, cancelled, []nodeToolResult{{Node: "-", Output: cancelled, Success: false}})
 		if m.conv != nil {
 			m.conv.AddToolResult(call.ID, "Cancelled by user")
 		}
-		m.status = "Ready"
+		m.status = m.uiLanguage.tr("Ready", "就绪")
 		return m.completeToolAndResume(m.activeStreamID, call)
 	case tea.KeyEsc:
 		call := *m.pendingToolCall
@@ -930,11 +1048,12 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeChat
 		m.confirmChoice = 0
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
-		m.fillToolPlaceholder(call, "Cancelled by user", []nodeToolResult{{Node: "-", Output: "Cancelled by user", Success: false}})
+		cancelled := m.uiLanguage.tr("Cancelled by user", "用户已取消")
+		m.fillToolPlaceholder(call, cancelled, []nodeToolResult{{Node: "-", Output: cancelled, Success: false}})
 		if m.conv != nil {
 			m.conv.AddToolResult(call.ID, "Cancelled by user")
 		}
-		m.status = "Ready"
+		m.status = m.uiLanguage.tr("Ready", "就绪")
 		return m.completeToolAndResume(m.activeStreamID, call)
 	default:
 		return m, nil
@@ -956,12 +1075,12 @@ func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		m.selectedNodes = m.nodeSelector.Selected()
 		m.mode = modeChat
-		m.status = fmt.Sprintf("Selected %d node(s)", len(m.selectedNodes))
+		m.status = fmt.Sprintf(m.uiLanguage.tr("Selected %d node(s)", "已选择 %d 个节点"), len(m.selectedNodes))
 		return m, nil
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.selectedNodes = m.prevSelected
 		m.mode = modeChat
-		m.status = "Node selection cancelled"
+		m.status = m.uiLanguage.tr("Node selection cancelled", "已取消节点选择")
 		return m, nil
 	default:
 		var cmd tea.Cmd
@@ -970,12 +1089,62 @@ func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) handleLangSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		selected := m.langSelector.Selected()
+		m.mode = modeChat
+		m = m.applyUILanguage(selected)
+		if err := m.saveUILanguage(selected); err != nil {
+			m.status = m.uiLanguage.tr("Language changed, but config save failed: ", "语言已切换，但配置保存失败: ") + err.Error()
+			return m, nil
+		}
+		m.status = fmt.Sprintf(m.uiLanguage.tr("UI language changed to %s", "界面语言已切换为 %s"), selected.displayName())
+		return m, nil
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeChat
+		m.status = m.uiLanguage.tr("Language selection cancelled", "已取消语言选择")
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.langSelector, cmd = m.langSelector.Update(key)
+		return m, cmd
+	}
+}
+
+func (m Model) applyUILanguage(lang uiLanguage) Model {
+	m.uiLanguage = lang
+	m.ac = newAutocompleteWithLanguage(lang)
+	m.langSelector = newLangSelector(lang)
+	m.lastBodyContent = ""
+	return m
+}
+
+func (m Model) saveUILanguage(lang uiLanguage) error {
+	if m.configHome == "" {
+		return nil
+	}
+	loader := cfgloader.NewLoader(m.configHome)
+	global, err := loader.LoadGlobal()
+	if err != nil {
+		return err
+	}
+	global.UILanguage = lang.configValue()
+	return loader.SaveGlobal(global)
+}
+
 func (m Model) View() string {
-	header := renderHeader(m.cluster, m.model, len(m.selectedNodes), len(m.nodes))
+	header := renderHeader(m.cluster, m.model, len(m.selectedNodes), len(m.nodes), m.uiLanguage)
 	statusView := m.renderStatus()
 
 	if m.mode == modeNodeSelect {
 		return header + "\n\n" + m.nodeSelector.View() + "\n\n" + statusView
+	}
+	if m.mode == modeLangSelect {
+		return header + "\n\n" + m.langSelector.View() + "\n\n" + statusView
+	}
+	if m.mode == modeSession {
+		return header + "\n\n" + m.sessionList.View(m.width) + "\n\n" + statusView
 	}
 	var body string
 
@@ -987,7 +1156,7 @@ func (m Model) View() string {
 	}
 
 	acView := m.ac.View(m.width)
-	footer := statusView + "\n" + renderInputBox(m.input, m.width)
+	footer := statusView + "\n" + renderInputBox(m.inputWithImageChips(), m.width, m.uiLanguage)
 	if m.mode == modeConfirm {
 		footer = m.renderConfirmFooter()
 	} else if m.mode == modeNodePrompt {
@@ -1000,6 +1169,29 @@ func (m Model) View() string {
 	return header + "\n\n" + body + "\n\n" + footer
 }
 
+func (m Model) inputWithImageChips() string {
+	chips := imageChipText(m.pendingImages)
+	if chips == "" {
+		return m.input
+	}
+	if strings.TrimSpace(m.input) == "" {
+		return chips
+	}
+	return m.input + " " + chips
+}
+
+func (m Model) attachmentDir() string {
+	home := m.configHome
+	if home == "" {
+		home = cfgloader.DefaultHome()
+	}
+	convID := "session"
+	if m.conv != nil && m.conv.ID() != "" {
+		convID = m.conv.ID()
+	}
+	return filepath.Join(home, "attachments", convID)
+}
+
 func (m Model) renderNodePromptFooter() string {
 	state := m.nodePrompt
 	input := m.input
@@ -1009,8 +1201,8 @@ func (m Model) renderNodePromptFooter() string {
 	lines := []string{
 		statusStyle.Render(m.status),
 		inputPromptStyle.Render(state.label),
-		renderInputBox(input, m.width),
-		statusStyle.Render("Enter to continue, Esc to cancel"),
+		renderInputBox(input, m.width, m.uiLanguage),
+		statusStyle.Render(m.uiLanguage.tr("Enter to continue, Esc to cancel", "Enter 继续，Esc 取消")),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1032,13 +1224,13 @@ func (m Model) renderConfirmFooter() string {
 	}
 
 	lines := []string{
-		inputPromptStyle.Render("Security Review") + "  " + reason,
-		toolStyle.Render("Command: ") + command,
+		inputPromptStyle.Render(m.uiLanguage.tr("Security Review", "安全确认")) + "  " + reason,
+		toolStyle.Render(m.uiLanguage.tr("Command: ", "命令: ")) + command,
 		strings.Join(opts, "\n"),
-		statusStyle.Render("Use ↑↓ to choose, Enter to confirm, Esc to cancel"),
+		statusStyle.Render(m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm, Esc to cancel", "使用 ↑↓ 选择，Enter 确认，Esc 取消")),
 	}
 	if m.pendingRisk != nil && m.pendingRisk.Suggestion != "" {
-		lines = append(lines[:1], append([]string{statusStyle.Render("Suggestion: ") + m.pendingRisk.Suggestion}, lines[1:]...)...)
+		lines = append(lines[:1], append([]string{statusStyle.Render(m.uiLanguage.tr("Suggestion: ", "建议: ")) + m.pendingRisk.Suggestion}, lines[1:]...)...)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1210,29 +1402,29 @@ func (m Model) renderBody() string {
 		case "user":
 			bodyParts = append(bodyParts, renderUserMsg(msg.content, m.width))
 		case "assistant":
-			bodyParts = append(bodyParts, renderMessageWithElapsed(renderAssistantMsg(msg.content), msg.elapsed))
+			bodyParts = append(bodyParts, renderMessageWithElapsed(renderAssistantMsg(msg.content), msg.elapsed, m.uiLanguage))
 		case "tool":
-			bodyParts = append(bodyParts, renderMessageWithElapsed(m.renderToolMsg(msg), msg.elapsed))
+			bodyParts = append(bodyParts, renderMessageWithElapsed(m.renderToolMsg(msg), msg.elapsed, m.uiLanguage))
 		}
 	}
 	if m.streaming {
 		if m.streamBuf != "" {
 			bodyParts = append(bodyParts, renderStreamingMsg(m.streamBuf))
 		} else if m.streamReasoningBuf != "" {
-			bodyParts = append(bodyParts, renderReasoningMsg(m.streamReasoningBuf))
+			bodyParts = append(bodyParts, renderReasoningMsg(m.streamReasoningBuf, m.uiLanguage))
 		} else {
-			bodyParts = append(bodyParts, renderThinkingMsg(m.thinkingFrame, m.streamElapsed()))
+			bodyParts = append(bodyParts, renderThinkingMsg(m.thinkingFrame, m.streamElapsed(), m.uiLanguage))
 		}
 	}
 	body := strings.Join(bodyParts, "\n\n")
 	if body == "" {
-		body = renderStartupOverview(m.cluster, m.model, m.nodes, m.selectedNodes)
+		body = renderStartupOverview(m.cluster, m.model, m.nodes, m.selectedNodes, m.uiLanguage)
 	}
 	return body
 }
 
-func renderMessageWithElapsed(content string, elapsed time.Duration) string {
-	footer := renderElapsedFooter(elapsed)
+func renderMessageWithElapsed(content string, elapsed time.Duration, lang uiLanguage) string {
+	footer := renderElapsedFooter(elapsed, lang)
 	if footer == "" {
 		return content
 	}
@@ -1247,7 +1439,7 @@ func (m Model) streamElapsed() time.Duration {
 }
 
 func (m Model) renderStatus() string {
-	if m.streaming && m.status == "Thinking..." {
+	if m.streaming && m.status == m.uiLanguage.tr("Thinking...", "思考中...") {
 		return statusStyle.Render(m.versionWarning)
 	}
 	if m.versionWarning == "" {
@@ -1258,7 +1450,7 @@ func (m Model) renderStatus() string {
 
 func (m Model) renderToolMsg(msg chatMsg) string {
 	if len(msg.nodeResults) > 1 {
-		h := renderToolHeader(msg.toolName, len(msg.nodeResults))
+		h := renderToolHeader(msg.toolName, len(msg.nodeResults), m.uiLanguage)
 		if msg.toolOutput != "" {
 			var lines []string
 			for i, r := range msg.nodeResults {
@@ -1266,37 +1458,37 @@ func (m Model) renderToolMsg(msg chatMsg) string {
 				if i == len(msg.nodeResults)-1 {
 					prefix = "└──"
 				}
-				lines = append(lines, prefix+" "+renderToolNode(r.Node, r.Success, r.Output, msg.toolExpanded))
+				lines = append(lines, prefix+" "+renderToolNode(r.Node, r.Success, r.Output, msg.toolExpanded, m.uiLanguage))
 			}
 			h += "\n" + strings.Join(lines, "\n")
 		} else {
-			h += " (running...)"
-			if preview := runningToolPreview(msg); preview != "" {
+			h += " " + m.uiLanguage.tr("(running...)", "(运行中...)")
+			if preview := runningToolPreview(msg, m.uiLanguage); preview != "" {
 				h += "\n" + preview
 			}
 		}
 		return h
 	}
-	h := renderToolHeader(msg.toolName, 0)
+	h := renderToolHeader(msg.toolName, 0, m.uiLanguage)
 	if len(msg.nodeResults) == 1 {
-		h = toolStyle.Render(fmt.Sprintf("⏚ %s on %s", msg.toolName, msg.nodeResults[0].Node))
+		h = toolStyle.Render(fmt.Sprintf(m.uiLanguage.tr("⏚ %s on %s", "⏚ %s 在 %s 上"), msg.toolName, msg.nodeResults[0].Node))
 	}
 	if msg.toolOutput != "" {
 		output := msg.toolOutput
 		if len(msg.nodeResults) == 1 {
 			output = msg.nodeResults[0].Output
 		}
-		h += "\n" + renderToolOutput(output, msg.toolExpanded)
+		h += "\n" + renderToolOutput(output, msg.toolExpanded, m.uiLanguage)
 	} else {
-		h += " (running...)"
-		if preview := runningToolPreview(msg); preview != "" {
+		h += " " + m.uiLanguage.tr("(running...)", "(运行中...)")
+		if preview := runningToolPreview(msg, m.uiLanguage); preview != "" {
 			h += "\n" + preview
 		}
 	}
 	return h
 }
 
-func runningToolPreview(msg chatMsg) string {
+func runningToolPreview(msg chatMsg, lang uiLanguage) string {
 	if !isShellCommandTool(msg.toolName) || strings.TrimSpace(msg.toolInput) == "" {
 		return ""
 	}
@@ -1305,7 +1497,7 @@ func runningToolPreview(msg chatMsg) string {
 	if command == "" {
 		return ""
 	}
-	return toolStyle.Render("Command: ") + command
+	return toolStyle.Render(lang.tr("Command: ", "命令: ")) + command
 }
 
 func (m *Model) toggleLastToolOutputExpanded() {
@@ -1317,14 +1509,14 @@ func (m *Model) toggleLastToolOutputExpanded() {
 		msg.toolExpanded = !msg.toolExpanded
 		m.lastBodyContent = ""
 		if msg.toolExpanded {
-			m.status = "Last tool output expanded"
+			m.status = m.uiLanguage.tr("Last tool output expanded", "已展开最后一个工具输出")
 		} else {
-			m.status = "Last tool output collapsed"
+			m.status = m.uiLanguage.tr("Last tool output collapsed", "已折叠最后一个工具输出")
 		}
 		m.updateViewportContent()
 		return
 	}
-	m.status = "No tool output to expand"
+	m.status = m.uiLanguage.tr("No tool output to expand", "没有可展开的工具输出")
 }
 
 func (m Model) hasPendingVisibleTool() bool {
@@ -1357,65 +1549,97 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 	input := strings.TrimSpace(m.input)
 	m.input = ""
+	hasImages := len(m.pendingImages) > 0
+	if input == "" && hasImages {
+		input = m.uiLanguage.tr("Analyze the attached image(s).", "分析附加的图片。")
+	}
 	if input == "" {
 		m.resetInputHistoryNavigation()
 		return m, nil
 	}
 	m.inputHistory = append(m.inputHistory, input)
 	m.resetInputHistoryNavigation()
-	if cmd, ok := ParseSlashCommand(input); ok {
-		if cmd.Kind == CommandThinking {
-			if strings.TrimSpace(cmd.Arg) == "" {
-				m.status = "Usage: /thinking <message>"
-				return m, nil
+	if !hasImages {
+		if cmd, ok := ParseSlashCommand(input); ok {
+			if cmd.Kind == CommandThinking {
+				if strings.TrimSpace(cmd.Arg) == "" {
+					m.status = m.uiLanguage.tr("Usage: /thinking <message>", "用法: /thinking <消息>")
+					return m, nil
+				}
+				thinking := true
+				return m.submitMessage(cmd.Arg, &thinking)
 			}
-			thinking := true
-			return m.submitMessage(cmd.Arg, &thinking)
+			var c tea.Cmd
+			m, c = m.applyCommand(cmd)
+			if cmd.Kind == CommandExit {
+				m.saveCurrentConversation()
+				return m, tea.Quit
+			}
+			return m, c
 		}
-		var c tea.Cmd
-		m, c = m.applyCommand(cmd)
-		if cmd.Kind == CommandExit {
-			m.saveCurrentConversation()
-			return m, tea.Quit
-		}
-		return m, c
 	}
 	return m.submitMessage(input, nil)
 }
 
 func (m Model) submitMessage(input string, thinking *bool) (tea.Model, tea.Cmd) {
 	llmInput := input
+	submitImages := append([]imageAttachment(nil), m.pendingImages...)
 	if refs := fileref.Parse(input); len(refs) > 0 {
 		root := m.localWorkspaceRoot
 		if root == "" {
 			root = "."
 		}
-		loaded, err := fileref.Load(root, refs, fileref.Limits{})
+		nextID := len(m.attachedImages) + len(submitImages) + 1
+		imageRefs, textRefs, err := imageAttachmentsFromFileRefs(root, refs, m.attachmentDir(), nextID)
 		if err != nil {
-			m.status = "File reference error: " + err.Error()
+			m.status = m.uiLanguage.tr("Image reference error: ", "图片引用错误: ") + err.Error()
+			return m, nil
+		}
+		submitImages = append(submitImages, imageRefs...)
+		loaded, err := fileref.Load(root, textRefs, fileref.Limits{})
+		if err != nil {
+			m.status = m.uiLanguage.tr("File reference error: ", "文件引用错误: ") + err.Error()
 			return m, nil
 		}
 		llmInput = fileref.AppendContext(input, loaded)
 	}
+	if len(submitImages) > 0 {
+		totalImages := len(m.attachedImages) + len(submitImages)
+		if m.vision.MaxImages > 0 && totalImages > m.vision.MaxImages {
+			m.status = fmt.Sprintf(m.uiLanguage.tr("Too many images: %d attached, max %d", "图片过多: 已附加 %d 张，最多 %d 张"), totalImages, m.vision.MaxImages)
+			return m, nil
+		}
+		m.pendingImages = nil
+		m.attachedImages = append(m.attachedImages, submitImages...)
+		visibleInput := strings.TrimSpace(input + " " + imageChipText(submitImages))
+		llmInput = appendImageToolContext(llmInput, submitImages)
+		return m.startSubmittedMessage(visibleInput, llmInput, thinking)
+	}
+	return m.startSubmittedMessage(input, llmInput, thinking)
+}
+
+func (m Model) startSubmittedMessage(visibleInput string, llmInput string, thinking *bool) (tea.Model, tea.Cmd) {
 	if m.provider == nil {
-		m.messages = append(m.messages, chatMsg{role: "user", content: input})
+		m.messages = append(m.messages, chatMsg{role: "user", content: visibleInput})
 		if m.conv != nil {
 			m.conv.AddUser(llmInput)
 		}
-		m.maybeAutoSaveUserMemory(input)
-		m.status = "No LLM provider configured"
+		m.maybeAutoSaveUserMemory(visibleInput)
+		m.pendingImages = nil
+		m.status = m.uiLanguage.tr("No LLM provider configured", "未配置 LLM provider")
 		return m, nil
 	}
-	m.messages = append(m.messages, chatMsg{role: "user", content: input})
+	m.messages = append(m.messages, chatMsg{role: "user", content: visibleInput})
 	if m.conv != nil {
 		m.conv.AddUser(llmInput)
 	}
-	m.maybeAutoSaveUserMemory(input)
+	m.maybeAutoSaveUserMemory(visibleInput)
+	m.pendingImages = nil
 	m.streaming = true
 	m.streamBuf = ""
 	m.streamReasoningBuf = ""
 	m.streamThinking = thinking
-	m.status = "Thinking..."
+	m.status = m.uiLanguage.tr("Thinking...", "思考中...")
 	return m.startStream()
 }
 
@@ -1424,75 +1648,94 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: "Conan: /help /clear /exit /cluster [name] /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]",
+			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /exit /cluster [name] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]", "Conan: /help /clear /compact [重点] /exit /cluster [名称] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit]"),
 		})
-		m.status = "Help shown"
+		m.status = m.uiLanguage.tr("Help shown", "已显示帮助")
 	case CommandClear:
 		m.messages = nil
 		if m.conv != nil {
 			m.conv.Clear()
 		}
-		m.status = "Conversation cleared"
+		m.status = m.uiLanguage.tr("Conversation cleared", "对话已清空")
 	case CommandExit:
-		m.status = "Exit requested"
+		m.status = m.uiLanguage.tr("Exit requested", "已请求退出")
 	case CommandCluster:
 		if cmd.Arg != "" {
 			m.cluster = cmd.Arg
-			m.status = "Cluster switched to " + cmd.Arg
+			m.status = m.uiLanguage.tr("Cluster switched to ", "已切换集群: ") + cmd.Arg
 		} else {
-			m.status = "Current cluster: " + m.cluster
+			m.status = m.uiLanguage.tr("Current cluster: ", "当前集群: ") + m.cluster
 		}
+	case CommandLang:
+		if strings.TrimSpace(cmd.Arg) != "" {
+			lang, ok := parseUILanguage(cmd.Arg)
+			if !ok {
+				m.status = m.uiLanguage.tr("Usage: /lang [en|zh]", "用法: /lang [en|zh]")
+				return m, nil
+			}
+			m = m.applyUILanguage(lang)
+			if err := m.saveUILanguage(lang); err != nil {
+				m.status = m.uiLanguage.tr("Language changed, but config save failed: ", "语言已切换，但配置保存失败: ") + err.Error()
+				return m, nil
+			}
+			m.status = fmt.Sprintf(m.uiLanguage.tr("UI language changed to %s", "界面语言已切换为 %s"), lang.displayName())
+			return m, nil
+		}
+		m.mode = modeLangSelect
+		m.langSelector = newLangSelector(m.uiLanguage)
+		m.status = m.uiLanguage.tr("Select UI language", "选择界面语言")
+		return m, nil
 	case CommandModel:
 		if cmd.Arg != "" {
 			m.model = cmd.Arg
-			m.status = "Model switched to " + cmd.Arg
+			m.status = m.uiLanguage.tr("Model switched to ", "已切换模型: ") + cmd.Arg
 		} else {
-			m.status = "Current model: " + m.model
+			m.status = m.uiLanguage.tr("Current model: ", "当前模型: ") + m.model
 		}
 	case CommandNode:
 		switch strings.TrimSpace(cmd.Arg) {
 		case "":
 			m.nodeToolsEnabled = true
-			m.status = "Node management enabled for next model response"
+			m.status = m.uiLanguage.tr("Node management enabled for next model response", "下一次模型回复将启用节点管理")
 		case "off":
 			m.nodeToolsEnabled = false
-			m.status = "Node management disabled"
+			m.status = m.uiLanguage.tr("Node management disabled", "节点管理已禁用")
 		default:
-			m.status = "Usage: /node [off]"
+			m.status = m.uiLanguage.tr("Usage: /node [off]", "用法: /node [off]")
 		}
 	case CommandNodes:
 		if len(m.nodes) == 0 {
-			m.status = "No nodes configured"
+			m.status = m.uiLanguage.tr("No nodes configured", "未配置节点")
 			return m, nil
 		}
 		m.mode = modeNodeSelect
 		m.prevSelected = m.selectedNodes
-		m.nodeSelector = newNodeSelector(m.nodes, m.selectedNodes)
-		m.status = "Checking node status..."
+		m.nodeSelector = newNodeSelector(m.nodes, m.selectedNodes, m.uiLanguage)
+		m.status = m.uiLanguage.tr("Checking node status...", "正在检查节点状态...")
 		return m, m.pingNodes()
 	case CommandMemory:
 		if m.memStore == nil {
-			m.status = "Memory not available"
+			m.status = m.uiLanguage.tr("Memory not available", "记忆不可用")
 			return m, nil
 		}
 		results, err := m.memStore.ListMemories("", 10)
 		if err != nil {
-			m.status = "Error: " + err.Error()
+			m.status = m.uiLanguage.tr("Error: ", "错误: ") + err.Error()
 			return m, nil
 		}
 		if len(results) == 0 {
-			m.status = "No memories stored yet"
+			m.status = m.uiLanguage.tr("No memories stored yet", "还没有保存记忆")
 			return m, nil
 		}
 		var lines []string
 		for _, r := range results {
 			lines = append(lines, fmt.Sprintf("[%s] %s: %s", r.ID, r.Title, truncateStr(r.Content, 60)))
 		}
-		m.messages = append(m.messages, chatMsg{role: "assistant", content: "Memory:\n" + strings.Join(lines, "\n")})
-		m.status = fmt.Sprintf("%d memories", len(results))
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: m.uiLanguage.tr("Memory:\n", "记忆:\n") + strings.Join(lines, "\n")})
+		m.status = fmt.Sprintf(m.uiLanguage.tr("%d memories", "%d 条记忆"), len(results))
 	case CommandResume:
 		if m.memStore == nil {
-			m.status = "Memory not available"
+			m.status = m.uiLanguage.tr("Memory not available", "记忆不可用")
 			return m, nil
 		}
 		if cmd.Arg != "" {
@@ -1500,55 +1743,123 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		}
 		sessions, err := m.memStore.ListConversations(20)
 		if err != nil {
-			m.status = "Error: " + err.Error()
+			m.status = m.uiLanguage.tr("Error: ", "错误: ") + err.Error()
 			return m, nil
 		}
 		if len(sessions) == 0 {
-			m.status = "No previous sessions"
+			m.status = m.uiLanguage.tr("No previous sessions", "没有历史会话")
 			return m, nil
 		}
 		var infos []SessionInfo
 		for _, s := range sessions {
-			summary := s.Summary
-			if summary == "" {
-				summary = "(no summary)"
+			preview := m.resumeSessionLastUserMessage(s.ID)
+			if preview == "" {
+				preview = m.uiLanguage.tr("(no user message)", "(无用户消息)")
 			}
 			infos = append(infos, SessionInfo{
 				ID:        s.ID,
 				Cluster:   s.Cluster,
 				CreatedAt: s.CreatedAt,
-				Summary:   summary,
+				Summary:   preview,
 			})
 		}
 		m.mode = modeSession
-		m.sessionList = newSessionList(infos)
-		m.status = "Select a session to resume"
+		m.sessionList = newSessionList(infos, m.uiLanguage)
+		m.status = m.uiLanguage.tr("Select a session to resume", "选择要恢复的会话")
 		return m, nil
+	case CommandCompact:
+		return m.compactConversation(cmd.Arg)
 	case CommandAgent:
 		return m.startManualSubagent(cmd.Arg)
 	case CommandSubagents:
 		return m.applySubagentsCommand(cmd.Arg), nil
 	default:
-		m.status = "Unknown command: /" + cmd.Arg
+		m.status = m.uiLanguage.tr("Unknown command: /", "未知命令: /") + cmd.Arg
 	}
 	return m, nil
 }
 
+func (m Model) resumeSessionLastUserMessage(id string) string {
+	if m.memStore == nil {
+		return ""
+	}
+	rec, err := m.memStore.LoadConversation(id)
+	if err != nil || rec == nil {
+		return ""
+	}
+	var messages []models.Message
+	if strings.TrimSpace(rec.Messages) != "" {
+		if err := json.Unmarshal([]byte(rec.Messages), &messages); err != nil {
+			return ""
+		}
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != conversation.RoleUser {
+			continue
+		}
+		content := strings.Join(strings.Fields(messages[i].Content), " ")
+		if content != "" {
+			return truncateStr(content, 120)
+		}
+	}
+	return ""
+}
+
 func (m Model) startManualSubagent(arg string) (Model, tea.Cmd) {
 	if m.provider == nil {
-		m.status = "No LLM provider configured"
+		m.status = m.uiLanguage.tr("No LLM provider configured", "未配置 LLM provider")
 		return m, nil
 	}
 	role, task := parseSubagentCommand(arg)
 	if strings.TrimSpace(task) == "" {
-		m.status = "Usage: /agent <investigator|reviewer|summarizer> <task>"
+		m.status = m.uiLanguage.tr("Usage: /agent <investigator|reviewer|summarizer> <task>", "用法: /agent <investigator|reviewer|summarizer> <任务>")
 		return m, nil
 	}
 	req := m.newSubagentRequest(role, task, m.selectedNodeNames())
-	m.status = "Subagent running..."
+	m.status = m.uiLanguage.tr("Subagent running...", "Subagent 运行中...")
 	return m, func() tea.Msg {
 		result := m.runSubagent(context.Background(), req)
 		return subagentCommandResultMsg{result: result}
+	}
+}
+
+func (m Model) compactConversation(focus string) (Model, tea.Cmd) {
+	if m.streaming {
+		m.status = m.uiLanguage.tr("Cannot compact while streaming", "流式回复中无法压缩")
+		return m, nil
+	}
+	if m.provider == nil {
+		m.status = m.uiLanguage.tr("No LLM provider configured", "未配置 LLM provider")
+		return m, nil
+	}
+	if m.conv == nil || len(m.conv.Messages()) == 0 {
+		m.status = m.uiLanguage.tr("Nothing to compact", "没有可压缩的上下文")
+		return m, nil
+	}
+	m.status = m.uiLanguage.tr("Compacting conversation...", "正在压缩会话...")
+	oldMessages := m.conv.Messages()
+	convID := m.conv.ID()
+	provider := m.provider
+	return m, func() tea.Msg {
+		resp, err := provider.Chat(context.Background(), &llm.ChatRequest{
+			SystemPrompt: compactSystemPrompt(focus),
+			Messages:     oldMessages,
+			MaxTokens:    2200,
+		})
+		if err != nil {
+			return compactResultMsg{err: err}
+		}
+		summary := strings.TrimSpace(resp.Message.Content)
+		if summary == "" {
+			return compactResultMsg{err: fmt.Errorf("empty compact summary")}
+		}
+		messages := buildCompactedMessages(convID, summary, oldMessages)
+		return compactResultMsg{
+			oldMessages: oldMessages,
+			messages:    messages,
+			oldCount:    len(oldMessages),
+			keptCount:   len(messages) - 1,
+		}
 	}
 }
 
@@ -1573,42 +1884,42 @@ func (m Model) applySubagentsCommand(arg string) Model {
 			state = "on"
 		}
 		var lines []string
-		lines = append(lines, fmt.Sprintf("Subagents: %s, limit %d, timeout %ds", state, m.subagents.MaxParallel, m.subagents.TimeoutSeconds))
+		lines = append(lines, fmt.Sprintf(m.uiLanguage.tr("Subagents: %s, limit %d, timeout %ds", "Subagents: %s，限制 %d，超时 %ds"), state, m.subagents.MaxParallel, m.subagents.TimeoutSeconds))
 		if len(m.subagentResults) == 0 {
-			lines = append(lines, "No subagent runs yet.")
+			lines = append(lines, m.uiLanguage.tr("No subagent runs yet.", "还没有 subagent 运行记录。"))
 		} else {
 			for _, result := range m.subagentResults {
 				lines = append(lines, renderSubagentResultLine(result))
 			}
 		}
 		m.messages = append(m.messages, chatMsg{role: "assistant", content: strings.Join(lines, "\n")})
-		m.status = "Subagents shown"
+		m.status = m.uiLanguage.tr("Subagents shown", "已显示 Subagents")
 		return m
 	}
 	switch fields[0] {
 	case "on":
 		m.subagents.Enabled = true
-		m.status = "Subagents enabled"
+		m.status = m.uiLanguage.tr("Subagents enabled", "Subagents 已启用")
 	case "off":
 		m.subagents.Enabled = false
-		m.status = "Subagents disabled"
+		m.status = m.uiLanguage.tr("Subagents disabled", "Subagents 已禁用")
 	case "limit":
 		if len(fields) < 2 {
-			m.status = "Usage: /subagents limit <n>"
+			m.status = m.uiLanguage.tr("Usage: /subagents limit <n>", "用法: /subagents limit <n>")
 			return m
 		}
 		n, err := strconv.Atoi(fields[1])
 		if err != nil || n <= 0 {
-			m.status = "Subagent limit must be a positive integer"
+			m.status = m.uiLanguage.tr("Subagent limit must be a positive integer", "Subagent 限制必须是正整数")
 			return m
 		}
 		if n > 8 {
 			n = 8
 		}
 		m.subagents.MaxParallel = n
-		m.status = fmt.Sprintf("Subagent limit set to %d", n)
+		m.status = fmt.Sprintf(m.uiLanguage.tr("Subagent limit set to %d", "Subagent 限制已设置为 %d"), n)
 	default:
-		m.status = "Usage: /subagents [on|off|limit <n>]"
+		m.status = m.uiLanguage.tr("Usage: /subagents [on|off|limit <n>]", "用法: /subagents [on|off|limit <n>]")
 	}
 	return m
 }
@@ -1723,6 +2034,9 @@ func (m Model) availableToolDefs() []llm.ToolDef {
 		}
 		allTools = append(allTools, tool)
 	}
+	if len(m.attachedImages) > 0 {
+		allTools = append(allTools, imageToolDefs...)
+	}
 	if m.nodeToolsEnabled {
 		allTools = append(allTools, nodeManagementToolDefs...)
 	}
@@ -1830,13 +2144,13 @@ func (m *Model) finishEmptyResponse(reason string) {
 	slog.Debug("llm empty response", "stream_id", m.activeStreamID, "reason", reason, "elapsed_ms", elapsed.Milliseconds())
 	m.finishStream(false)
 	if reason != "" {
-		m.status = "Stream error: empty response (" + reason + ")"
+		m.status = m.uiLanguage.tr("Stream error: empty response (", "流错误: 空回复 (") + reason + ")"
 	} else {
-		m.status = "Stream error: empty response"
+		m.status = m.uiLanguage.tr("Stream error: empty response", "流错误: 空回复")
 	}
 	m.messages = append(m.messages, chatMsg{
 		role:    "assistant",
-		content: "Model returned an empty response. Please try again.",
+		content: m.uiLanguage.tr("Model returned an empty response. Please try again.", "模型返回了空回复，请重试。"),
 		elapsed: elapsed,
 	})
 }
@@ -1940,7 +2254,7 @@ func (m Model) resumeAfterStreamTools(streamID uint64) (tea.Model, tea.Cmd) {
 	}
 	if m.streamToolExpected == 0 {
 		m.finishStream(false)
-		m.status = "Stream ended"
+		m.status = m.uiLanguage.tr("Stream ended", "流已结束")
 		return m, nil
 	}
 	return m.startStream()
@@ -1953,6 +2267,9 @@ func (m *Model) cancelActiveStream() {
 }
 
 func (m Model) assessToolRisk(streamID uint64, call llm.ToolCall) tea.Cmd {
+	if call.Name == metaToolImageAnalyze {
+		return m.dispatchTool(streamID, call)
+	}
 	if localtools.IsLocalTool(call.Name) && localtools.IsReadOnly(call.Name) {
 		return m.dispatchTool(streamID, call)
 	}
@@ -2031,6 +2348,8 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 		return m.dispatchCallTool(streamID, call)
 	case metaToolSubagentsRun:
 		return m.dispatchSubagentsRun(streamID, call)
+	case metaToolImageAnalyze:
+		return m.dispatchImageAnalyze(streamID, call)
 	case metaToolNodeAdd:
 		return m.prepareNodeAddOrPrompt(streamID, call)
 	case metaToolFilePut:
@@ -2076,6 +2395,12 @@ func parseMetaArgs(raw json.RawMessage) (metaCallArgs, error) {
 		return args, err
 	}
 	return args, nil
+}
+
+type imageAnalyzeArgs struct {
+	ImageID  int    `json:"image_id"`
+	ImageIDs []int  `json:"image_ids"`
+	Question string `json:"question"`
 }
 
 func (m Model) resolveTargetNodes(specified string) []string {
@@ -2170,6 +2495,58 @@ func (m Model) dispatchCallTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 	}
 }
 
+func (m Model) dispatchImageAnalyze(streamID uint64, call llm.ToolCall) tea.Cmd {
+	provider := m.visionProvider
+	visionErr := strings.TrimSpace(m.visionError)
+	images := append([]imageAttachment(nil), m.attachedImages...)
+	maxChars := m.vision.MaxSummaryCharsPerImage
+	parentCtx := m.streamCtx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	return func() tea.Msg {
+		if provider == nil {
+			if visionErr == "" {
+				visionErr = "no vision model configured or available"
+			}
+			return singleToolError(streamID, call, "image analysis unavailable: "+visionErr)
+		}
+		var args imageAnalyzeArgs
+		if len(call.Arguments) > 0 {
+			if err := json.Unmarshal(call.Arguments, &args); err != nil {
+				return singleToolError(streamID, call, "invalid arguments: "+err.Error())
+			}
+		}
+		selected, err := selectImageAttachments(images, args)
+		if err != nil {
+			return singleToolError(streamID, call, err.Error())
+		}
+		inputs := make([]llm.ImageInput, 0, len(selected))
+		for _, image := range selected {
+			input, err := imageInputFromAttachment(image)
+			if err != nil {
+				return singleToolError(streamID, call, fmt.Sprintf("read image #%d failed: %v", image.ID, err))
+			}
+			inputs = append(inputs, input)
+		}
+		ctx, cancel := context.WithTimeout(parentCtx, 2*time.Minute)
+		defer cancel()
+		resp, err := provider.DescribeImages(ctx, &llm.VisionRequest{
+			Prompt:    imageAnalyzePrompt(args.Question, selected, maxChars),
+			Images:    inputs,
+			MaxTokens: defaultVisionMaxTokens,
+		})
+		if err != nil {
+			return singleToolError(streamID, call, "image analysis failed: "+err.Error())
+		}
+		return multiToolResultMsg{
+			streamID: streamID,
+			Call:     call,
+			Results:  []nodeToolResult{{Node: "local", Output: strings.TrimSpace(resp.Summary), Success: true}},
+		}
+	}
+}
+
 func (m Model) dispatchFilePut(streamID uint64, call llm.ToolCall) tea.Cmd {
 	clients := m.clients
 	parentCtx := m.streamCtx
@@ -2190,9 +2567,15 @@ func (m Model) dispatchFilePut(streamID uint64, call llm.ToolCall) tea.Cmd {
 		if err != nil {
 			return singleToolError(streamID, call, "invalid local_path: "+err.Error())
 		}
+		if err := fileguard.ValidateTextFile(localPath); err != nil {
+			return singleToolError(streamID, call, "local file is not an allowed text file: "+err.Error())
+		}
 		remotePath := strings.TrimSpace(args.RemotePath)
 		if remotePath == "" {
 			return singleToolError(streamID, call, "remote_path is required")
+		}
+		if err := fileguard.ValidateTextPath(remotePath); err != nil {
+			return singleToolError(streamID, call, "remote_path is not an allowed text path: "+err.Error())
 		}
 		info, err := os.Stat(localPath)
 		if err != nil {
@@ -2241,19 +2624,40 @@ func (m Model) dispatchFileGet(streamID uint64, call llm.ToolCall) tea.Cmd {
 		if err != nil {
 			return singleToolError(streamID, call, "invalid local_path: "+err.Error())
 		}
+		if err := fileguard.ValidateTextPath(localPath); err != nil {
+			return singleToolError(streamID, call, "local_path is not an allowed text path: "+err.Error())
+		}
+		if _, err := os.Stat(localPath); err == nil {
+			if err := fileguard.ValidateTextFile(localPath); err != nil {
+				return singleToolError(streamID, call, "existing local file is not an allowed text file: "+err.Error())
+			}
+		} else if !os.IsNotExist(err) {
+			return singleToolError(streamID, call, "local file stat failed: "+err.Error())
+		}
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			return singleToolError(streamID, call, "create local directory failed: "+err.Error())
 		}
-		file, err := os.OpenFile(localPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+		tmp, err := os.CreateTemp(filepath.Dir(localPath), ".conan-download-*")
 		if err != nil {
-			return singleToolError(streamID, call, "local file open failed: "+err.Error())
+			return singleToolError(streamID, call, "temporary file create failed: "+err.Error())
 		}
-		defer file.Close()
+		tmpPath := tmp.Name()
+		defer os.Remove(tmpPath)
 		ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
 		defer cancel()
-		bytesWritten, err := client.DownloadFile(ctx, remotePath, file)
+		bytesWritten, err := client.DownloadFile(ctx, remotePath, tmp)
+		closeErr := tmp.Close()
 		if err != nil {
 			return singleNodeToolResult(streamID, call, node, "file download failed: "+err.Error(), false)
+		}
+		if closeErr != nil {
+			return singleToolError(streamID, call, "temporary file close failed: "+closeErr.Error())
+		}
+		if err := fileguard.ValidateTextFile(tmpPath); err != nil {
+			return singleToolError(streamID, call, "downloaded file is not allowed text: "+err.Error())
+		}
+		if err := os.Rename(tmpPath, localPath); err != nil {
+			return singleToolError(streamID, call, "move downloaded file failed: "+err.Error())
 		}
 		output := fmt.Sprintf("downloaded %s:%s to %s (%d bytes)", node, remotePath, args.LocalPath, bytesWritten)
 		return singleNodeToolResult(streamID, call, node, output, true)
@@ -2672,6 +3076,7 @@ func (m Model) buildSystemPromptWithMemory() string {
 		"Tool routing contract:",
 		"- For file upload/download/transfer/copy between local workspace and a node, use file_put or file_get directly. Do not call tool_search first for file transfer.",
 		"- For node state/action, diagnostics, inspection, logs, services, containers, Kubernetes, packages, cron, or remote filesystem access, call tool_search first unless the user explicitly asked for shell or gave an exact command.",
+		"- For attached images, call image_analyze before claiming visual details.",
 		"- After tool_search, use call_tool with a discovered specialized tool when it fits; follow its schema exactly.",
 		"- Use exec only as fallback when no suitable specialized tool exists, specialized output is insufficient, the user asked for shell, or shell risk review is intentional.",
 		"- For resource-changing operations, first use read-only tools when useful, then execute through a reviewed path. Do not bypass confirmations.",
@@ -3012,17 +3417,18 @@ func (m Model) handleMemoryTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 func (m Model) handleSessionSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEnter:
+		m.sessionList, _ = m.sessionList.Update(key)
 		selected := m.sessionList.Selected()
 		m.mode = modeChat
 		if selected != nil {
-			m.status = fmt.Sprintf("Loading session %s...", selected.ID)
+			m.status = fmt.Sprintf(m.uiLanguage.tr("Loading session %s...", "正在加载会话 %s..."), selected.ID)
 			return m, m.loadSession(selected.ID)
 		}
-		m.status = "No session selected"
+		m.status = m.uiLanguage.tr("No session selected", "未选择会话")
 		return m, nil
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.mode = modeChat
-		m.status = "Resume cancelled"
+		m.status = m.uiLanguage.tr("Resume cancelled", "已取消恢复")
 		return m, nil
 	default:
 		var cmd tea.Cmd
@@ -3034,6 +3440,9 @@ func (m Model) handleSessionSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) loadSession(id string) tea.Cmd {
 	store := m.memStore
 	return func() tea.Msg {
+		if store == nil {
+			return sessionLoadMsg{err: fmt.Errorf("memory store not available")}
+		}
 		rec, err := store.LoadConversation(id)
 		if err != nil {
 			return sessionLoadMsg{err: err}
@@ -3042,9 +3451,80 @@ func (m Model) loadSession(id string) tea.Cmd {
 	}
 }
 
-func (m Model) saveCurrentConversation() {
-	if m.memStore == nil || m.conv == nil {
+func (m *Model) applyLoadedSession(rec *memory.ConversationRecord) {
+	if rec == nil {
 		return
+	}
+	var messages []models.Message
+	if strings.TrimSpace(rec.Messages) != "" {
+		_ = json.Unmarshal([]byte(rec.Messages), &messages)
+	}
+	var nodes []string
+	if strings.TrimSpace(rec.Nodes) != "" {
+		_ = json.Unmarshal([]byte(rec.Nodes), &nodes)
+	}
+	m.conv = conversation.Restore(rec.ID, rec.Cluster, nodes, rec.Model, messages)
+	m.cluster = rec.Cluster
+	m.model = rec.Model
+	m.selectedNodes = make(map[string]bool)
+	for _, node := range nodes {
+		m.selectedNodes[node] = true
+	}
+	visibleMessages := messages
+	if len(visibleMessages) > maxResumedVisibleMessages {
+		visibleMessages = visibleMessages[len(visibleMessages)-maxResumedVisibleMessages:]
+	}
+	m.messages = chatMessagesFromModels(visibleMessages)
+	m.lastBodyContent = ""
+}
+
+func chatMessagesFromModels(messages []models.Message) []chatMsg {
+	result := make([]chatMsg, 0, len(messages))
+	for _, msg := range messages {
+		switch msg.Role {
+		case conversation.RoleUser:
+			result = append(result, chatMsg{role: "user", content: msg.Content})
+		case conversation.RoleAssistant:
+			result = append(result, chatMsg{role: "assistant", content: msg.Content, toolCallID: msg.ToolCallID, toolName: msg.ToolName, toolInput: msg.ToolInput})
+		case conversation.RoleTool:
+			result = append(result, chatMsg{role: "tool", content: msg.Content, toolCallID: msg.ToolCallID, toolName: msg.ToolName, toolInput: msg.ToolInput, toolOutput: msg.ToolOutput})
+		}
+	}
+	return result
+}
+
+func (m Model) archiveCompaction(messages []models.Message) (string, error) {
+	if m.memStore == nil || m.conv == nil || len(messages) == 0 {
+		return "", nil
+	}
+	dir := filepath.Join(m.memStore.Dir(), "archives", m.conv.ID())
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "compact-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".json")
+	data, err := json.MarshalIndent(compactArchive{
+		ConversationID: m.conv.ID(),
+		Cluster:        m.cluster,
+		Model:          m.model,
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		Messages:       messages,
+	}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (m Model) SaveCurrentConversation() (string, error) {
+	return m.saveCurrentConversation()
+}
+
+func (m Model) saveCurrentConversation() (string, error) {
+	if m.memStore == nil || m.conv == nil {
+		return "", fmt.Errorf("memory store or conversation not available")
 	}
 	msgs := m.conv.Messages()
 	msgJSON, _ := json.Marshal(msgs)
@@ -3053,13 +3533,46 @@ func (m Model) saveCurrentConversation() {
 		nodes = append(nodes, n)
 	}
 	nodesJSON, _ := json.Marshal(nodes)
-	m.memStore.SaveConversation(memory.ConversationRecord{
+	if err := m.memStore.SaveConversation(memory.ConversationRecord{
 		ID:       m.conv.ID(),
 		Cluster:  m.cluster,
 		Nodes:    string(nodesJSON),
 		Model:    m.model,
+		Summary:  conversationSummaryForMessages(msgs),
 		Messages: string(msgJSON),
-	})
+	}); err != nil {
+		return "", err
+	}
+	return m.conv.ID(), nil
+}
+
+func conversationSummaryForMessages(messages []models.Message) string {
+	for _, msg := range messages {
+		if msg.Role != conversation.RoleUser {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if !strings.HasPrefix(content, "Previous conversation compacted.") {
+			continue
+		}
+		if idx := strings.Index(content, "\n\nSummary:\n"); idx >= 0 {
+			summary := strings.TrimSpace(content[idx+len("\n\nSummary:\n"):])
+			if summary != "" {
+				firstLine, _, ok := strings.Cut(summary, "\n")
+				if ok {
+					return truncateStr(strings.TrimSpace(firstLine), 120)
+				}
+				return truncateStr(summary, 120)
+			}
+		}
+	}
+	if len(messages) > 0 {
+		last := messages[len(messages)-1]
+		if txt := strings.TrimSpace(last.Content); txt != "" {
+			return truncateStr(txt, 120)
+		}
+	}
+	return ""
 }
 
 func truncateStr(s string, max int) string {

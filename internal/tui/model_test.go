@@ -5,6 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -65,6 +69,48 @@ func (p *captureStreamProvider) ChatStream(_ context.Context, req *llm.ChatReque
 	return ch, nil
 }
 
+type compactCaptureProvider struct {
+	req     *llm.ChatRequest
+	content string
+	err     error
+}
+
+func (p *compactCaptureProvider) Chat(_ context.Context, req *llm.ChatRequest) (*llm.ChatResponse, error) {
+	p.req = req
+	if p.err != nil {
+		return nil, p.err
+	}
+	content := p.content
+	if content == "" {
+		content = "summary"
+	}
+	return &llm.ChatResponse{Message: models.Message{Role: "assistant", Content: content}, StopReason: llm.StopEndTurn}, nil
+}
+
+func (p *compactCaptureProvider) ChatStream(_ context.Context, _ *llm.ChatRequest) (<-chan llm.ChatEvent, error) {
+	ch := make(chan llm.ChatEvent)
+	close(ch)
+	return ch, nil
+}
+
+type stubVisionProvider struct {
+	req     *llm.VisionRequest
+	summary string
+	err     error
+}
+
+func (p *stubVisionProvider) SupportsVision() bool {
+	return true
+}
+
+func (p *stubVisionProvider) DescribeImages(_ context.Context, req *llm.VisionRequest) (*llm.VisionResponse, error) {
+	p.req = req
+	if p.err != nil {
+		return nil, p.err
+	}
+	return &llm.VisionResponse{Summary: p.summary}, nil
+}
+
 type stubMemoryExtractor struct {
 	candidates []memory.MemoryCandidate
 	err        error
@@ -83,6 +129,77 @@ func TestInitialModelView(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestUILanguageChineseAffectsTUIOnly(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet", UILanguage: "zh-CN"})
+	view := model.View()
+	for _, want := range []string{"就绪", "集群", "模型", "节点"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+
+	prompt := model.buildSystemPromptWithMemory()
+	if strings.Contains(prompt, "就绪") || strings.Contains(prompt, "集群") {
+		t.Fatalf("ui language leaked into system prompt:\n%s", prompt)
+	}
+}
+
+func TestLangCommandOpensSelectorAndConfirmsLanguage(t *testing.T) {
+	home := t.TempDir()
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet", ConfigHome: home})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/lang")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeLangSelect {
+		t.Fatalf("mode = %v, want modeLangSelect", model.mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Select UI Language") {
+		t.Fatalf("language selector missing title:\n%s", view)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.uiLanguage != uiLanguageChinese {
+		t.Fatalf("uiLanguage = %q, want zh-CN", model.uiLanguage)
+	}
+	if !strings.Contains(model.View(), "界面语言已切换为 中文") {
+		t.Fatalf("view missing changed language status:\n%s", model.View())
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "ui_language: zh-CN") {
+		t.Fatalf("config missing ui_language:\n%s", data)
+	}
+}
+
+func TestLangCommandAcceptsDirectLanguageArg(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/lang zh")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.uiLanguage != uiLanguageChinese {
+		t.Fatalf("uiLanguage = %q, want zh-CN", model.uiLanguage)
+	}
+	if !strings.Contains(model.View(), "界面语言已切换为 中文") {
+		t.Fatalf("view missing changed language status:\n%s", model.View())
 	}
 }
 
@@ -758,6 +875,191 @@ func TestInputRendersCursor(t *testing.T) {
 	}
 }
 
+func TestMultilinePasteRendersCompactLineCount(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	pasted := "alpha\nbeta\ngamma\n"
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted), Paste: true})
+	model = next.(Model)
+
+	if model.input != pasted {
+		t.Fatalf("input = %q, want pasted text preserved", model.input)
+	}
+	view := model.View()
+	if !strings.Contains(view, "❯ Pasted 3 lines█") {
+		t.Fatalf("view missing compact pasted input:\n%s", view)
+	}
+	if strings.Contains(view, "│ ❯ alpha") {
+		t.Fatalf("view rendered raw pasted input:\n%s", view)
+	}
+	if model.status != "Pasted 3 lines into input" {
+		t.Fatalf("status = %q, want pasted line count", model.status)
+	}
+}
+
+func TestMultilinePasteSubmitsFullInput(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	pasted := "alpha\nbeta\ngamma"
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(pasted), Paste: true})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if len(model.messages) != 1 || model.messages[0].content != pasted {
+		t.Fatalf("messages = %#v, want full pasted input", model.messages)
+	}
+	if got := conv.Messages()[0].Content; got != pasted {
+		t.Fatalf("conversation content = %q, want full pasted input", got)
+	}
+}
+
+func TestImagePathPasteAttachesImageChip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "screen.png")
+	if err := os.WriteFile(path, smallPNG(t), 0600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", ConfigHome: dir})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(path), Paste: true})
+	model = next.(Model)
+
+	if len(model.pendingImages) != 1 {
+		t.Fatalf("pendingImages = %#v, want one image", model.pendingImages)
+	}
+	view := model.View()
+	if !strings.Contains(view, "[Image #1]") {
+		t.Fatalf("view missing image chip:\n%s", view)
+	}
+	if model.input != "" {
+		t.Fatalf("input = %q, want image path paste consumed", model.input)
+	}
+}
+
+func TestEmptyClipboardPasteIsNoop(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.status = "Ready"
+
+	next, _ := model.Update(clipboardPasteMsg{})
+	model = next.(Model)
+
+	if model.status != "Ready" {
+		t.Fatalf("status = %q, want unchanged", model.status)
+	}
+	if model.input != "" || len(model.pendingImages) != 0 {
+		t.Fatalf("input = %q pendingImages = %#v, want unchanged", model.input, model.pendingImages)
+	}
+}
+
+func TestImageSubmitExposesAnalyzeToolToMainModel(t *testing.T) {
+	dir := t.TempDir()
+	provider := &captureStreamProvider{}
+	vision := &stubVisionProvider{summary: "Image #1: terminal screenshot with error E_CONN."}
+	conv := conversation.New("test", nil, "model")
+	attachment, err := saveImageAttachment(smallPNG(t), "screen.png", "image/png", filepath.Join(dir, "attachments"), 1)
+	if err != nil {
+		t.Fatalf("save image: %v", err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:        "test",
+		Model:          "m",
+		ConfigHome:     dir,
+		Provider:       provider,
+		VisionProvider: vision,
+		Conv:           conv,
+	})
+	model.pendingImages = []imageAttachment{attachment}
+
+	next, cmd := model.submitMessage("what failed?", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("image submit should start main model stream")
+	}
+	execMaybeBatch(t, cmd)
+
+	if vision.req != nil {
+		t.Fatalf("vision should not run before image_analyze tool call: %#v", vision.req)
+	}
+	if provider.req == nil {
+		t.Fatal("main provider request was not started")
+	}
+	got := provider.req.Messages[0].Content
+	if !strings.Contains(got, "what failed?") || !strings.Contains(got, "image_analyze") || !strings.Contains(got, "[Image #1]") {
+		t.Fatalf("main provider input missing image tool context:\n%s", got)
+	}
+	if strings.Contains(got, "data:image") || strings.Contains(got, "E_CONN") {
+		t.Fatalf("main provider input leaked image data:\n%s", got)
+	}
+	foundTool := false
+	for _, tool := range provider.req.Tools {
+		if tool.Name == metaToolImageAnalyze {
+			foundTool = true
+		}
+	}
+	if !foundTool {
+		t.Fatalf("tools = %#v, want image_analyze", provider.req.Tools)
+	}
+	if len(model.messages) != 1 || !strings.Contains(model.messages[0].content, "[Image #1]") {
+		t.Fatalf("visible messages = %#v, want one user message with image chip", model.messages)
+	}
+	if len(conv.Messages()) != 1 {
+		t.Fatalf("conversation messages = %d, want one", len(conv.Messages()))
+	}
+
+	msg := execCmd(t, model.dispatchTool(0, llm.ToolCall{
+		ID:        "img1",
+		Name:      metaToolImageAnalyze,
+		Arguments: json.RawMessage(`{"image_id":1,"question":"what failed?"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("dispatchTool returned %T, want multiToolResultMsg", msg)
+	}
+	if vision.req == nil || len(vision.req.Images) != 1 {
+		t.Fatalf("vision request = %#v, want one image after tool call", vision.req)
+	}
+	if !strings.Contains(result.Results[0].Output, "E_CONN") {
+		t.Fatalf("tool output = %q, want vision summary", result.Results[0].Output)
+	}
+}
+
+func TestAtImageReferenceExposesAnalyzeTool(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "screen.png"), smallPNG(t), 0600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:            "test",
+		Model:              "m",
+		Provider:           provider,
+		VisionProvider:     &stubVisionProvider{summary: "ok"},
+		LocalWorkspaceRoot: workspace,
+		ConfigHome:         workspace,
+		Conv:               conversation.New("test", nil, "model"),
+	})
+
+	next, cmd := model.submitMessage("inspect @screen.png", nil)
+	model = next.(Model)
+	execMaybeBatch(t, cmd)
+
+	if len(model.attachedImages) != 1 {
+		t.Fatalf("attachedImages = %#v, want one", model.attachedImages)
+	}
+	if provider.req == nil {
+		t.Fatal("main provider request was not started")
+	}
+	got := provider.req.Messages[0].Content
+	if !strings.Contains(got, "image_analyze") || !strings.Contains(got, "[Image #1]") {
+		t.Fatalf("main provider input missing image tool context:\n%s", got)
+	}
+	if strings.Contains(got, "\x89PNG") {
+		t.Fatalf("main provider input included raw png bytes:\n%s", got)
+	}
+}
+
 func TestAutocompleteRendersBelowInputBox(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
 	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
@@ -1026,6 +1328,17 @@ func typeAndEnter(t *testing.T, model Model, input string) Model {
 	return next.(Model)
 }
 
+func smallPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
 func TestTypingAndEnterAddsUserMessage(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
@@ -1158,6 +1471,419 @@ func TestClearCommandClearsMessages(t *testing.T) {
 	}
 	if !strings.Contains(view, "Conversation cleared") {
 		t.Fatalf("clear status missing:\n%s", view)
+	}
+}
+
+func TestCompactCommandReplacesContextWithSummaryTailAndArchivesFullHistory(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	conv := conversation.New("test", nil, "model")
+	conv.AddUser("old user message")
+	conv.AddAssistant("old assistant reply")
+	conv.AddUser("middle user message")
+	conv.AddAssistant("middle assistant reply")
+	conv.AddUser("new user message")
+	conv.AddAssistant("new assistant reply")
+
+	provider := &compactCaptureProvider{content: "The deployment design is approved. Next step: implement compact."}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "model", Provider: provider, Conv: conv, MemoryStore: store})
+
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandCompact, Arg: "focus on deployment decisions"})
+	model = next
+	if cmd == nil {
+		t.Fatal("compact command should return a command")
+	}
+	msg := execCmd(t, cmd)
+	nextModel, _ := model.Update(msg)
+	model = nextModel.(Model)
+
+	if provider.req == nil {
+		t.Fatal("compact should call provider.Chat")
+	}
+	if len(provider.req.Messages) != 6 {
+		t.Fatalf("compact request messages = %d, want 6", len(provider.req.Messages))
+	}
+	if !strings.Contains(provider.req.SystemPrompt, "focus on deployment decisions") {
+		t.Fatalf("compact prompt missing focus: %q", provider.req.SystemPrompt)
+	}
+
+	msgs := model.conv.Messages()
+	if len(msgs) != 5 {
+		t.Fatalf("compacted messages len = %d, want summary + 4 tail messages", len(msgs))
+	}
+	msgData, _ := json.Marshal(msgs)
+	msgText := string(msgData)
+	if msgs[0].Role != "user" || !strings.Contains(msgs[0].Content, "Previous conversation compacted") || !strings.Contains(msgs[0].Content, "deployment design is approved") {
+		t.Fatalf("first compacted message = %#v", msgs[0])
+	}
+	if strings.Contains(msgText, "old user message") {
+		t.Fatalf("compacted context still contains oldest message: %s", msgText)
+	}
+	if !strings.Contains(msgText, "new assistant reply") {
+		t.Fatalf("compacted context should keep recent tail: %s", msgText)
+	}
+
+	archives, err := filepath.Glob(filepath.Join(store.Dir(), "archives", conv.ID(), "compact-*.json"))
+	if err != nil {
+		t.Fatalf("glob archive: %v", err)
+	}
+	if len(archives) != 1 {
+		t.Fatalf("archives = %#v, want one archive", archives)
+	}
+	archiveData, err := os.ReadFile(archives[0])
+	if err != nil {
+		t.Fatalf("read archive: %v", err)
+	}
+	if !strings.Contains(string(archiveData), "old user message") {
+		t.Fatalf("archive missing full pre-compact history: %s", archiveData)
+	}
+
+	model.saveCurrentConversation()
+	rec, err := store.LoadConversation(conv.ID())
+	if err != nil {
+		t.Fatalf("load saved conversation: %v", err)
+	}
+	if strings.Contains(rec.Messages, "old user message") {
+		t.Fatalf("saved resumable conversation should be compacted, got: %s", rec.Messages)
+	}
+	if !strings.Contains(rec.Messages, "Previous conversation compacted") {
+		t.Fatalf("saved resumable conversation missing summary: %s", rec.Messages)
+	}
+}
+
+func TestResumeRestoresSavedCompactedConversationMessages(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	saved := []models.Message{
+		{ID: "m1", ConversationID: "conv-compact", Role: "user", Content: "Previous conversation compacted.\n\nSummary:\nKeep the agent transfer design."},
+		{ID: "m2", ConversationID: "conv-compact", Role: "user", Content: "continue implementation"},
+	}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-compact",
+		Cluster:  "prod",
+		Model:    "model",
+		Summary:  "Compacted: Keep the agent transfer design.",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "old", Conv: conversation.New("test", nil, "old"), MemoryStore: store})
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandResume, Arg: "conv-compact"})
+	model = next
+	msg := execCmd(t, cmd)
+	nextModel, _ := model.Update(msg)
+	model = nextModel.(Model)
+
+	if model.conv.ID() != "conv-compact" {
+		t.Fatalf("conversation ID = %q, want conv-compact", model.conv.ID())
+	}
+	if model.cluster != "prod" || model.model != "model" {
+		t.Fatalf("cluster/model = %s/%s, want prod/model", model.cluster, model.model)
+	}
+	got := model.conv.Messages()
+	if len(got) != 2 || got[0].Content != saved[0].Content || got[1].Content != saved[1].Content {
+		t.Fatalf("restored messages = %#v, want saved compacted messages", got)
+	}
+}
+
+func TestResumeWithoutIDRendersRecentSessionList(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	for i := 0; i < 25; i++ {
+		id := fmt.Sprintf("conv-%02d", i)
+		if err := store.SaveConversation(memory.ConversationRecord{
+			ID:      id,
+			Cluster: "prod",
+			Model:   "model",
+			Summary: "session " + id,
+		}); err != nil {
+			t.Fatalf("save conversation %s: %v", id, err)
+		}
+	}
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "old", Conv: conversation.New("test", nil, "old"), MemoryStore: store})
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandResume})
+	if cmd != nil {
+		t.Fatal("resume without id returned command, want synchronous list")
+	}
+	model = next
+
+	if model.mode != modeSession {
+		t.Fatalf("mode = %v, want modeSession", model.mode)
+	}
+	if got := len(model.sessionList.sessions); got != 20 {
+		t.Fatalf("session list length = %d, want 20", got)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Historical Sessions") {
+		t.Fatalf("resume view missing session list:\n%s", view)
+	}
+}
+
+func TestResumeSessionListEnterLoadsCurrentSession(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	saved := []models.Message{{ID: "m1", ConversationID: "conv-enter", Role: conversation.RoleUser, Content: "resume this session"}}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-enter",
+		Cluster:  "prod",
+		Model:    "model",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "old", Conv: conversation.New("test", nil, "old"), MemoryStore: store})
+	next, _ := model.applyCommand(SlashCommand{Kind: CommandResume})
+	model = next
+
+	nextModel, cmd := model.handleSessionSelectKey(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	if cmd == nil {
+		t.Fatalf("enter returned nil command, status = %q", model.status)
+	}
+	msg := execCmd(t, cmd)
+	nextModel, _ = model.Update(msg)
+	model = nextModel.(Model)
+
+	if model.conv.ID() != "conv-enter" {
+		t.Fatalf("conversation ID = %q, want conv-enter", model.conv.ID())
+	}
+	if model.status == "No session selected" || model.status == "未选择会话" {
+		t.Fatalf("status = %q, want loaded session", model.status)
+	}
+}
+
+func TestResumeWithoutIDDisplaysLastUserMessage(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	saved := []models.Message{
+		{
+			ID:             "m1",
+			ConversationID: "conv-summary",
+			Role:           conversation.RoleUser,
+			Content:        "older user message",
+		},
+		{
+			ID:             "m2",
+			ConversationID: "conv-summary",
+			Role:           conversation.RoleUser,
+			Content:        "latest user request",
+		},
+		{
+			ID:             "m3",
+			ConversationID: "conv-summary",
+			Role:           conversation.RoleAssistant,
+			Content:        "assistant final answer should not be listed",
+		},
+	}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-summary",
+		Cluster:  "prod",
+		Model:    "model",
+		Summary:  "stored summary should not be listed",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "old", Conv: conversation.New("test", nil, "old"), MemoryStore: store})
+	next, _ := model.applyCommand(SlashCommand{Kind: CommandResume})
+	model = next
+
+	view := model.View()
+	if !strings.Contains(view, "latest user request") {
+		t.Fatalf("resume view missing last user message:\n%s", view)
+	}
+	for _, unwanted := range []string{"stored summary should not be listed", "older user message", "assistant final answer should not be listed"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("resume view contains %q, want only last user message:\n%s", unwanted, view)
+		}
+	}
+}
+
+func TestResumeWithoutIDElidesMultilineLongUserMessage(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	longLine := strings.Repeat("very long request ", 20)
+	saved := []models.Message{{
+		ID:             "m1",
+		ConversationID: "conv-long",
+		Role:           conversation.RoleUser,
+		Content:        "first line\nsecond line\r\n" + longLine,
+	}}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-long",
+		Cluster:  "prod",
+		Model:    "model",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "old", Conv: conversation.New("test", nil, "old"), MemoryStore: store})
+	next, _ := model.applyCommand(SlashCommand{Kind: CommandResume})
+	model = next
+
+	view := model.View()
+	var sessionLines []string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "conv-long") || strings.Contains(line, "second line") || strings.Contains(line, "very long request") {
+			sessionLines = append(sessionLines, line)
+		}
+	}
+	if len(sessionLines) != 1 {
+		t.Fatalf("resume view should render user preview on one line, got %d matching lines:\n%s", len(sessionLines), view)
+	}
+	if !strings.Contains(sessionLines[0], "first line second line") {
+		t.Fatalf("resume line did not collapse newlines:\n%s", view)
+	}
+	if !strings.Contains(sessionLines[0], "...") {
+		t.Fatalf("resume line did not elide long message:\n%s", view)
+	}
+}
+
+func TestResumeDisplaysOnlyRecentTwentyMessages(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	var saved []models.Message
+	for i := 0; i < 25; i++ {
+		saved = append(saved, models.Message{
+			ID:             fmt.Sprintf("m-%02d", i),
+			ConversationID: "conv-many",
+			Role:           conversation.RoleUser,
+			Content:        fmt.Sprintf("message-%02d", i),
+		})
+	}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-many",
+		Cluster:  "prod",
+		Model:    "model",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "old", Conv: conversation.New("test", nil, "old"), MemoryStore: store})
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandResume, Arg: "conv-many"})
+	model = next
+	msg := execCmd(t, cmd)
+	nextModel, _ := model.Update(msg)
+	model = nextModel.(Model)
+
+	if got := len(model.conv.Messages()); got != 25 {
+		t.Fatalf("conversation message length = %d, want full 25", got)
+	}
+	if got := len(model.messages); got != 20 {
+		t.Fatalf("visible message length = %d, want 20", got)
+	}
+	view := model.View()
+	if strings.Contains(view, "message-04") {
+		t.Fatalf("view contains old message:\n%s", view)
+	}
+	if !strings.Contains(view, "message-05") || !strings.Contains(view, "message-24") {
+		t.Fatalf("view missing recent messages:\n%s", view)
+	}
+}
+
+func TestInitLoadsInitialSessionID(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	saved := []models.Message{{ID: "m1", ConversationID: "conv-init", Role: "user", Content: "initial resume context"}}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-init",
+		Cluster:  "prod",
+		Model:    "model",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	model := NewModel(ModelConfig{
+		Cluster:          "test",
+		Model:            "old",
+		Conv:             conversation.New("test", nil, "old"),
+		MemoryStore:      store,
+		InitialSessionID: "conv-init",
+	})
+
+	cmd := model.Init()
+	if cmd == nil {
+		t.Fatal("Init() returned nil, want load session command")
+	}
+	msg := execCmd(t, cmd)
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			next, _ := model.Update(execCmd(t, c))
+			model = next.(Model)
+		}
+	} else {
+		next, _ := model.Update(msg)
+		model = next.(Model)
+	}
+
+	if model.conv.ID() != "conv-init" {
+		t.Fatalf("conversation ID = %q, want conv-init", model.conv.ID())
+	}
+	if got := model.conv.Messages(); len(got) != 1 || got[0].Content != "initial resume context" {
+		t.Fatalf("messages = %#v, want initial resume context", got)
 	}
 }
 
@@ -1391,6 +2117,11 @@ func TestInitVersionCheckCommandRendersWarning(t *testing.T) {
 
 func TestInitCommandUsesMCPInitializeResponseForVersionCheck(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/rpc" {
 			t.Fatalf("request = %s %s, want POST /rpc", r.Method, r.URL.Path)
 		}
@@ -1446,6 +2177,11 @@ func TestInitCommandUsesMCPInitializeResponseForVersionCheck(t *testing.T) {
 func newInitializeVersionTestClient(t *testing.T, version string) *mcp.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/rpc" {
 			t.Fatalf("request = %s %s, want POST /rpc", r.Method, r.URL.Path)
 		}
@@ -2871,6 +3607,49 @@ func TestPingResultUpdatesNodeStatus(t *testing.T) {
 	}
 }
 
+func TestInitPingsNodesAndUpdatesStartupOverviewStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		case "/rpc":
+			var req mcpproto.JSONRPCRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, map[string]interface{}{"tools": []mcpproto.ToolDefinition{}}))
+		default:
+			t.Fatalf("request path = %s, want /health or /rpc", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	model := NewModel(ModelConfig{
+		Cluster: "test",
+		Model:   "m",
+		Version: "dev",
+		Clients: map[string]*mcp.Client{
+			"node-01": mcp.NewClient(mcp.Config{BaseURL: srv.URL}),
+		},
+		Nodes: []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: false}},
+	})
+
+	pingMsg := execPingResultFromBatch(t, model.Init())
+	next, _ := model.Update(pingMsg)
+	model = next.(Model)
+
+	if !model.nodes[0].Online {
+		t.Fatal("node-01 should be online after startup ping")
+	}
+	view := model.View()
+	for _, want := range []string{"Nodes     1/1 selected, 1 online", "Online"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("startup overview missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestNodesNoNodesConfigured(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
 
@@ -3199,6 +3978,26 @@ func execVersionCheckFromBatch(t *testing.T, cmd tea.Cmd) versionCheckMsg {
 	}
 	t.Fatal("no versionCheckMsg in batch")
 	return versionCheckMsg{}
+}
+
+func execPingResultFromBatch(t *testing.T, cmd tea.Cmd) pingResultMsg {
+	t.Helper()
+	msg := execCmd(t, cmd)
+	if pm, ok := msg.(pingResultMsg); ok {
+		return pm
+	}
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd returned %T, want pingResultMsg or tea.BatchMsg", msg)
+	}
+	for _, c := range batch {
+		inner := execCmd(t, c)
+		if pm, ok := inner.(pingResultMsg); ok {
+			return pm
+		}
+	}
+	t.Fatal("no pingResultMsg in batch")
+	return pingResultMsg{}
 }
 
 type stubRiskProvider struct {

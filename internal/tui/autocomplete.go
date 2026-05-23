@@ -20,8 +20,10 @@ type commandInfo struct {
 var commandRegistry = []commandInfo{
 	{Name: "help", Description: "Show help information"},
 	{Name: "clear", Description: "Clear conversation"},
+	{Name: "compact", Description: "Compact conversation context", ArgHint: "[focus]"},
 	{Name: "exit", Description: "Exit Conan"},
 	{Name: "cluster", Description: "Switch/display cluster", ArgHint: "[name]"},
+	{Name: "lang", Description: "Change UI language"},
 	{Name: "model", Description: "Switch/display model", ArgHint: "[name]"},
 	{Name: "nodes", Description: "Open node selector"},
 	{Name: "memory", Description: "View memory summary"},
@@ -36,6 +38,7 @@ type autocomplete struct {
 	selected    int
 	prefix      string
 	mode        autocompleteMode
+	lang        uiLanguage
 	input       string
 	tokenStart  int
 	fileMatches []fileCompletion
@@ -54,7 +57,11 @@ type fileCompletion struct {
 }
 
 func newAutocomplete() autocomplete {
-	return autocomplete{}
+	return newAutocompleteWithLanguage(uiLanguageEnglish)
+}
+
+func newAutocompleteWithLanguage(lang uiLanguage) autocomplete {
+	return autocomplete{lang: lang}
 }
 
 func (a autocomplete) update(input string) autocomplete {
@@ -267,7 +274,7 @@ func (a autocomplete) commandLines(filtered []commandInfo) []string {
 		if cmd.ArgHint != "" {
 			hint = " " + cmd.ArgHint
 		}
-		line := fmt.Sprintf("%s%s  %s", cursor, nameStyle.Render("/"+cmd.Name+hint), descStyle.Render(cmd.Description))
+		line := fmt.Sprintf("%s%s  %s", cursor, nameStyle.Render("/"+cmd.Name+hint), descStyle.Render(a.lang.commandDescription(cmd.Name)))
 		lines = append(lines, line)
 	}
 	return lines
@@ -285,9 +292,9 @@ func (a autocomplete) fileLines() []string {
 			cursor = "▸ "
 			nameStyle = selectedStyle
 		}
-		kind := "file"
+		kind := a.lang.tr("file", "文件")
 		if match.IsDir {
-			kind = "dir"
+			kind = a.lang.tr("dir", "目录")
 		}
 		lines = append(lines, fmt.Sprintf("%s%s  %s", cursor, nameStyle.Render("@"+match.Path), descStyle.Render(kind)))
 	}

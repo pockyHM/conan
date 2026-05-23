@@ -9,10 +9,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/pockyHM/conan/internal/fileguard"
 	"github.com/pockyHM/conan/internal/llm"
 )
-
-const maxReadBytes = 1024 * 1024
 
 type Result struct {
 	Output  string
@@ -25,12 +24,12 @@ type RootedFS struct {
 
 func ToolDefs() []llm.ToolDef {
 	return []llm.ToolDef{
-		{Name: "local/fs/read", Description: "Read a local workspace file. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}`)},
+		{Name: "local/fs/read", Description: "Read a local workspace text file only. Binary and image files are refused. Output is capped at 64KiB unless a smaller max_bytes is provided. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"Line offset, 0-based"},"limit":{"type":"integer","description":"Max lines to read"},"max_bytes":{"type":"integer","description":"Max output bytes, capped at 65536"}},"required":["path"]}`)},
 		{Name: "local/fs/list", Description: "List local workspace directory contents. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`)},
 		{Name: "local/fs/stat", Description: "Get local workspace file metadata. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		{Name: "local/fs/write", Description: "Create or overwrite a local workspace file. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
-		{Name: "local/fs/patch", Description: "Edit a local workspace file by replacing text. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"]}`)},
-		{Name: "local/fs/delete", Description: "Delete a local workspace file. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		{Name: "local/fs/write", Description: "Create or overwrite a local workspace text file only. Binary and image paths/content are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
+		{Name: "local/fs/patch", Description: "Edit a local workspace text file. Use old_text/new_text for exact replacement, or start_line/end_line/content for 1-based inclusive line range replacement. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"start_line":{"type":"integer","description":"1-based first line to replace"},"end_line":{"type":"integer","description":"1-based last line to replace, inclusive. Defaults to start_line."},"content":{"type":"string","description":"Replacement content for line range mode"}},"required":["path"]}`)},
+		{Name: "local/fs/delete", Description: "Delete a local workspace text file only. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
 	}
 }
 
@@ -74,9 +73,10 @@ func Handle(fsys RootedFS, name string, input json.RawMessage) Result {
 
 func (f RootedFS) read(input json.RawMessage) Result {
 	var args struct {
-		Path   string `json:"path"`
-		Offset int    `json:"offset"`
-		Limit  int    `json:"limit"`
+		Path     string `json:"path"`
+		Offset   int    `json:"offset"`
+		Limit    int    `json:"limit"`
+		MaxBytes int    `json:"max_bytes"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return fail(err)
@@ -85,21 +85,26 @@ func (f RootedFS) read(input json.RawMessage) Result {
 	if err != nil {
 		return fail(err)
 	}
+	if err := fileguard.ValidateTextFile(path); err != nil {
+		return fail(err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fail(err)
 	}
 	lines := strings.Split(string(data), "\n")
-	if args.Offset > 0 && args.Offset < len(lines) {
-		lines = lines[args.Offset:]
+	if args.Offset > 0 {
+		if args.Offset >= len(lines) {
+			lines = nil
+		} else {
+			lines = lines[args.Offset:]
+		}
 	}
 	if args.Limit > 0 && args.Limit < len(lines) {
 		lines = lines[:args.Limit]
 	}
 	out := strings.Join(lines, "\n")
-	if len(out) > maxReadBytes {
-		out = out[:maxReadBytes] + "\n[truncated]"
-	}
+	out, _ = fileguard.LimitTextOutput(out, args.MaxBytes)
 	return Result{Output: out, Success: true}
 }
 
@@ -170,6 +175,19 @@ func (f RootedFS) write(input json.RawMessage) Result {
 	if err != nil {
 		return fail(err)
 	}
+	if err := fileguard.ValidateTextPath(path); err != nil {
+		return fail(err)
+	}
+	if err := fileguard.ValidateTextContent(args.Content); err != nil {
+		return fail(err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		if err := fileguard.ValidateTextFile(path); err != nil {
+			return fail(err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fail(err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fail(err)
 	}
@@ -181,9 +199,12 @@ func (f RootedFS) write(input json.RawMessage) Result {
 
 func (f RootedFS) patch(input json.RawMessage) Result {
 	var args struct {
-		Path    string `json:"path"`
-		OldText string `json:"old_text"`
-		NewText string `json:"new_text"`
+		Path      string `json:"path"`
+		OldText   string `json:"old_text"`
+		NewText   string `json:"new_text"`
+		StartLine int    `json:"start_line"`
+		EndLine   int    `json:"end_line"`
+		Content   string `json:"content"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return fail(err)
@@ -192,11 +213,34 @@ func (f RootedFS) patch(input json.RawMessage) Result {
 	if err != nil {
 		return fail(err)
 	}
+	if err := fileguard.ValidateTextFile(path); err != nil {
+		return fail(err)
+	}
+	replacement := args.NewText
+	if args.StartLine > 0 {
+		replacement = args.Content
+	}
+	if err := fileguard.ValidateTextContent(replacement); err != nil {
+		return fail(err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fail(err)
 	}
 	content := string(data)
+	if args.StartLine > 0 {
+		updated, err := fileguard.ReplaceLineRange(content, args.StartLine, args.EndLine, args.Content)
+		if err != nil {
+			return fail(err)
+		}
+		if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+			return fail(err)
+		}
+		return Result{Output: fmt.Sprintf("patched local file: %s lines %d-%d", args.Path, args.StartLine, fileguard.EffectiveEndLine(args.StartLine, args.EndLine)), Success: true}
+	}
+	if args.OldText == "" && args.NewText == "" {
+		return Result{Output: "patch requires old_text/new_text or start_line/content", Success: false}
+	}
 	if !strings.Contains(content, args.OldText) {
 		return Result{Output: "old_text not found in file", Success: false}
 	}
@@ -224,6 +268,9 @@ func (f RootedFS) delete(input json.RawMessage) Result {
 	}
 	if info.IsDir() {
 		return Result{Output: "refusing to delete directory: " + args.Path, Success: false}
+	}
+	if err := fileguard.ValidateTextFile(path); err != nil {
+		return fail(err)
 	}
 	if err := os.Remove(path); err != nil {
 		return fail(err)

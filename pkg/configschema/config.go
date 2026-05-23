@@ -54,12 +54,14 @@ type WebConfig struct {
 type GlobalConfig struct {
 	DefaultModel   string            `yaml:"default_model"`
 	DefaultCluster string            `yaml:"default_cluster"`
+	UILanguage     string            `yaml:"ui_language,omitempty"`
 	Models         []ModelConfig     `yaml:"models"`
 	Security       SecurityConfig    `yaml:"security"`
 	Memory         MemoryConfig      `yaml:"memory"`
 	Logging        LoggingConfig     `yaml:"logging"`
 	AgentDeploy    AgentDeployConfig `yaml:"agent_deploy"`
 	Subagents      SubagentConfig    `yaml:"subagents"`
+	Vision         VisionConfig      `yaml:"vision"`
 }
 
 type ModelConfig struct {
@@ -106,6 +108,12 @@ type SubagentConfig struct {
 	DefaultModel   string `yaml:"default_model"`
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 	Debug          bool   `yaml:"debug"`
+}
+
+type VisionConfig struct {
+	Model                   string `yaml:"model"`
+	MaxImages               int    `yaml:"max_images"`
+	MaxSummaryCharsPerImage int    `yaml:"max_summary_chars_per_image"`
 }
 
 // --- Cluster config ---

@@ -24,6 +24,7 @@ const (
 	metaToolNodeAdd      = "node_add"
 	metaToolFilePut      = "file_put"
 	metaToolFileGet      = "file_get"
+	metaToolImageAnalyze = "image_analyze"
 )
 
 var metaToolDefs = []llm.ToolDef{
@@ -88,7 +89,7 @@ var metaToolDefs = []llm.ToolDef{
 	},
 	{
 		Name:        metaToolFilePut,
-		Description: "Upload a local workspace file to a remote node through Conan's managed file transfer API. Use this directly for file upload, send, copy, put, transfer-to-node, or local-to-remote requests. Do not use tool_search, scp, rsync, curl, or shell for this. Requires user confirmation because it writes a remote file.",
+		Description: "Upload a local workspace text file to a remote node through Conan's managed file transfer API. Binary and image files are refused. Use this directly for file upload, send, copy, put, transfer-to-node, or local-to-remote requests. Do not use tool_search, scp, rsync, curl, or shell for this. Requires user confirmation because it writes a remote file.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -101,7 +102,7 @@ var metaToolDefs = []llm.ToolDef{
 	},
 	{
 		Name:        metaToolFileGet,
-		Description: "Download a remote node file into the local workspace through Conan's managed file transfer API. Use this directly for file download, fetch, get, copy-from-node, transfer-from-node, or remote-to-local requests. Do not use tool_search, scp, rsync, curl, or shell for this. Requires user confirmation because it writes a local file.",
+		Description: "Download a remote node text file into the local workspace through Conan's managed file transfer API. Binary and image files are refused. Use this directly for file download, fetch, get, copy-from-node, transfer-from-node, or remote-to-local requests. Do not use tool_search, scp, rsync, curl, or shell for this. Requires user confirmation because it writes a local file.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -110,6 +111,21 @@ var metaToolDefs = []llm.ToolDef{
 				"local_path": {"type": "string", "description": "Local workspace destination path. Must be relative to the workspace."}
 			},
 			"required": ["node", "remote_path", "local_path"]
+		}`),
+	},
+}
+
+var imageToolDefs = []llm.ToolDef{
+	{
+		Name:        metaToolImageAnalyze,
+		Description: "Analyze attached images by ID using Conan's configured vision model. Use this when the user's request depends on visual content from attached images, screenshots, diagrams, charts, or UI captures. The main agent cannot see image pixels directly; call this tool before making claims about an image.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"image_id": {"type": "integer", "description": "Single image ID to analyze, such as 1 for [Image #1]. Omit to analyze all attached images."},
+				"image_ids": {"type": "array", "items": {"type": "integer"}, "description": "Multiple image IDs to analyze. Omit to analyze all attached images."},
+				"question": {"type": "string", "description": "What to inspect or extract from the image(s). Be specific and concise."}
+			}
 		}`),
 	},
 }

@@ -32,6 +32,31 @@ func New(cluster string, nodes []string, model string) *Conversation {
 	}
 }
 
+func Restore(id string, cluster string, nodes []string, model string, messages []models.Message) *Conversation {
+	if id == "" {
+		id = models.NewID()
+	}
+	c := &Conversation{
+		id:        id,
+		cluster:   cluster,
+		nodes:     append([]string(nil), nodes...),
+		model:     model,
+		createdAt: time.Now(),
+	}
+	c.ReplaceMessages(messages)
+	return c
+}
+
+func NewWithMessages(id string, cluster string, nodes []string, model string, messages []models.Message) *Conversation {
+	if id == "" {
+		id = models.NewID()
+	}
+	c := New(cluster, nodes, model)
+	c.id = id
+	c.ReplaceMessages(messages)
+	return c
+}
+
 func (c *Conversation) ID() string {
 	return c.id
 }
@@ -58,6 +83,15 @@ func (c *Conversation) AddToolResult(callID string, output string) {
 
 func (c *Conversation) Messages() []models.Message {
 	return append([]models.Message(nil), c.messages...)
+}
+
+func (c *Conversation) ReplaceMessages(messages []models.Message) {
+	c.messages = append([]models.Message(nil), messages...)
+	for i := range c.messages {
+		if c.messages[i].ConversationID == "" {
+			c.messages[i].ConversationID = c.id
+		}
+	}
 }
 
 func (c *Conversation) Context(maxChars int) []models.Message {

@@ -28,9 +28,8 @@ import (
 
 var version = "dev"
 
-var runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
-	_, err := tea.NewProgram(model, teaProgramOptions(in, out)...).Run()
-	return err
+var runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
+	return tea.NewProgram(model, teaProgramOptions(in, out)...).Run()
 }
 
 func teaProgramOptions(in io.Reader, out io.Writer) []tea.ProgramOption {
@@ -38,7 +37,25 @@ func teaProgramOptions(in io.Reader, out io.Writer) []tea.ProgramOption {
 		tea.WithInput(in),
 		tea.WithOutput(out),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	}
+}
+
+type conversationSaver interface {
+	SaveCurrentConversation() (string, error)
+}
+
+func printResumeHint(out io.Writer, model tea.Model) {
+	saver, ok := model.(conversationSaver)
+	if !ok {
+		return
+	}
+	id, err := saver.SaveCurrentConversation()
+	if err != nil {
+		fmt.Fprintf(out, "Session save failed: %v\n", err)
+		return
+	}
+	fmt.Fprintf(out, "Session saved: %s\nResume with: conan resume %s\n", id, id)
 }
 
 type cliPrompter struct {
@@ -293,141 +310,177 @@ func newRootCommand() *cobra.Command {
 	nodeAddCmd.Flags().BoolVar(&nodeAddRotateToken, "rotate-token", false, "Rotate the node agent token while updating")
 	nodeCmd.AddCommand(nodeAddCmd)
 
+	runTUI := func(cmd *cobra.Command, initialSessionID string) error {
+		loader := cfgloader.NewLoader(home)
+		global, err := loader.LoadGlobal()
+		if err != nil {
+			return err
+		}
+		logFile := global.Logging.File
+		if strings.HasPrefix(logFile, "~/") {
+			if userHome, err := os.UserHomeDir(); err == nil {
+				logFile = filepath.Join(userHome, strings.TrimPrefix(logFile, "~/"))
+			}
+		}
+		if err := logging.Setup(logging.Config{Level: global.Logging.Level, File: logFile}); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize logging: %v\n", err)
+		} else {
+			defer logging.Close()
+		}
+
+		var auditLog *security.AuditLogger
+		if global.Logging.Audit {
+			auditPath := filepath.Join(loader.Home(), "audit.log")
+			if logFile != "" {
+				auditPath = filepath.Join(filepath.Dir(logFile), "audit.log")
+			}
+			var auditErr error
+			auditLog, auditErr = security.NewAuditLogger(auditPath)
+			if auditErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize audit logging: %v\n", auditErr)
+			} else {
+				defer auditLog.Close()
+			}
+		}
+		selectedCluster := clusterName
+		if selectedCluster == "" {
+			selectedCluster = global.DefaultCluster
+		}
+		if selectedCluster == "" {
+			selectedCluster = "default"
+		}
+
+		provider, modelName, err := llm.NewProvider(global.Models, global.DefaultModel)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+		}
+		if provider != nil {
+			provider = llm.NewRetryProvider(provider, llm.DefaultRetryConfig())
+		}
+		visionModel := strings.TrimSpace(global.Vision.Model)
+		if visionModel == "" {
+			visionModel = global.DefaultModel
+		}
+		visionProvider, _, visionErr := llm.NewVisionProvider(global.Models, visionModel)
+		visionError := ""
+		if visionErr != nil {
+			visionError = visionErr.Error()
+		} else if chatProvider, ok := visionProvider.(llm.Provider); ok {
+			if retryProvider, ok := llm.NewRetryProvider(chatProvider, llm.DefaultRetryConfig()).(llm.VisionProvider); ok {
+				visionProvider = retryProvider
+			}
+		}
+
+		var clients map[string]*mcp.Client
+		var agentTools []llm.ToolDef
+		var cluster *cfgloader.Cluster
+		if selectedCluster != "" {
+			var err error
+			cluster, err = loader.LoadCluster(selectedCluster)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster %s: %v\n", selectedCluster, err)
+			} else {
+				clients = make(map[string]*mcp.Client)
+				for _, node := range cluster.Nodes {
+					url := mcp.URL(node.Agent.Host, node.Agent.Port, node.Agent.TLS)
+					clients[node.Name] = mcp.NewClient(mcp.Config{
+						BaseURL: url,
+						Token:   node.Agent.Token,
+					})
+				}
+				for _, client := range clients {
+					tools, err := client.ListTools(cmd.Context())
+					if err == nil {
+						for _, t := range tools {
+							agentTools = append(agentTools, llm.ToolDef(t))
+						}
+					}
+					break
+				}
+			}
+		}
+
+		var nodeInfos []tui.NodeInfo
+		nodeWhitelists := make(map[string][]string)
+		if cluster != nil {
+			for _, node := range cluster.Nodes {
+				nodeInfos = append(nodeInfos, tui.NodeInfo{
+					Name:             node.Name,
+					Host:             node.Agent.Host,
+					CommandWhitelist: node.CommandWhitelist,
+				})
+				nodeWhitelists[node.Name] = node.CommandWhitelist
+			}
+		}
+
+		reviewer := security.NewReviewer(security.ReviewerConfig{
+			NodeWhitelists:     nodeWhitelists,
+			Blacklist:          global.Security.CommandBlacklist,
+			LocalFileWhitelist: global.Security.LocalFileWhitelist,
+			Provider:           provider,
+			ModelName:          modelName,
+		})
+		workspaceRoot, err := os.Getwd()
+		if err != nil {
+			workspaceRoot = "."
+		}
+
+		memDir := filepath.Join(loader.Home(), "memory")
+		memStore, err := memory.Open(memDir)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not open memory store: %v\n", err)
+		}
+		memory.EnsureMemoryDir(filepath.Join(loader.Home(), "memory", "memory"))
+
+		conv := conversation.New(selectedCluster, nil, modelName)
+		model := tui.NewModel(tui.ModelConfig{
+			Cluster:            selectedCluster,
+			Model:              modelName,
+			UILanguage:         global.UILanguage,
+			InitialSessionID:   initialSessionID,
+			Version:            version,
+			Provider:           provider,
+			VisionProvider:     visionProvider,
+			VisionError:        visionError,
+			Vision:             global.Vision,
+			Conv:               conv,
+			Clients:            clients,
+			Tools:              agentTools,
+			Nodes:              nodeInfos,
+			Reviewer:           reviewer,
+			AuditLogger:        auditLog,
+			ConfigHome:         loader.Home(),
+			MemoryStore:        memStore,
+			Subagents:          global.Subagents,
+			LocalWorkspaceRoot: workspaceRoot,
+		})
+		finalModel, err := runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
+		if err != nil {
+			return err
+		}
+		printResumeHint(cmd.OutOrStdout(), finalModel)
+		return nil
+	}
+
 	tuiCmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Start the interactive TUI",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			loader := cfgloader.NewLoader(home)
-			global, err := loader.LoadGlobal()
-			if err != nil {
-				return err
-			}
-			logFile := global.Logging.File
-			if strings.HasPrefix(logFile, "~/") {
-				if userHome, err := os.UserHomeDir(); err == nil {
-					logFile = filepath.Join(userHome, strings.TrimPrefix(logFile, "~/"))
-				}
-			}
-			if err := logging.Setup(logging.Config{Level: global.Logging.Level, File: logFile}); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize logging: %v\n", err)
-			} else {
-				defer logging.Close()
-			}
-
-			var auditLog *security.AuditLogger
-			if global.Logging.Audit {
-				auditPath := filepath.Join(loader.Home(), "audit.log")
-				if logFile != "" {
-					auditPath = filepath.Join(filepath.Dir(logFile), "audit.log")
-				}
-				var auditErr error
-				auditLog, auditErr = security.NewAuditLogger(auditPath)
-				if auditErr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize audit logging: %v\n", auditErr)
-				} else {
-					defer auditLog.Close()
-				}
-			}
-			selectedCluster := clusterName
-			if selectedCluster == "" {
-				selectedCluster = global.DefaultCluster
-			}
-			if selectedCluster == "" {
-				selectedCluster = "default"
-			}
-
-			provider, modelName, err := llm.NewProvider(global.Models, global.DefaultModel)
-			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
-			}
-			if provider != nil {
-				provider = llm.NewRetryProvider(provider, llm.DefaultRetryConfig())
-			}
-
-			var clients map[string]*mcp.Client
-			var agentTools []llm.ToolDef
-			var cluster *cfgloader.Cluster
-			if selectedCluster != "" {
-				var err error
-				cluster, err = loader.LoadCluster(selectedCluster)
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster %s: %v\n", selectedCluster, err)
-				} else {
-					clients = make(map[string]*mcp.Client)
-					for _, node := range cluster.Nodes {
-						url := mcp.URL(node.Agent.Host, node.Agent.Port, node.Agent.TLS)
-						clients[node.Name] = mcp.NewClient(mcp.Config{
-							BaseURL: url,
-							Token:   node.Agent.Token,
-						})
-					}
-					for _, client := range clients {
-						tools, err := client.ListTools(cmd.Context())
-						if err == nil {
-							for _, t := range tools {
-								agentTools = append(agentTools, llm.ToolDef(t))
-							}
-						}
-						break
-					}
-				}
-			}
-
-			var nodeInfos []tui.NodeInfo
-			nodeWhitelists := make(map[string][]string)
-			if cluster != nil {
-				for _, node := range cluster.Nodes {
-					nodeInfos = append(nodeInfos, tui.NodeInfo{
-						Name:             node.Name,
-						Host:             node.Agent.Host,
-						CommandWhitelist: node.CommandWhitelist,
-					})
-					nodeWhitelists[node.Name] = node.CommandWhitelist
-				}
-			}
-
-			reviewer := security.NewReviewer(security.ReviewerConfig{
-				NodeWhitelists:     nodeWhitelists,
-				Blacklist:          global.Security.CommandBlacklist,
-				LocalFileWhitelist: global.Security.LocalFileWhitelist,
-				Provider:           provider,
-				ModelName:          modelName,
-			})
-			workspaceRoot, err := os.Getwd()
-			if err != nil {
-				workspaceRoot = "."
-			}
-
-			memDir := filepath.Join(loader.Home(), "memory")
-			memStore, err := memory.Open(memDir)
-			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not open memory store: %v\n", err)
-			}
-			memory.EnsureMemoryDir(filepath.Join(loader.Home(), "memory", "memory"))
-
-			conv := conversation.New(selectedCluster, nil, modelName)
-			model := tui.NewModel(tui.ModelConfig{
-				Cluster:            selectedCluster,
-				Model:              modelName,
-				Version:            version,
-				Provider:           provider,
-				Conv:               conv,
-				Clients:            clients,
-				Tools:              agentTools,
-				Nodes:              nodeInfos,
-				Reviewer:           reviewer,
-				AuditLogger:        auditLog,
-				ConfigHome:         loader.Home(),
-				MemoryStore:        memStore,
-				Subagents:          global.Subagents,
-				LocalWorkspaceRoot: workspaceRoot,
-			})
-			return runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
+			return runTUI(cmd, "")
 		},
 	}
 
-	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
+	resumeCmd := &cobra.Command{
+		Use:   "resume <id>",
+		Short: "Resume a saved TUI session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTUI(cmd, args[0])
+		},
+	}
+
+	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, resumeCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
 }
 

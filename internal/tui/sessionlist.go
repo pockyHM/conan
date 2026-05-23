@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 type SessionInfo struct {
@@ -19,10 +20,15 @@ type sessionList struct {
 	sessions []SessionInfo
 	cursor   int
 	selected *SessionInfo
+	lang     uiLanguage
 }
 
-func newSessionList(sessions []SessionInfo) sessionList {
-	return sessionList{sessions: sessions}
+func newSessionList(sessions []SessionInfo, lang ...uiLanguage) sessionList {
+	language := uiLanguageEnglish
+	if len(lang) > 0 {
+		language = lang[0]
+	}
+	return sessionList{sessions: sessions, lang: language}
 }
 
 func (s sessionList) Selected() *SessionInfo {
@@ -52,12 +58,24 @@ func (s sessionList) Update(msg tea.Msg) (sessionList, tea.Cmd) {
 	return s, nil
 }
 
-func (s sessionList) View() string {
+func (s sessionList) View(width ...int) string {
+	outerWidth := 0
+	if len(width) > 0 {
+		outerWidth = width[0]
+	}
+	contentWidth := outerWidth - 6
+	if contentWidth < 0 {
+		contentWidth = 0
+	}
+	style := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1, 2)
+	if contentWidth > 0 {
+		style = style.Width(contentWidth)
+	}
+
 	if len(s.sessions) == 0 {
-		return lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			Padding(1, 2).
-			Render("No previous sessions found.")
+		return style.Render(truncateDisplay(s.lang.tr("No previous sessions found.", "没有历史会话。"), contentWidth))
 	}
 
 	var lines []string
@@ -66,18 +84,19 @@ func (s sessionList) View() string {
 		if i == s.cursor {
 			cursor = "▸ "
 		}
-		firstLine := fmt.Sprintf("%s%s  %-20s  %s", cursor, sess.ID, sess.CreatedAt, sess.Cluster)
-		summary := sess.Summary
-		if len(summary) > 60 {
-			summary = summary[:57] + "..."
-		}
-		secondLine := fmt.Sprintf("%s%s", strings.Repeat(" ", len(cursor)), summary)
-		lines = append(lines, firstLine+"\n"+secondLine)
+		line := fmt.Sprintf("%s%-18s  %-16s  %-12s  %s", cursor, sess.ID, sess.CreatedAt, sess.Cluster, sess.Summary)
+		lines = append(lines, truncateDisplay(line, contentWidth))
 	}
 
-	panel := strings.Join(lines, "\n\n")
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(1, 2).
-		Render(fmt.Sprintf("Historical Sessions\n\n%s\n\n↑↓ Move  Enter Resume  Esc Cancel", panel))
+	panel := strings.Join(lines, "\n")
+	title := truncateDisplay(s.lang.tr("Historical Sessions", "历史会话"), contentWidth)
+	help := truncateDisplay(s.lang.tr("↑↓ Move  Enter Resume  Esc Cancel", "↑↓ 移动  Enter 恢复  Esc 取消"), contentWidth)
+	return style.Render(fmt.Sprintf("%s\n\n%s\n\n%s", title, panel, help))
+}
+
+func truncateDisplay(s string, width int) string {
+	if width <= 0 || runewidth.StringWidth(s) <= width {
+		return s
+	}
+	return runewidth.Truncate(s, width, "...")
 }

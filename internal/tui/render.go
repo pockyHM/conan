@@ -95,32 +95,32 @@ func renderAssistantMsg(content string) string {
 	return renderMarkdown(content)
 }
 
-func renderThinkingMsg(frame int, elapsed time.Duration) string {
+func renderThinkingMsg(frame int, elapsed time.Duration, lang uiLanguage) string {
 	if len(thinkingFrames) == 0 {
-		return thinkingStyle.Render("◦ Thinking... " + renderThinkingMeta(elapsed))
+		return thinkingStyle.Render("◦ " + lang.tr("Thinking...", "思考中...") + " " + renderThinkingMeta(elapsed, lang))
 	}
 	icon := thinkingFrames[frame%len(thinkingFrames)]
-	return thinkingStyle.Render(icon + " Thinking... " + renderThinkingMeta(elapsed))
+	return thinkingStyle.Render(icon + " " + lang.tr("Thinking...", "思考中...") + " " + renderThinkingMeta(elapsed, lang))
 }
 
-func renderThinkingMeta(elapsed time.Duration) string {
+func renderThinkingMeta(elapsed time.Duration, lang uiLanguage) string {
 	label := formatElapsed(elapsed)
 	if label == "" {
-		return "Esc to interrupt"
+		return lang.tr("Esc to interrupt", "Esc 中断")
 	}
-	return label + "  Esc to interrupt"
+	return label + "  " + lang.tr("Esc to interrupt", "Esc 中断")
 }
 
 func renderStreamingMsg(content string) string {
 	return renderMarkdown(content) + "▌"
 }
 
-func renderReasoningMsg(content string) string {
+func renderReasoningMsg(content string, lang uiLanguage) string {
 	line := lastNonEmptyLine(content)
 	if line == "" {
 		line = strings.TrimSpace(content)
 	}
-	return reasoningStyle.Render("◦ Thinking: " + line)
+	return reasoningStyle.Render("◦ " + lang.tr("Thinking:", "思考:") + " " + line)
 }
 
 func lastNonEmptyLine(content string) string {
@@ -134,23 +134,45 @@ func lastNonEmptyLine(content string) string {
 	return ""
 }
 
-func renderElapsedFooter(elapsed time.Duration) string {
+func renderElapsedFooter(elapsed time.Duration, lang uiLanguage) string {
 	label := formatElapsed(elapsed)
 	if label == "" {
 		return ""
 	}
-	return statusStyle.Render("✱ Took " + label)
+	return statusStyle.Render("✱ " + lang.tr("Took ", "耗时 ") + label)
 }
 
-func renderInputBox(input string, width int) string {
+func renderInputBox(input string, width int, lang uiLanguage) string {
 	style := inputBoxStyle
 	if width > 0 {
 		style = style.Width(max(width-2, 1))
 	}
-	return style.Render(inputPromptStyle.Render("❯ ") + input + "█")
+	return style.Render(inputPromptStyle.Render("❯ ") + compactInputForDisplay(input, lang) + "█")
 }
 
-func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map[string]bool) string {
+func compactInputForDisplay(input string, lang uiLanguage) string {
+	if !strings.ContainsAny(input, "\r\n") {
+		return input
+	}
+	lines := multilineInputLineCount(input)
+	label := lang.tr("lines", "行")
+	if lines == 1 {
+		label = lang.tr("line", "行")
+	}
+	return fmt.Sprintf(lang.tr("Pasted %d %s", "已粘贴 %d %s"), lines, label)
+}
+
+func multilineInputLineCount(input string) int {
+	normalized := strings.ReplaceAll(input, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	normalized = strings.TrimRight(normalized, "\n")
+	if normalized == "" {
+		return 1
+	}
+	return strings.Count(normalized, "\n") + 1
+}
+
+func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map[string]bool, lang uiLanguage) string {
 	const maxNodeRows = 5
 	wordmark := strings.Join([]string{
 		" ██████╗ ██████╗ ███╗   ██╗ █████╗ ███╗   ██╗",
@@ -177,32 +199,32 @@ func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map
 	var b strings.Builder
 	b.WriteString(inputPromptStyle.Render(wordmark))
 	b.WriteString("\n\n")
-	b.WriteString(fmt.Sprintf("Cluster   %s\n", cluster))
-	b.WriteString(fmt.Sprintf("Model     %s\n", model))
-	b.WriteString(fmt.Sprintf("Nodes     %d/%d selected, %d online\n", selectedCount, len(nodes), onlineCount))
+	b.WriteString(fmt.Sprintf("%-9s %s\n", lang.tr("Cluster", "集群"), cluster))
+	b.WriteString(fmt.Sprintf("%-9s %s\n", lang.tr("Model", "模型"), model))
+	b.WriteString(fmt.Sprintf("%-9s %s\n", lang.tr("Nodes", "节点"), fmt.Sprintf(lang.tr("%d/%d selected, %d online", "已选 %d/%d，在线 %d"), selectedCount, len(nodes), onlineCount)))
 
 	nodeLimit := min(len(nodes), maxNodeRows)
 	for i := 0; i < nodeLimit; i++ {
 		node := nodes[i]
 		icon := toolSuccess.Render("●")
-		status := "Online"
+		status := lang.tr("Online", "在线")
 		if !node.Online {
 			icon = statusStyle.Render("○")
-			status = "Offline"
+			status = lang.tr("Offline", "离线")
 		}
-		selection := "unselected"
+		selection := lang.tr("unselected", "未选择")
 		if selected[node.Name] {
-			selection = "selected"
+			selection = lang.tr("selected", "已选择")
 		}
 		b.WriteString(fmt.Sprintf("%s %s  %s  %-7s  %s\n", icon, node.Name, node.Host, status, selection))
 	}
 	if remaining := len(nodes) - nodeLimit; remaining > 0 {
-		b.WriteString(statusStyle.Render(fmt.Sprintf("... %d more node(s)", remaining)))
+		b.WriteString(statusStyle.Render(fmt.Sprintf(lang.tr("... %d more node(s)", "... 还有 %d 个节点"), remaining)))
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(statusStyle.Render("Type a message or /help"))
+	b.WriteString(statusStyle.Render(lang.tr("Type a message or /help", "输入消息或 /help")))
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -219,23 +241,23 @@ func formatElapsed(elapsed time.Duration) string {
 	return fmt.Sprintf("%.0fs", elapsed.Seconds())
 }
 
-func renderToolHeader(name string, nodeCount int) string {
+func renderToolHeader(name string, nodeCount int, lang uiLanguage) string {
 	if nodeCount > 1 {
-		return toolStyle.Render(fmt.Sprintf("⏚ %s on %d node(s)", name, nodeCount))
+		return toolStyle.Render(fmt.Sprintf(lang.tr("⏚ %s on %d node(s)", "⏚ %s 在 %d 个节点上"), name, nodeCount))
 	}
 	return toolStyle.Render(fmt.Sprintf("⏚ %s", name))
 }
 
-func renderToolNode(node string, success bool, output string, expanded bool) string {
+func renderToolNode(node string, success bool, output string, expanded bool, lang uiLanguage) string {
 	icon := toolSuccess.Render("✓")
 	if !success {
 		icon = toolFailure.Render("✗")
 	}
-	output = renderToolOutput(output, expanded)
+	output = renderToolOutput(output, expanded, lang)
 	return fmt.Sprintf("  %s %s  %s", icon, toolStyle.Render(node), output)
 }
 
-func renderToolOutput(output string, expanded bool) string {
+func renderToolOutput(output string, expanded bool, lang uiLanguage) string {
 	lines := strings.Split(formatToolOutputForDisplay(output), "\n")
 	if len(lines) == 1 && lines[0] == "" {
 		return ""
@@ -245,7 +267,7 @@ func renderToolOutput(output string, expanded bool) string {
 	}
 	preview := strings.Join(lines[:toolOutputPreviewLines], "\n")
 	remaining := len(lines) - toolOutputPreviewLines
-	return toolStyle.Render(preview) + "\n" + statusStyle.Render(fmt.Sprintf("… %d more line(s), press Ctrl+O to expand", remaining))
+	return toolStyle.Render(preview) + "\n" + statusStyle.Render(fmt.Sprintf(lang.tr("... %d more line(s), press Ctrl+O to expand", "... 还有 %d 行，按 Ctrl+O 展开"), remaining))
 }
 
 func formatToolOutputForDisplay(output string) string {
@@ -283,9 +305,9 @@ func trimEmptyEdges(lines []string) []string {
 	return lines[start:end]
 }
 
-func renderHeader(cluster, model string, selectedNodes, totalNodes int) string {
+func renderHeader(cluster, model string, selectedNodes, totalNodes int, lang uiLanguage) string {
 	return headerKeyStyle.Render("Conan") + headerSepStyle.Render(" │ ") +
 		headerValStyle.Render(cluster) + headerSepStyle.Render(" │ ") +
 		headerValStyle.Render(model) + headerSepStyle.Render(" │ ") +
-		fmt.Sprintf("%d/%d nodes", selectedNodes, totalNodes)
+		fmt.Sprintf(lang.tr("%d/%d nodes", "%d/%d 节点"), selectedNodes, totalNodes)
 }

@@ -78,8 +78,25 @@ func TestLoadGlobalMissingFileUsesDefaults(t *testing.T) {
 	if cfg.DefaultModel != "" {
 		t.Fatalf("DefaultModel = %q", cfg.DefaultModel)
 	}
+	if cfg.UILanguage != "en-US" {
+		t.Fatalf("UILanguage = %q, want en-US", cfg.UILanguage)
+	}
 	if cfg.Security.RiskAssessmentModel != "claude-sonnet" {
 		t.Fatalf("RiskAssessmentModel = %q", cfg.Security.RiskAssessmentModel)
+	}
+}
+
+func TestLoadGlobalUILanguage(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "config.yaml"), `ui_language: zh-CN
+`)
+
+	cfg, err := NewLoader(home).LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.UILanguage != "zh-CN" {
+		t.Fatalf("UILanguage = %q, want zh-CN", cfg.UILanguage)
 	}
 }
 

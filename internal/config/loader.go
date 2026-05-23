@@ -223,6 +223,9 @@ func (l *Loader) ListClusters() ([]string, error) {
 }
 
 func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
+	if cfg.UILanguage == "" {
+		cfg.UILanguage = "en-US"
+	}
 	if cfg.Security.RiskAssessmentModel == "" {
 		cfg.Security.RiskAssessmentModel = "claude-sonnet"
 	}
@@ -243,6 +246,12 @@ func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
 	}
 	if cfg.Subagents.TimeoutSeconds == 0 {
 		cfg.Subagents.TimeoutSeconds = 120
+	}
+	if cfg.Vision.MaxImages == 0 {
+		cfg.Vision.MaxImages = 10
+	}
+	if cfg.Vision.MaxSummaryCharsPerImage == 0 {
+		cfg.Vision.MaxSummaryCharsPerImage = 1200
 	}
 }
 

@@ -14,8 +14,11 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/logging"
+	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/pkg/mcpproto"
+	"github.com/pockyHM/conan/pkg/models"
 )
 
 func executeCommand(args ...string) (string, string, error) {
@@ -124,6 +127,16 @@ func TestTUICommandRegistered(t *testing.T) {
 	}
 }
 
+func TestResumeCommandRegistered(t *testing.T) {
+	stdout, _, err := executeCommand("resume", "--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(stdout, "resume <id>") {
+		t.Fatalf("help output = %q", stdout)
+	}
+}
+
 func writeSingleNodeHome(t *testing.T, serverURL string) string {
 	t.Helper()
 	home := t.TempDir()
@@ -148,6 +161,97 @@ func writeSingleNodeHome(t *testing.T, serverURL string) string {
 	return home
 }
 
+func TestResumeCommandLoadsSessionInTUI(t *testing.T) {
+	oldRun := runTeaProgram
+	defer func() { runTeaProgram = oldRun }()
+	defer logging.Close()
+
+	home := t.TempDir()
+	store, err := memory.Open(filepath.Join(home, "memory"))
+	if err != nil {
+		t.Fatalf("open memory store: %v", err)
+	}
+	defer store.Close()
+
+	saved := []models.Message{{ID: "m1", ConversationID: "conv-resume", Role: conversation.RoleUser, Content: "restored compact context"}}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	if err := store.SaveConversation(memory.ConversationRecord{
+		ID:       "conv-resume",
+		Cluster:  "prod",
+		Model:    "model",
+		Messages: string(data),
+	}); err != nil {
+		t.Fatalf("save conversation: %v", err)
+	}
+
+	called := false
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
+		called = true
+		cmd := model.Init()
+		if cmd == nil {
+			t.Fatal("Init() returned nil, want initial resume load command")
+		}
+		model = applyTeaCommandForTest(t, model, cmd)
+		if !strings.Contains(model.View(), "restored compact context") {
+			t.Fatalf("resumed view missing saved message:\n%s", model.View())
+		}
+		return model, nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--home", home, "resume", "conv-resume"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !called {
+		t.Fatal("resume command did not start TUI")
+	}
+}
+
+func TestTUICommandPrintsResumeHintAfterExit(t *testing.T) {
+	oldRun := runTeaProgram
+	defer func() { runTeaProgram = oldRun }()
+	defer logging.Close()
+
+	home := t.TempDir()
+	var output bytes.Buffer
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
+		return model, nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetOut(&output)
+	cmd.SetArgs([]string{"--home", home, "tui"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("tui: %v", err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, "Session saved: ") || !strings.Contains(got, "Resume with: conan resume ") {
+		t.Fatalf("output missing resume hint:\n%s", got)
+	}
+}
+
+func applyTeaCommandForTest(t *testing.T, model tea.Model, cmd tea.Cmd) tea.Model {
+	t.Helper()
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			next, _ := model.Update(c())
+			model = next
+		}
+		return model
+	}
+	next, _ := model.Update(msg)
+	return next
+}
+
 func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
@@ -156,7 +260,7 @@ func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	input := strings.NewReader("")
 	var output bytes.Buffer
 	called := false
-	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
 		called = true
 		if in != input {
 			t.Fatalf("input stream = %T, want configured input", in)
@@ -164,7 +268,7 @@ func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 		if out != &output {
 			t.Fatalf("output stream = %T, want configured output", out)
 		}
-		return nil
+		return model, nil
 	}
 
 	cmd := newRootCommand()
@@ -179,7 +283,7 @@ func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	}
 }
 
-func TestTUIProgramOptionsDoNotCaptureMouse(t *testing.T) {
+func TestTUIProgramOptionsEnableMouseCellMotion(t *testing.T) {
 	input := strings.NewReader("")
 	var output bytes.Buffer
 	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
@@ -189,8 +293,11 @@ func TestTUIProgramOptionsDoNotCaptureMouse(t *testing.T) {
 		withMouseCellMotion = int64(1 << 1)
 		withMouseAllMotion  = int64(1 << 2)
 	)
-	if startupOptions&withMouseCellMotion != 0 || startupOptions&withMouseAllMotion != 0 {
-		t.Fatal("tui should not enable mouse capture; terminal text selection must remain available")
+	if startupOptions&withMouseCellMotion == 0 {
+		t.Fatal("tui should enable mouse cell motion so wheel events are captured")
+	}
+	if startupOptions&withMouseAllMotion != 0 {
+		t.Fatal("tui should not enable full mouse motion")
 	}
 }
 
@@ -204,9 +311,9 @@ func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
 		logging.Write("tui logging initialized")
-		return nil
+		return model, nil
 	}
 
 	cmd := newRootCommand()
@@ -234,8 +341,8 @@ func TestTUICommandInitializesAuditLogger(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
-		return nil
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
+		return model, nil
 	}
 
 	cmd := newRootCommand()
@@ -265,9 +372,9 @@ func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
 		logging.Write("discarded tui log")
-		return nil
+		return model, nil
 	}
 
 	cmd := newRootCommand()
@@ -296,6 +403,11 @@ func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 
 	version = "1.2.3"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/rpc" {
 			t.Fatalf("request = %s %s, want POST /rpc", r.Method, r.URL.Path)
 		}
@@ -334,7 +446,7 @@ func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 		t.Fatalf("write nodes: %v", err)
 	}
 
-	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) error {
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
 		cmd := model.Init()
 		if cmd == nil {
 			t.Fatal("Init() returned nil, want version check command")
@@ -354,7 +466,7 @@ func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 		if !strings.Contains(view, "Version warning") || !strings.Contains(view, "node-a: 1.2.2 (expected 1.2.3)") {
 			t.Fatalf("view missing version warning:\n%s", view)
 		}
-		return nil
+		return model, nil
 	}
 
 	cmd := newRootCommand()

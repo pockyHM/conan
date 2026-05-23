@@ -32,12 +32,12 @@ func TestMetaToolDescriptionsPreferSearchBeforeExec(t *testing.T) {
 			t.Fatalf("call_tool description missing %q: %s", want, descriptions[metaToolCallTool])
 		}
 	}
-	for _, want := range []string{"upload", "managed file transfer", "do not use tool_search", "scp"} {
+	for _, want := range []string{"upload", "managed file transfer", "do not use tool_search", "scp", "text file", "binary and image"} {
 		if !strings.Contains(descriptions[metaToolFilePut], want) {
 			t.Fatalf("file_put description missing %q: %s", want, descriptions[metaToolFilePut])
 		}
 	}
-	for _, want := range []string{"download", "managed file transfer", "do not use tool_search", "scp"} {
+	for _, want := range []string{"download", "managed file transfer", "do not use tool_search", "scp", "text file", "binary and image"} {
 		if !strings.Contains(descriptions[metaToolFileGet], want) {
 			t.Fatalf("file_get description missing %q: %s", want, descriptions[metaToolFileGet])
 		}

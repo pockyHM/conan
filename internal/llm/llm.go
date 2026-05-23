@@ -20,6 +20,11 @@ type Provider interface {
 	ChatStream(ctx context.Context, req *ChatRequest) (<-chan ChatEvent, error)
 }
 
+type VisionProvider interface {
+	DescribeImages(ctx context.Context, req *VisionRequest) (*VisionResponse, error)
+	SupportsVision() bool
+}
+
 type httpError struct {
 	Status int
 	Body   string
@@ -44,6 +49,22 @@ type ChatResponse struct {
 	Message    models.Message
 	ToolCalls  []ToolCall
 	StopReason string
+}
+
+type VisionRequest struct {
+	Prompt    string
+	Images    []ImageInput
+	MaxTokens int
+}
+
+type ImageInput struct {
+	Name      string
+	MediaType string
+	Data      []byte
+}
+
+type VisionResponse struct {
+	Summary string
 }
 
 type ToolDef mcpproto.ToolDefinition
