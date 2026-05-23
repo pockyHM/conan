@@ -253,6 +253,18 @@ func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
 	if cfg.Vision.MaxSummaryCharsPerImage == 0 {
 		cfg.Vision.MaxSummaryCharsPerImage = 1200
 	}
+	if !cfg.Skills.Enabled {
+		cfg.Skills.Enabled = true
+	}
+	if cfg.Skills.IndexTokenBudget == 0 {
+		cfg.Skills.IndexTokenBudget = 800
+	}
+	if cfg.Skills.MaxSkillChars == 0 {
+		cfg.Skills.MaxSkillChars = 6000
+	}
+	if cfg.Skills.MaxVisibleSkills == 0 {
+		cfg.Skills.MaxVisibleSkills = 50
+	}
 }
 
 func applyAgentDeployDefaults(cfg *configschema.GlobalConfig, home string) {

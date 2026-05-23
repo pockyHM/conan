@@ -62,6 +62,7 @@ type GlobalConfig struct {
 	AgentDeploy    AgentDeployConfig `yaml:"agent_deploy"`
 	Subagents      SubagentConfig    `yaml:"subagents"`
 	Vision         VisionConfig      `yaml:"vision"`
+	Skills         SkillsConfig      `yaml:"skills"`
 }
 
 type ModelConfig struct {
@@ -114,6 +115,13 @@ type VisionConfig struct {
 	Model                   string `yaml:"model"`
 	MaxImages               int    `yaml:"max_images"`
 	MaxSummaryCharsPerImage int    `yaml:"max_summary_chars_per_image"`
+}
+
+type SkillsConfig struct {
+	Enabled          bool `yaml:"enabled"`
+	IndexTokenBudget int  `yaml:"index_token_budget"`
+	MaxSkillChars    int  `yaml:"max_skill_chars"`
+	MaxVisibleSkills int  `yaml:"max_visible_skills"`
 }
 
 // --- Cluster config ---

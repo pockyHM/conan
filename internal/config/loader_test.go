@@ -86,6 +86,29 @@ func TestLoadGlobalMissingFileUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadGlobalAppliesSkillsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	loader := NewLoader(dir)
+
+	cfg, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !cfg.Skills.Enabled {
+		t.Fatal("Skills.Enabled = false, want true")
+	}
+	if cfg.Skills.IndexTokenBudget != 800 {
+		t.Fatalf("IndexTokenBudget = %d, want 800", cfg.Skills.IndexTokenBudget)
+	}
+	if cfg.Skills.MaxSkillChars != 6000 {
+		t.Fatalf("MaxSkillChars = %d, want 6000", cfg.Skills.MaxSkillChars)
+	}
+	if cfg.Skills.MaxVisibleSkills != 50 {
+		t.Fatalf("MaxVisibleSkills = %d, want 50", cfg.Skills.MaxVisibleSkills)
+	}
+}
+
 func TestLoadGlobalUILanguage(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, "config.yaml"), `ui_language: zh-CN
