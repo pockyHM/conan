@@ -308,6 +308,41 @@ func TestModelSkillsDisabledDoesNotInjectSkillIndexOrTool(t *testing.T) {
 	}
 }
 
+func TestModelSkillsDisabledWithZeroLimitsDoesNotExposeTool(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "skill body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false},
+	})
+
+	if strings.Contains(model.buildSystemPromptWithMemory(), "Available skills:") {
+		t.Fatal("system prompt should not include skills when disabled")
+	}
+	for _, tool := range model.availableToolDefs() {
+		if tool.Name == skills.ToolName {
+			t.Fatalf("skill_read tool should not be exposed when disabled: %#v", model.availableToolDefs())
+		}
+	}
+	msg := execCmd(t, model.dispatchTool(7, llm.ToolCall{
+		ID:        "skill-1",
+		Name:      skills.ToolName,
+		Arguments: json.RawMessage(`{"name":"k8s-debug","reason":"diagnose"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success || strings.Contains(result.Results[0].Output, "skill body") {
+		t.Fatalf("disabled skill_read result = %#v", result.Results)
+	}
+}
+
 func TestDispatchSkillRead(t *testing.T) {
 	model := NewModel(ModelConfig{
 		Cluster: "prod",

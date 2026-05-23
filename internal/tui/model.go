@@ -250,7 +250,7 @@ func NewModel(cfg ModelConfig) Model {
 }
 
 func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsConfig {
-	disabledExplicitly := !cfg.Enabled && (cfg.IndexTokenBudget != 0 || cfg.MaxSkillChars != 0 || cfg.MaxVisibleSkills != 0)
+	enabled := cfg.Enabled
 	if cfg.IndexTokenBudget == 0 {
 		cfg.IndexTokenBudget = 800
 	}
@@ -260,9 +260,7 @@ func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsCon
 	if cfg.MaxVisibleSkills == 0 {
 		cfg.MaxVisibleSkills = 50
 	}
-	if !disabledExplicitly {
-		cfg.Enabled = true
-	}
+	cfg.Enabled = enabled
 	return cfg
 }
 
