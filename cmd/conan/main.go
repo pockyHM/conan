@@ -501,6 +501,13 @@ func newRootCommand() *cobra.Command {
 			if selectedCluster == "" {
 				selectedCluster = clusterName
 			}
+			if selectedCluster == "" {
+				globalCfg, err := loader.LoadGlobal()
+				if err != nil {
+					return err
+				}
+				selectedCluster = globalCfg.DefaultCluster
+			}
 			var clusterReg skills.Registry
 			if selectedCluster != "" {
 				clusterReg, err = skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))

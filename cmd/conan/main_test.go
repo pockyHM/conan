@@ -129,6 +129,36 @@ func TestSkillsListEmpty(t *testing.T) {
 	}
 }
 
+func TestSkillsListUsesDefaultCluster(t *testing.T) {
+	home := t.TempDir()
+	clusterDir := filepath.Join(home, "clusters", "prod")
+	if err := os.MkdirAll(clusterDir, 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: prod\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	registry := `skills:
+  - name: k8s-debug
+    description: Diagnose Kubernetes failures.
+    source: github.com/acme/ops
+    ref: main
+    path: skills/k8s-debug
+    cache_path: skills/repos/github.com/acme/ops/main/skills/k8s-debug
+`
+	if err := os.WriteFile(filepath.Join(clusterDir, "skills.yaml"), []byte(registry), 0644); err != nil {
+		t.Fatalf("write skills: %v", err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "skills", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "cluster:prod") || !strings.Contains(stdout, "k8s-debug") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
 func TestSkillsInstallRejectsInvalidGitHubRepo(t *testing.T) {
 	home := t.TempDir()
 
