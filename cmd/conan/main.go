@@ -21,6 +21,7 @@ import (
 	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/internal/tui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -480,7 +481,96 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 
-	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, resumeCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
+	skillsCmd := &cobra.Command{Use: "skills", Short: "Skill commands"}
+	var skillsGlobal bool
+	var skillsCluster string
+	var skillsRef string
+	var skillsPath string
+
+	skillsListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List installed skills",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loader := cfgloader.NewLoader(home)
+			globalReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(loader.Home()))
+			if err != nil {
+				return err
+			}
+			selectedCluster := skillsCluster
+			if selectedCluster == "" {
+				selectedCluster = clusterName
+			}
+			var clusterReg skills.Registry
+			if selectedCluster != "" {
+				clusterReg, err = skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))
+				if err != nil {
+					return err
+				}
+			}
+			if len(globalReg.Skills) == 0 && len(clusterReg.Skills) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No skills installed")
+				return nil
+			}
+			for _, entry := range globalReg.Skills {
+				fmt.Fprintf(cmd.OutOrStdout(), "global\t%s\t%s\n", entry.Name, entry.Description)
+			}
+			for _, entry := range clusterReg.Skills {
+				fmt.Fprintf(cmd.OutOrStdout(), "cluster:%s\t%s\t%s\n", selectedCluster, entry.Name, entry.Description)
+			}
+			return nil
+		},
+	}
+
+	skillsInstallCmd := &cobra.Command{
+		Use:   "install <github-url>",
+		Short: "Install skills from a public GitHub repository",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope := skills.ScopeCluster
+			targetCluster := skillsCluster
+			if skillsGlobal {
+				scope = skills.ScopeGlobal
+			}
+			if scope == skills.ScopeCluster {
+				if targetCluster == "" {
+					targetCluster = clusterName
+				}
+				if targetCluster == "" {
+					globalCfg, err := cfgloader.NewLoader(home).LoadGlobal()
+					if err != nil {
+						return err
+					}
+					targetCluster = globalCfg.DefaultCluster
+				}
+				if targetCluster == "" {
+					return fmt.Errorf("--cluster is required when installing a cluster-scoped skill")
+				}
+			}
+			source, err := skills.NormalizeGitHubSource(args[0], skillsRef, skillsPath)
+			if err != nil {
+				return err
+			}
+			installer := skills.Installer{Home: cfgloader.NewLoader(home).Home(), MaxSkillFileBytes: 256 * 1024}
+			installed, err := installer.Install(cmd.Context(), skills.InstallRequest{Source: source, Scope: scope, Cluster: targetCluster})
+			if err != nil {
+				return err
+			}
+			for _, skill := range installed {
+				fmt.Fprintf(cmd.OutOrStdout(), "installed %s\n", skill.Name)
+			}
+			return nil
+		},
+	}
+	skillsInstallCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Install globally")
+	skillsInstallCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to install into or list from")
+	skillsInstallCmd.Flags().StringVar(&skillsRef, "ref", "main", "Git ref to install")
+	skillsInstallCmd.Flags().StringVar(&skillsPath, "path", "skills", "Repository skills path")
+	skillsListCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to list")
+
+	skillsCmd.AddCommand(skillsListCmd, skillsInstallCmd)
+
+	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, resumeCmd, skillsCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
 }
 

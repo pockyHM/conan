@@ -117,6 +117,30 @@ func TestFilesGetDownloadsAgentFileToLocalPath(t *testing.T) {
 	}
 }
 
+func TestSkillsListEmpty(t *testing.T) {
+	home := t.TempDir()
+
+	stdout, _, err := executeCommand("--home", home, "skills", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "No skills installed") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestSkillsInstallRejectsInvalidGitHubRepo(t *testing.T) {
+	home := t.TempDir()
+
+	_, _, err := executeCommand("--home", home, "skills", "install", "not-a-valid-source", "--global")
+	if err == nil {
+		t.Fatal("err = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "invalid GitHub repository") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestTUICommandRegistered(t *testing.T) {
 	stdout, _, err := executeCommand("tui", "--help")
 	if err != nil {
