@@ -2,6 +2,8 @@ package skills
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -92,30 +94,50 @@ func (i Installer) Install(ctx context.Context, req InstallRequest) ([]Skill, er
 	if req.Source.HostPath == "" || req.Source.CloneURL == "" {
 		return nil, fmt.Errorf("source is required")
 	}
+	hostPath, err := validateGitHubHostPath(req.Source.HostPath)
+	if err != nil {
+		return nil, err
+	}
+	if req.Source.CloneURL != "https://"+hostPath+".git" {
+		return nil, fmt.Errorf("invalid clone URL %q for %s", req.Source.CloneURL, hostPath)
+	}
+	skillRoot, err := cleanRelativePath(req.Source.Path)
+	if err != nil {
+		return nil, err
+	}
 
 	fetcher := i.Fetcher
 	if fetcher == nil {
 		fetcher = GitFetcher{}
 	}
 
-	cacheRel := filepath.Join("skills", "repos", filepath.FromSlash(req.Source.HostPath), sanitizeRef(req.Source.Ref))
+	cacheRel := filepath.Join("skills", "repos", filepath.FromSlash(hostPath), sanitizeRef(req.Source.Ref))
 	cacheAbs := filepath.Join(i.Home, cacheRel)
-	if err := os.RemoveAll(cacheAbs); err != nil {
+
+	tmpRoot := filepath.Join(i.Home, "skills", "tmp")
+	if err := os.MkdirAll(tmpRoot, 0755); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cacheAbs), 0755); err != nil {
+	tmpCheckout, err := os.MkdirTemp(tmpRoot, "install-*")
+	if err != nil {
 		return nil, err
 	}
-	if err := fetcher.Fetch(ctx, req.Source, cacheAbs); err != nil {
+	defer os.RemoveAll(tmpCheckout)
+
+	if err := fetcher.Fetch(ctx, req.Source, tmpCheckout); err != nil {
 		return nil, err
 	}
 
-	skills, err := discoverSkills(cacheAbs, req.Source.Path, i.MaxSkillFileBytes)
+	skills, err := discoverSkills(tmpCheckout, skillRoot, i.MaxSkillFileBytes)
 	if err != nil {
 		return nil, err
 	}
 	if len(skills) == 0 {
-		return nil, fmt.Errorf("no valid skills found under %s", req.Source.Path)
+		return nil, fmt.Errorf("no valid skills found under %s", skillRoot)
+	}
+
+	if err := replaceDir(cacheAbs, tmpCheckout); err != nil {
+		return nil, err
 	}
 
 	regPath := GlobalRegistryPath(i.Home)
@@ -135,7 +157,7 @@ func (i Installer) Install(ctx context.Context, req InstallRequest) ([]Skill, er
 		if req.Scope == ScopeCluster {
 			skills[idx].Cluster = req.Cluster
 		}
-		skills[idx].Source = req.Source.HostPath
+		skills[idx].Source = hostPath
 		skills[idx].Ref = req.Source.Ref
 		skills[idx].CachePath = cachePath
 		skills[idx].InstalledAt = now
@@ -146,7 +168,7 @@ func (i Installer) Install(ctx context.Context, req InstallRequest) ([]Skill, er
 			Version:     skills[idx].Version,
 			Tags:        append([]string(nil), skills[idx].Tags...),
 			MaxChars:    skills[idx].MaxChars,
-			Source:      req.Source.HostPath,
+			Source:      hostPath,
 			Ref:         req.Source.Ref,
 			Path:        filepath.ToSlash(skillDir),
 			CachePath:   cachePath,
@@ -205,14 +227,73 @@ func upsertEntry(entries []RegistryEntry, next RegistryEntry) []RegistryEntry {
 func sanitizeRef(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "main"
+		ref = "main"
 	}
-	ref = strings.ReplaceAll(ref, `\`, "_")
-	ref = strings.ReplaceAll(ref, "/", "_")
-	if ref == "." || ref == ".." || strings.Contains(ref, "..") {
-		return "_"
+	hash := sha1.Sum([]byte(ref))
+	suffix := hex.EncodeToString(hash[:])[:10]
+	prefix := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, ref)
+	prefix = strings.Trim(prefix, "._-")
+	if prefix == "" || prefix == "." || prefix == ".." || strings.Contains(prefix, "..") {
+		prefix = "ref"
 	}
-	return ref
+	if len(prefix) > 48 {
+		prefix = strings.TrimRight(prefix[:48], "._-")
+		if prefix == "" {
+			prefix = "ref"
+		}
+	}
+	return prefix + "-" + suffix
+}
+
+func validateGitHubHostPath(hostPath string) (string, error) {
+	normalized := strings.TrimSpace(hostPath)
+	parts := strings.Split(normalized, "/")
+	if len(parts) != 3 || parts[0] != "github.com" || !validGitHubSegment(parts[1]) || !validGitHubSegment(parts[2]) {
+		return "", fmt.Errorf("invalid GitHub repository %q; use normalized github.com/org/repo", hostPath)
+	}
+	if normalized != hostPath {
+		return "", fmt.Errorf("invalid GitHub repository %q; use normalized github.com/org/repo", hostPath)
+	}
+	return normalized, nil
+}
+
+func replaceDir(dst string, src string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	backup := ""
+	if _, err := os.Stat(dst); err == nil {
+		var tmpErr error
+		backup, tmpErr = os.MkdirTemp(filepath.Dir(dst), ".previous-*")
+		if tmpErr != nil {
+			return tmpErr
+		}
+		_ = os.Remove(backup)
+		if err := os.Rename(dst, backup); err != nil {
+			_ = os.RemoveAll(backup)
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if err := os.Rename(src, dst); err != nil {
+		if backup != "" {
+			_ = os.Rename(backup, dst)
+		}
+		return err
+	}
+	if backup != "" {
+		if err := os.RemoveAll(backup); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyDir(src string, dst string) error {
@@ -264,8 +345,16 @@ func copyDir(src string, dst string) error {
 }
 
 func validGitHubSegment(segment string) bool {
-	segment = strings.TrimSpace(segment)
-	return segment != "" && segment != "." && segment != ".." && !strings.Contains(segment, "/") && !strings.Contains(segment, `\`)
+	if segment == "" || strings.TrimSpace(segment) != segment || segment == "." || segment == ".." || strings.Contains(segment, "..") || strings.Contains(segment, "/") || strings.Contains(segment, `\`) {
+		return false
+	}
+	for _, r := range segment {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func cleanRelativePath(value string) (string, error) {
