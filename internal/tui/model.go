@@ -250,6 +250,7 @@ func NewModel(cfg ModelConfig) Model {
 }
 
 func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsConfig {
+	disabledExplicitly := !cfg.Enabled && (cfg.IndexTokenBudget != 0 || cfg.MaxSkillChars != 0 || cfg.MaxVisibleSkills != 0)
 	if cfg.IndexTokenBudget == 0 {
 		cfg.IndexTokenBudget = 800
 	}
@@ -259,7 +260,9 @@ func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsCon
 	if cfg.MaxVisibleSkills == 0 {
 		cfg.MaxVisibleSkills = 50
 	}
-	cfg.Enabled = true
+	if !disabledExplicitly {
+		cfg.Enabled = true
+	}
 	return cfg
 }
 
@@ -2405,8 +2408,12 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 func (m Model) dispatchSkillRead(streamID uint64, call llm.ToolCall) tea.Cmd {
 	visible := append([]skills.Skill(nil), m.skills...)
 	maxChars := m.skillsConfig.MaxSkillChars
+	enabled := m.skillsConfig.Enabled && len(visible) > 0
 	return func() tea.Msg {
-		output := skills.NewToolHandler(visible, maxChars).Handle(call.Arguments)
+		output := "skill_read error: skill_read not available"
+		if enabled {
+			output = skills.NewToolHandler(visible, maxChars).Handle(call.Arguments)
+		}
 		return multiToolResultMsg{
 			streamID: streamID,
 			Call:     call,

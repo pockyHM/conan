@@ -115,7 +115,15 @@ func (l *Loader) LoadGlobal() (*configschema.GlobalConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	skillsEnabledSet, err := yamlPathExists(data, "skills", "enabled")
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	skillsExplicitlyDisabled := skillsEnabledSet && !cfg.Skills.Enabled
 	applyGlobalDefaults(cfg)
+	if skillsExplicitlyDisabled {
+		cfg.Skills.Enabled = false
+	}
 	applyAgentDeployDefaults(cfg, l.home)
 	normalizeModelsForLoad(cfg.Models)
 	return cfg, nil
@@ -125,6 +133,35 @@ func normalizeModelsForSave(models []configschema.ModelConfig) {
 	for i := range models {
 		models[i].Endpoint = strings.TrimRight(models[i].Endpoint, "/")
 	}
+}
+
+func yamlPathExists(data []byte, path ...string) (bool, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false, err
+	}
+	if len(root.Content) == 0 {
+		return false, nil
+	}
+	node := root.Content[0]
+	for _, want := range path {
+		if node.Kind != yaml.MappingNode {
+			return false, nil
+		}
+		found := false
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value != want {
+				continue
+			}
+			node = node.Content[i+1]
+			found = true
+			break
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func preserveExistingModelAPIKeys(path string, models []configschema.ModelConfig) {

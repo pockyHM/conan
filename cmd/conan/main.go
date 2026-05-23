@@ -353,23 +353,25 @@ func newRootCommand() *cobra.Command {
 
 		var visibleSkills []skills.Skill
 		var skillWarnings []string
-		globalSkillReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(loader.Home()))
-		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load global skills: %v\n", err)
-		} else {
-			clusterSkillReg, err := skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))
+		if global.Skills.Enabled {
+			globalSkillReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(loader.Home()))
 			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster skills: %v\n", err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load global skills: %v\n", err)
 			} else {
-				visibleSkills, skillWarnings, err = skills.ResolveVisible(loader.Home(), selectedCluster, globalSkillReg, clusterSkillReg, skills.ResolveOptions{
-					MaxSkillFileBytes: 256 * 1024,
-					MaxVisibleSkills:  global.Skills.MaxVisibleSkills,
-					IndexCharBudget:   global.Skills.IndexTokenBudget,
-				})
+				clusterSkillReg, err := skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load skills: %v\n", err)
-					visibleSkills = nil
-					skillWarnings = nil
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster skills: %v\n", err)
+				} else {
+					visibleSkills, skillWarnings, err = skills.ResolveVisible(loader.Home(), selectedCluster, globalSkillReg, clusterSkillReg, skills.ResolveOptions{
+						MaxSkillFileBytes: 256 * 1024,
+						MaxVisibleSkills:  global.Skills.MaxVisibleSkills,
+						IndexCharBudget:   global.Skills.IndexTokenBudget,
+					})
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load skills: %v\n", err)
+						visibleSkills = nil
+						skillWarnings = nil
+					}
 				}
 			}
 		}

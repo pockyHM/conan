@@ -271,6 +271,43 @@ func TestModelInjectsSkillIndexAndTool(t *testing.T) {
 	}
 }
 
+func TestModelSkillsDisabledDoesNotInjectSkillIndexOrTool(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Model:    "test",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false, IndexTokenBudget: 800, MaxSkillChars: 6000, MaxVisibleSkills: 50},
+	})
+
+	next, cmd := model.submitMessage("pods are failing", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submit should start stream")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	if strings.Contains(provider.req.SystemPrompt, "[Skills]") || strings.Contains(provider.req.SystemPrompt, "Available skills:") {
+		t.Fatalf("system prompt should not include skills when disabled: %s", provider.req.SystemPrompt)
+	}
+	for _, tool := range provider.req.Tools {
+		if tool.Name == skills.ToolName {
+			t.Fatalf("skill_read tool should not be exposed when disabled: %#v", provider.req.Tools)
+		}
+	}
+}
+
 func TestDispatchSkillRead(t *testing.T) {
 	model := NewModel(ModelConfig{
 		Cluster: "prod",
@@ -297,6 +334,41 @@ func TestDispatchSkillRead(t *testing.T) {
 	}
 	if !strings.Contains(result.Results[0].Output, "skill body") {
 		t.Fatalf("output = %q", result.Results[0].Output)
+	}
+}
+
+func TestDispatchSkillReadDisabledReturnsUnavailableError(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Conv:    conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:    "k8s-debug",
+			Scope:   skills.ScopeCluster,
+			Cluster: "prod",
+			Body:    "skill body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false, MaxSkillChars: 6000},
+	})
+	msg := execCmd(t, model.dispatchTool(7, llm.ToolCall{
+		ID:        "skill-1",
+		Name:      skills.ToolName,
+		Arguments: json.RawMessage(`{"name":"k8s-debug","reason":"diagnose"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %#v, want one result", result.Results)
+	}
+	if result.Results[0].Success {
+		t.Fatalf("skill_read should fail when disabled: %#v", result.Results[0])
+	}
+	if strings.Contains(result.Results[0].Output, "skill body") {
+		t.Fatalf("disabled skill_read leaked body: %q", result.Results[0].Output)
+	}
+	if !strings.Contains(result.Results[0].Output, "not available") {
+		t.Fatalf("output = %q, want not available error", result.Results[0].Output)
 	}
 }
 
