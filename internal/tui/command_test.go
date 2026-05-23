@@ -40,6 +40,28 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 }
 
+func TestParseSkillsCommands(t *testing.T) {
+	tests := []struct {
+		input string
+		kind  CommandKind
+		arg   string
+	}{
+		{input: "/skills", kind: CommandSkills},
+		{input: "/skills install github.com/org/repo", kind: CommandSkills, arg: "install github.com/org/repo"},
+		{input: "/skill k8s-debug pods failing", kind: CommandSkill, arg: "k8s-debug pods failing"},
+	}
+
+	for _, tt := range tests {
+		cmd, ok := ParseSlashCommand(tt.input)
+		if !ok {
+			t.Fatalf("ParseSlashCommand(%q) ok=false", tt.input)
+		}
+		if cmd.Kind != tt.kind || cmd.Arg != tt.arg {
+			t.Fatalf("ParseSlashCommand(%q) = %#v", tt.input, cmd)
+		}
+	}
+}
+
 func TestParseSlashCommandRejectsNormalText(t *testing.T) {
 	if _, ok := ParseSlashCommand("hello"); ok {
 		t.Fatal("normal text should not parse as slash command")
