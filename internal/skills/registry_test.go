@@ -2,6 +2,7 @@ package skills
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,5 +36,24 @@ func TestLoadRegistryMissingFileReturnsEmpty(t *testing.T) {
 	}
 	if len(got.Skills) != 0 {
 		t.Fatalf("Skills = %#v, want empty", got.Skills)
+	}
+}
+
+func TestClusterRegistryPathSanitizesClusterSegment(t *testing.T) {
+	home := t.TempDir()
+	clustersRoot := filepath.Join(home, "clusters")
+
+	for _, cluster := range []string{"../escape", "..", "prod/us-east", `prod\west`, ""} {
+		got := ClusterRegistryPath(home, cluster)
+		rel, err := filepath.Rel(clustersRoot, got)
+		if err != nil {
+			t.Fatalf("Rel(%q, %q): %v", clustersRoot, got, err)
+		}
+		if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+			t.Fatalf("ClusterRegistryPath(%q) = %q, want path under %q", cluster, got, clustersRoot)
+		}
+		if filepath.Dir(filepath.Dir(got)) != clustersRoot {
+			t.Fatalf("ClusterRegistryPath(%q) = %q, want direct cluster segment under %q", cluster, got, clustersRoot)
+		}
 	}
 }

@@ -3,6 +3,7 @@ package skills
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,12 +19,15 @@ func ResolveVisible(home string, cluster string, global Registry, clusterReg Reg
 	var warnings []string
 	byName := make(map[string]Skill)
 	add := func(entry RegistryEntry, scope string) error {
-		path := filepath.Join(home, entry.CachePath, "SKILL.md")
-		data, err := os.ReadFile(path)
+		skillPath, cachePath, err := skillMarkdownPath(home, entry.CachePath)
+		if err != nil {
+			return fmt.Errorf("invalid cache path for skill %s: %w", entry.Name, err)
+		}
+		data, err := os.ReadFile(skillPath)
 		if err != nil {
 			return fmt.Errorf("read skill %s: %w", entry.Name, err)
 		}
-		skill, err := ParseSkillMarkdown(path, data, opts.MaxSkillFileBytes)
+		skill, err := ParseSkillMarkdown(skillPath, data, opts.MaxSkillFileBytes)
 		if err != nil {
 			return err
 		}
@@ -34,7 +38,7 @@ func ResolveVisible(home string, cluster string, global Registry, clusterReg Reg
 		}
 		skill.Source = entry.Source
 		skill.Ref = entry.Ref
-		skill.CachePath = entry.CachePath
+		skill.CachePath = cachePath
 		skill.InstalledAt = entry.InstalledAt
 		if existing, ok := byName[skill.Name]; ok && existing.Scope == scope {
 			warnings = append(warnings, fmt.Sprintf("duplicate skill %s in %s scope; newest install wins", skill.Name, scope))
@@ -72,25 +76,75 @@ func ResolveVisible(home string, cluster string, global Registry, clusterReg Reg
 	return result, warnings, nil
 }
 
+func skillMarkdownPath(home string, cachePath string) (string, string, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(cachePath), `\`, "/")
+	if normalized == "" || filepath.IsAbs(cachePath) || path.IsAbs(normalized) {
+		return "", "", fmt.Errorf("must be relative")
+	}
+	normalized = path.Clean(normalized)
+	if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") {
+		return "", "", fmt.Errorf("must not escape cache root")
+	}
+	if normalized != "skills/repos" && !strings.HasPrefix(normalized, "skills/repos/") {
+		return "", "", fmt.Errorf("must be under skills/repos")
+	}
+
+	cacheRoot := filepath.Join(home, "skills", "repos")
+	fullPath := filepath.Join(home, filepath.FromSlash(normalized), "SKILL.md")
+	rel, err := filepath.Rel(cacheRoot, filepath.Dir(fullPath))
+	if err != nil {
+		return "", "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("must not escape cache root")
+	}
+	return fullPath, normalized, nil
+}
+
 func BuildSkillIndex(skills []Skill, charBudget int) string {
 	if len(skills) == 0 {
 		return ""
 	}
-	var lines []string
-	lines = append(lines, "Available skills:")
+	header := "Available skills:"
+	guidance := "Call skill_read when one of these skills would materially improve the answer."
+	var skillLines []string
 	for _, skill := range skills {
 		scope := "global"
 		if skill.Scope == ScopeCluster {
 			scope = "cluster:" + skill.Cluster
 		}
-		lines = append(lines, fmt.Sprintf("- %s: %s. scope=%s", skill.Name, skill.Description, scope))
+		skillLines = append(skillLines, fmt.Sprintf("- %s: %s. scope=%s", skill.Name, skill.Description, scope))
 	}
-	lines = append(lines, "")
-	lines = append(lines, "Call skill_read when one of these skills would materially improve the answer.")
-	index := strings.Join(lines, "\n")
+	index := header + "\n" + strings.Join(skillLines, "\n") + "\n\n" + guidance
 	if charBudget > 0 && len([]rune(index)) > charBudget {
-		runes := []rune(index)
-		return string(runes[:charBudget]) + "\n[truncated]"
+		return truncateSkillIndex(index, charBudget, header, strings.Join(skillLines, "\n"), guidance)
 	}
 	return index
+}
+
+func truncateSkillIndex(index string, charBudget int, header string, skillsText string, guidance string) string {
+	if charBudget <= 0 {
+		return index
+	}
+	runes := []rune(index)
+	if len(runes) <= charBudget {
+		return index
+	}
+	marker := "\n[truncated]"
+	markerRunes := []rune(marker)
+	guidanceSuffix := "\n\n" + guidance
+	guidedMinimum := len([]rune(header)) + len(markerRunes) + len([]rune(guidanceSuffix))
+	if charBudget >= guidedMinimum {
+		skillsPrefix := "\n" + skillsText
+		prefixBudget := charBudget - len([]rune(header)) - len(markerRunes) - len([]rune(guidanceSuffix))
+		skillsRunes := []rune(skillsPrefix)
+		if prefixBudget > len(skillsRunes) {
+			prefixBudget = len(skillsRunes)
+		}
+		return header + string(skillsRunes[:prefixBudget]) + marker + guidanceSuffix
+	}
+	if charBudget <= len(markerRunes) {
+		return string(runes[:charBudget])
+	}
+	return string(runes[:charBudget-len(markerRunes)]) + marker
 }

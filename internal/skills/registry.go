@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -51,5 +52,15 @@ func GlobalRegistryPath(home string) string {
 }
 
 func ClusterRegistryPath(home string, cluster string) string {
-	return filepath.Join(home, "clusters", cluster, "skills.yaml")
+	return filepath.Join(home, "clusters", safeClusterSegment(cluster), "skills.yaml")
+}
+
+func safeClusterSegment(cluster string) string {
+	cluster = strings.TrimSpace(cluster)
+	cluster = strings.ReplaceAll(cluster, "/", "_")
+	cluster = strings.ReplaceAll(cluster, `\`, "_")
+	if cluster == "" || cluster == "." || cluster == ".." || strings.Contains(cluster, "..") {
+		return "_"
+	}
+	return cluster
 }
