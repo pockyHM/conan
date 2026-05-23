@@ -1648,7 +1648,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /exit /cluster [name] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]", "Conan: /help /clear /compact [重点] /exit /cluster [名称] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit]"),
+			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]", "Conan: /help /clear /compact [重点] /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit]"),
 		})
 		m.status = m.uiLanguage.tr("Help shown", "已显示帮助")
 	case CommandClear:
@@ -1665,6 +1665,15 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 			m.status = m.uiLanguage.tr("Cluster switched to ", "已切换集群: ") + cmd.Arg
 		} else {
 			m.status = m.uiLanguage.tr("Current cluster: ", "当前集群: ") + m.cluster
+		}
+	case CommandSkills:
+		m.status = m.uiLanguage.tr("No skills available for this cluster", "当前集群没有可用技能")
+	case CommandSkill:
+		if strings.TrimSpace(cmd.Arg) == "" {
+			m.status = m.uiLanguage.tr("Usage: /skill <name> [arguments]", "用法: /skill <名称> [参数]")
+		} else {
+			name := strings.Fields(cmd.Arg)[0]
+			m.status = m.uiLanguage.tr("Unknown skill: ", "未知技能: ") + name
 		}
 	case CommandLang:
 		if strings.TrimSpace(cmd.Arg) != "" {

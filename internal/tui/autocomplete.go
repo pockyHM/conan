@@ -202,6 +202,15 @@ func (a autocomplete) filtered() []commandInfo {
 			result = append(result, cmd)
 		}
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Name == a.prefix {
+			return true
+		}
+		if result[j].Name == a.prefix {
+			return false
+		}
+		return false
+	})
 	return result
 }
 

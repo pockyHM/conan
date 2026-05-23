@@ -71,6 +71,13 @@ func TestAutocompleteCompletion(t *testing.T) {
 	}
 }
 
+func TestAutocompleteExactPrefixWins(t *testing.T) {
+	a := newAutocomplete().update("/skill")
+	if got := a.completion(); got != "/skill " {
+		t.Fatalf("completion = %q, want /skill", got)
+	}
+}
+
 func TestAutocompleteRenders(t *testing.T) {
 	a := newAutocomplete().update("/")
 	view := a.View(0)
