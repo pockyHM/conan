@@ -46,6 +46,25 @@ Inspect pods, events, and logs before changing resources.
 	}
 }
 
+func TestParseSkillMarkdownAcceptsCRLFFrontmatter(t *testing.T) {
+	raw := []byte("---\r\nname: crlf-skill\r\ndescription: Parses CRLF frontmatter.\r\n---\r\n\r\n# CRLF Skill\r\n\r\nUse these instructions.\r\n")
+
+	skill, err := ParseSkillMarkdown("skills/crlf-skill/SKILL.md", raw, 6000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if skill.Name != "crlf-skill" {
+		t.Fatalf("Name = %q", skill.Name)
+	}
+	if skill.Description != "Parses CRLF frontmatter." {
+		t.Fatalf("Description = %q", skill.Description)
+	}
+	if !strings.Contains(skill.Body, "Use these instructions.") {
+		t.Fatalf("Body missing markdown: %q", skill.Body)
+	}
+}
+
 func TestParseSkillMarkdownRequiresNameAndDescription(t *testing.T) {
 	_, err := ParseSkillMarkdown("SKILL.md", []byte("---\nname: \n---\nbody"), 6000)
 	if err == nil {
@@ -53,6 +72,18 @@ func TestParseSkillMarkdownRequiresNameAndDescription(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "description") {
 		t.Fatalf("err = %v, want description validation", err)
+	}
+}
+
+func TestParseSkillMarkdownRejectsEmptyBody(t *testing.T) {
+	raw := []byte("---\nname: empty-body\ndescription: Rejects missing instructions.\n---\n\n \t\n")
+
+	_, err := ParseSkillMarkdown("SKILL.md", raw, 6000)
+	if err == nil {
+		t.Fatal("err = nil, want body validation error")
+	}
+	if !strings.Contains(err.Error(), "body") {
+		t.Fatalf("err = %v, want body validation", err)
 	}
 }
 

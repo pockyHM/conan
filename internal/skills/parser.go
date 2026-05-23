@@ -36,26 +36,38 @@ func ParseSkillMarkdown(path string, data []byte, maxFileBytes int) (Skill, erro
 	if fm.Name == "" {
 		return Skill{}, fmt.Errorf("%s missing required name", path)
 	}
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText == "" {
+		return Skill{}, fmt.Errorf("%s missing required body", path)
+	}
 	return Skill{
 		Name:        fm.Name,
 		Description: fm.Description,
 		Version:     strings.TrimSpace(fm.Version),
 		Tags:        append([]string(nil), fm.Tags...),
 		MaxChars:    fm.MaxChars,
-		Body:        strings.TrimSpace(string(body)),
+		Body:        bodyText,
 		Path:        path,
 	}, nil
 }
 
 func splitFrontmatter(data []byte) ([]byte, []byte, error) {
 	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	if !bytes.HasPrefix(trimmed, []byte("---\n")) {
+	prefix := []byte("---\n")
+	if bytes.HasPrefix(trimmed, []byte("---\r\n")) {
+		prefix = []byte("---\r\n")
+	} else if !bytes.HasPrefix(trimmed, prefix) {
 		return nil, nil, fmt.Errorf("missing YAML frontmatter")
 	}
-	rest := trimmed[len("---\n"):]
-	end := bytes.Index(rest, []byte("\n---\n"))
+	rest := trimmed[len(prefix):]
+	delimiter := []byte("\n---\n")
+	end := bytes.Index(rest, delimiter)
+	if end < 0 {
+		delimiter = []byte("\r\n---\r\n")
+		end = bytes.Index(rest, delimiter)
+	}
 	if end < 0 {
 		return nil, nil, fmt.Errorf("unterminated YAML frontmatter")
 	}
-	return rest[:end], rest[end+len("\n---\n"):], nil
+	return rest[:end], rest[end+len(delimiter):], nil
 }
