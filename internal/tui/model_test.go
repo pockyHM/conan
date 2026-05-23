@@ -27,6 +27,7 @@ import (
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/security"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
@@ -226,6 +227,76 @@ func TestSystemPromptPrefersSpecializedToolsBeforeExec(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestModelInjectsSkillIndexAndTool(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Model:    "test",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, IndexTokenBudget: 800, MaxSkillChars: 6000, MaxVisibleSkills: 50},
+	})
+
+	next, cmd := model.submitMessage("pods are failing", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submit should start stream")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	if !strings.Contains(provider.req.SystemPrompt, "Available skills:") {
+		t.Fatalf("system prompt missing skills index: %s", provider.req.SystemPrompt)
+	}
+	found := false
+	for _, tool := range provider.req.Tools {
+		if tool.Name == skills.ToolName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("skill_read tool missing from %#v", provider.req.Tools)
+	}
+}
+
+func TestDispatchSkillRead(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Conv:    conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:    "k8s-debug",
+			Scope:   skills.ScopeCluster,
+			Cluster: "prod",
+			Body:    "skill body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+	msg := execCmd(t, model.dispatchTool(7, llm.ToolCall{
+		ID:        "skill-1",
+		Name:      skills.ToolName,
+		Arguments: json.RawMessage(`{"name":"k8s-debug","reason":"diagnose"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %#v, want one result", result.Results)
+	}
+	if !strings.Contains(result.Results[0].Output, "skill body") {
+		t.Fatalf("output = %q", result.Results[0].Output)
 	}
 }
 

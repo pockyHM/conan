@@ -351,6 +351,29 @@ func newRootCommand() *cobra.Command {
 			selectedCluster = "default"
 		}
 
+		var visibleSkills []skills.Skill
+		var skillWarnings []string
+		globalSkillReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(loader.Home()))
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load global skills: %v\n", err)
+		} else {
+			clusterSkillReg, err := skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster skills: %v\n", err)
+			} else {
+				visibleSkills, skillWarnings, err = skills.ResolveVisible(loader.Home(), selectedCluster, globalSkillReg, clusterSkillReg, skills.ResolveOptions{
+					MaxSkillFileBytes: 256 * 1024,
+					MaxVisibleSkills:  global.Skills.MaxVisibleSkills,
+					IndexCharBudget:   global.Skills.IndexTokenBudget,
+				})
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load skills: %v\n", err)
+					visibleSkills = nil
+					skillWarnings = nil
+				}
+			}
+		}
+
 		provider, modelName, err := llm.NewProvider(global.Models, global.DefaultModel)
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
@@ -454,6 +477,9 @@ func newRootCommand() *cobra.Command {
 			MemoryStore:        memStore,
 			Subagents:          global.Subagents,
 			LocalWorkspaceRoot: workspaceRoot,
+			Skills:             visibleSkills,
+			SkillsConfig:       global.Skills,
+			SkillWarnings:      skillWarnings,
 		})
 		finalModel, err := runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		if err != nil {

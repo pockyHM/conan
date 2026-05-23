@@ -28,6 +28,7 @@ import (
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/security"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/internal/subagent"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/models"
@@ -59,6 +60,9 @@ type ModelConfig struct {
 	ConfigHome         string
 	LocalWorkspaceRoot string
 	NodeAddRunner      nodeAddRunner
+	Skills             []skills.Skill
+	SkillsConfig       configschema.SkillsConfig
+	SkillWarnings      []string
 
 	MemoryStore     *memory.Store
 	MemoryExtractor MemoryExtractor
@@ -149,6 +153,9 @@ type Model struct {
 	configHome         string
 	localWorkspaceRoot string
 	nodeAddRunner      nodeAddRunner
+	skills             []skills.Skill
+	skillsConfig       configschema.SkillsConfig
+	skillWarnings      []string
 	pendingToolCall    *llm.ToolCall
 	pendingRisk        *security.RiskAssessment
 	confirmChoice      int // 0=Allow, 1=Deny
@@ -230,6 +237,9 @@ func NewModel(cfg ModelConfig) Model {
 		configHome:         cfg.ConfigHome,
 		localWorkspaceRoot: cfg.LocalWorkspaceRoot,
 		nodeAddRunner:      cfg.NodeAddRunner,
+		skills:             cfg.Skills,
+		skillsConfig:       normalizeSkillsConfig(cfg.SkillsConfig),
+		skillWarnings:      append([]string(nil), cfg.SkillWarnings...),
 		memStore:           cfg.MemoryStore,
 		memoryExtractor:    cfg.MemoryExtractor,
 		subagents:          normalizeSubagentConfig(cfg.Subagents),
@@ -237,6 +247,20 @@ func NewModel(cfg ModelConfig) Model {
 		ac:                 newAutocompleteWithLanguage(language),
 		inputHistoryIndex:  -1,
 	}
+}
+
+func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsConfig {
+	if cfg.IndexTokenBudget == 0 {
+		cfg.IndexTokenBudget = 800
+	}
+	if cfg.MaxSkillChars == 0 {
+		cfg.MaxSkillChars = 6000
+	}
+	if cfg.MaxVisibleSkills == 0 {
+		cfg.MaxVisibleSkills = 50
+	}
+	cfg.Enabled = true
+	return cfg
 }
 
 func normalizeSubagentConfig(cfg configschema.SubagentConfig) configschema.SubagentConfig {
@@ -2046,6 +2070,9 @@ func (m Model) availableToolDefs() []llm.ToolDef {
 	if len(m.attachedImages) > 0 {
 		allTools = append(allTools, imageToolDefs...)
 	}
+	if m.skillsConfig.Enabled && len(m.skills) > 0 {
+		allTools = append(allTools, skills.ToolDefs()...)
+	}
 	if m.nodeToolsEnabled {
 		allTools = append(allTools, nodeManagementToolDefs...)
 	}
@@ -2359,6 +2386,8 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 		return m.dispatchSubagentsRun(streamID, call)
 	case metaToolImageAnalyze:
 		return m.dispatchImageAnalyze(streamID, call)
+	case skills.ToolName:
+		return m.dispatchSkillRead(streamID, call)
 	case metaToolNodeAdd:
 		return m.prepareNodeAddOrPrompt(streamID, call)
 	case metaToolFilePut:
@@ -2370,6 +2399,23 @@ func (m Model) dispatchTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 			return m.dispatchLocalTool(streamID, call)
 		}
 		return m.dispatchMemoryOrDirectTool(streamID, call)
+	}
+}
+
+func (m Model) dispatchSkillRead(streamID uint64, call llm.ToolCall) tea.Cmd {
+	visible := append([]skills.Skill(nil), m.skills...)
+	maxChars := m.skillsConfig.MaxSkillChars
+	return func() tea.Msg {
+		output := skills.NewToolHandler(visible, maxChars).Handle(call.Arguments)
+		return multiToolResultMsg{
+			streamID: streamID,
+			Call:     call,
+			Results: []nodeToolResult{{
+				Node:    "local",
+				Output:  output,
+				Success: !strings.HasPrefix(output, "skill_read error:"),
+			}},
+		}
 	}
 }
 
@@ -3100,6 +3146,12 @@ func (m Model) buildSystemPromptWithMemory() string {
 			"- Give each subagent a bounded task, selected node scope, and expected output.",
 			"- Use subagent results as evidence, then answer the user yourself.",
 		}, "\n"))
+	}
+
+	if m.skillsConfig.Enabled && len(m.skills) > 0 {
+		if index := skills.BuildSkillIndex(m.skills, m.skillsConfig.IndexTokenBudget); strings.TrimSpace(index) != "" {
+			parts = append(parts, "\n[Skills]\n"+index)
+		}
 	}
 
 	if m.memStore != nil {
