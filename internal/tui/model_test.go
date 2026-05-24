@@ -519,6 +519,50 @@ func TestSlashSkillInjectsReferencedLocalFileContext(t *testing.T) {
 	}
 }
 
+func TestSlashSkillsRemoveUpdatesVisibleSkills(t *testing.T) {
+	home := t.TempDir()
+	reg := skills.Registry{Skills: []skills.RegistryEntry{{
+		Name: "k8s-debug", Description: "Diagnose Kubernetes failures.", Source: "github.com/acme/ops", Ref: "main", Path: "skills/k8s-debug", CachePath: "skills/repos/github.com/acme/ops/main/skills/k8s-debug",
+	}}}
+	if err := skills.SaveRegistry(skills.GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		ConfigHome: home,
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeGlobal,
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxVisibleSkills: 50, MaxSkillChars: 6000, IndexTokenBudget: 800},
+	})
+
+	model.input = "/skills remove k8s-debug --global"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skills remove should return management command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if len(model.skills) != 0 {
+		t.Fatalf("skills = %#v, want empty after remove", model.skills)
+	}
+	if !strings.Contains(model.status, "Removed skill") {
+		t.Fatalf("status = %q", model.status)
+	}
+	got, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 0 {
+		t.Fatalf("registry = %#v, want empty", got)
+	}
+}
+
 func TestSkillShortcutInjectsSkillForNextRequest(t *testing.T) {
 	provider := &captureStreamProvider{}
 	model := NewModel(ModelConfig{

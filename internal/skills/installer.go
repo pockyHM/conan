@@ -53,6 +53,18 @@ type InstallRequest struct {
 	Cluster string
 }
 
+type RemoveRequest struct {
+	Name    string
+	Scope   string
+	Cluster string
+}
+
+type UpdateRequest struct {
+	Name    string
+	Scope   string
+	Cluster string
+}
+
 func NormalizeGitHubSource(input string, ref string, skillPath string) (RepoSource, error) {
 	raw := strings.TrimSpace(input)
 	raw = strings.TrimPrefix(raw, "https://")
@@ -68,9 +80,6 @@ func NormalizeGitHubSource(input string, ref string, skillPath string) (RepoSour
 	parts := strings.Split(raw, "/")
 	if len(parts) != 3 || parts[0] != "github.com" || !validGitHubSegment(parts[1]) || !validGitHubSegment(parts[2]) {
 		return RepoSource{}, fmt.Errorf("invalid GitHub repository %q; use github.com/org/repo, https://github.com/org/repo, or org/repo", input)
-	}
-	if ref == "" {
-		ref = "main"
 	}
 	if skillPath == "" {
 		skillPath = "skills"
@@ -182,6 +191,92 @@ func (i Installer) Install(ctx context.Context, req InstallRequest) ([]Skill, er
 	return skills, nil
 }
 
+func (i Installer) Remove(req RemoveRequest) (bool, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return false, fmt.Errorf("skill name is required")
+	}
+	regPath, err := registryPathForScope(i.Home, req.Scope, req.Cluster)
+	if err != nil {
+		return false, err
+	}
+	reg, err := LoadRegistry(regPath)
+	if err != nil {
+		return false, err
+	}
+	var next []RegistryEntry
+	removed := false
+	for _, entry := range reg.Skills {
+		if entry.Name == req.Name {
+			removed = true
+			continue
+		}
+		next = append(next, entry)
+	}
+	if !removed {
+		return false, nil
+	}
+	reg.Skills = next
+	return true, SaveRegistry(regPath, reg)
+}
+
+func (i Installer) Update(ctx context.Context, req UpdateRequest) ([]Skill, error) {
+	regPath, err := registryPathForScope(i.Home, req.Scope, req.Cluster)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := LoadRegistry(regPath)
+	if err != nil {
+		return nil, err
+	}
+	var entries []RegistryEntry
+	for _, entry := range reg.Skills {
+		if strings.TrimSpace(req.Name) != "" && entry.Name != req.Name {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if len(entries) == 0 {
+		if strings.TrimSpace(req.Name) != "" {
+			return nil, fmt.Errorf("skill not found: %s", req.Name)
+		}
+		return nil, fmt.Errorf("no skills installed")
+	}
+	var updated []Skill
+	for _, entry := range entries {
+		hostPath, err := validateGitHubHostPath(entry.Source)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source for %s: %w", entry.Name, err)
+		}
+		source := RepoSource{
+			Input:    hostPath,
+			HostPath: hostPath,
+			CloneURL: "https://" + hostPath + ".git",
+			Ref:      entry.Ref,
+			Path:     entry.Path,
+		}
+		installed, err := i.Install(ctx, InstallRequest{Source: source, Scope: req.Scope, Cluster: req.Cluster})
+		if err != nil {
+			return nil, err
+		}
+		updated = append(updated, installed...)
+	}
+	return updated, nil
+}
+
+func registryPathForScope(home string, scope string, cluster string) (string, error) {
+	switch scope {
+	case ScopeGlobal:
+		return GlobalRegistryPath(home), nil
+	case ScopeCluster:
+		if strings.TrimSpace(cluster) == "" {
+			return "", fmt.Errorf("cluster is required")
+		}
+		return ClusterRegistryPath(home, cluster), nil
+	default:
+		return "", fmt.Errorf("invalid scope %q", scope)
+	}
+}
+
 func discoverSkills(repoRoot string, skillRoot string, maxFileBytes int) ([]Skill, error) {
 	rootRel, err := cleanRelativePath(skillRoot)
 	if err != nil {
@@ -227,7 +322,7 @@ func upsertEntry(entries []RegistryEntry, next RegistryEntry) []RegistryEntry {
 func sanitizeRef(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		ref = "main"
+		ref = "default"
 	}
 	hash := sha1.Sum([]byte(ref))
 	suffix := hex.EncodeToString(hash[:])[:10]

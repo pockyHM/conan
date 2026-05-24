@@ -514,6 +514,27 @@ func newRootCommand() *cobra.Command {
 	var skillsCluster string
 	var skillsRef string
 	var skillsPath string
+	resolveSkillsScope := func() (string, string, error) {
+		scope := skills.ScopeCluster
+		targetCluster := skillsCluster
+		if skillsGlobal {
+			return skills.ScopeGlobal, "", nil
+		}
+		if targetCluster == "" {
+			targetCluster = clusterName
+		}
+		if targetCluster == "" {
+			globalCfg, err := cfgloader.NewLoader(home).LoadGlobal()
+			if err != nil {
+				return "", "", err
+			}
+			targetCluster = globalCfg.DefaultCluster
+		}
+		if targetCluster == "" {
+			return "", "", fmt.Errorf("--cluster is required when using cluster-scoped skills")
+		}
+		return scope, targetCluster, nil
+	}
 
 	skillsListCmd := &cobra.Command{
 		Use:   "list",
@@ -562,25 +583,9 @@ func newRootCommand() *cobra.Command {
 		Short: "Install skills from a public GitHub repository",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			scope := skills.ScopeCluster
-			targetCluster := skillsCluster
-			if skillsGlobal {
-				scope = skills.ScopeGlobal
-			}
-			if scope == skills.ScopeCluster {
-				if targetCluster == "" {
-					targetCluster = clusterName
-				}
-				if targetCluster == "" {
-					globalCfg, err := cfgloader.NewLoader(home).LoadGlobal()
-					if err != nil {
-						return err
-					}
-					targetCluster = globalCfg.DefaultCluster
-				}
-				if targetCluster == "" {
-					return fmt.Errorf("--cluster is required when installing a cluster-scoped skill")
-				}
+			scope, targetCluster, err := resolveSkillsScope()
+			if err != nil {
+				return err
 			}
 			source, err := skills.NormalizeGitHubSource(args[0], skillsRef, skillsPath)
 			if err != nil {
@@ -597,13 +602,64 @@ func newRootCommand() *cobra.Command {
 			return nil
 		},
 	}
+
+	skillsRemoveCmd := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove an installed skill",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope, targetCluster, err := resolveSkillsScope()
+			if err != nil {
+				return err
+			}
+			installer := skills.Installer{Home: cfgloader.NewLoader(home).Home(), MaxSkillFileBytes: 256 * 1024}
+			removed, err := installer.Remove(skills.RemoveRequest{Name: args[0], Scope: scope, Cluster: targetCluster})
+			if err != nil {
+				return err
+			}
+			if !removed {
+				return fmt.Errorf("skill not found: %s", args[0])
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "removed %s\n", args[0])
+			return nil
+		},
+	}
+
+	skillsUpdateCmd := &cobra.Command{
+		Use:   "update [name]",
+		Short: "Update installed skills",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope, targetCluster, err := resolveSkillsScope()
+			if err != nil {
+				return err
+			}
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			installer := skills.Installer{Home: cfgloader.NewLoader(home).Home(), MaxSkillFileBytes: 256 * 1024}
+			updated, err := installer.Update(cmd.Context(), skills.UpdateRequest{Name: name, Scope: scope, Cluster: targetCluster})
+			if err != nil {
+				return err
+			}
+			for _, skill := range updated {
+				fmt.Fprintf(cmd.OutOrStdout(), "updated %s\n", skill.Name)
+			}
+			return nil
+		},
+	}
 	skillsInstallCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Install globally")
 	skillsInstallCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to install into or list from")
-	skillsInstallCmd.Flags().StringVar(&skillsRef, "ref", "main", "Git ref to install")
+	skillsInstallCmd.Flags().StringVar(&skillsRef, "ref", "", "Git ref to install (default repository branch)")
 	skillsInstallCmd.Flags().StringVar(&skillsPath, "path", "skills", "Repository skills path")
 	skillsListCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to list")
+	skillsRemoveCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Remove globally")
+	skillsRemoveCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to remove from")
+	skillsUpdateCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Update globally")
+	skillsUpdateCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to update")
 
-	skillsCmd.AddCommand(skillsListCmd, skillsInstallCmd)
+	skillsCmd.AddCommand(skillsListCmd, skillsInstallCmd, skillsRemoveCmd, skillsUpdateCmd)
 
 	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, resumeCmd, skillsCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd

@@ -750,6 +750,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logAuditExecution(msg.Call, msg.Results)
 		return m.completeToolAndResume(msg.streamID, msg.Call)
 
+	case skillManagementResultMsg:
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		m.skills = msg.skills
+		m.skillWarnings = msg.warnings
+		m.status = msg.status
+		m.updateViewportContent()
+		return m, nil
+
 	case nodeAddResultMsg:
 		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
 			return m, nil
@@ -1765,13 +1776,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 			m.status = m.uiLanguage.tr("Current cluster: ", "当前集群: ") + m.cluster
 		}
 	case CommandSkills:
-		summary := m.visibleSkillsSummary()
-		m.messages = append(m.messages, chatMsg{role: "assistant", content: summary})
-		if m.skillsAvailable() {
-			m.status = fmt.Sprintf(m.uiLanguage.tr("%d skills available", "%d 个可用技能"), len(m.skills))
-		} else {
-			m.status = summary
-		}
+		return m.applySkillsCommand(cmd.Arg)
 	case CommandSkill:
 		name, rest := splitSkillInvocationArg(cmd.Arg)
 		if name == "" {

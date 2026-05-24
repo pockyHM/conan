@@ -52,6 +52,16 @@ func TestNormalizeGitHubSource(t *testing.T) {
 	}
 }
 
+func TestNormalizeGitHubSourceEmptyRefUsesRepositoryDefault(t *testing.T) {
+	src, err := NormalizeGitHubSource("org/repo", "", "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.Ref != "" {
+		t.Fatalf("Ref = %q, want empty default branch ref", src.Ref)
+	}
+}
+
 func TestInstallDiscoversSkillsAndWritesGlobalRegistry(t *testing.T) {
 	home := t.TempDir()
 	fixture := t.TempDir()
@@ -288,6 +298,60 @@ func TestInstallDuplicateSkillNameReplacesRegistryEntry(t *testing.T) {
 	}
 	if reg.Skills[0].Ref != "feature" || !strings.Contains(reg.Skills[0].CachePath, "/feature-") {
 		t.Fatalf("registry entry was not replaced: %#v", reg.Skills[0])
+	}
+}
+
+func TestRemoveSkillFromGlobalRegistry(t *testing.T) {
+	home := t.TempDir()
+	reg := Registry{Skills: []RegistryEntry{
+		{Name: "keep", Source: "github.com/org/repo", Ref: "main", Path: "skills/keep", CachePath: "skills/repos/github.com/org/repo/main/skills/keep"},
+		{Name: "remove-me", Source: "github.com/org/repo", Ref: "main", Path: "skills/remove-me", CachePath: "skills/repos/github.com/org/repo/main/skills/remove-me"},
+	}}
+	if err := SaveRegistry(GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := (Installer{Home: home}).Remove(RemoveRequest{Name: "remove-me", Scope: ScopeGlobal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Fatal("removed = false, want true")
+	}
+	got, err := LoadRegistry(GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 1 || got.Skills[0].Name != "keep" {
+		t.Fatalf("registry = %#v", got)
+	}
+}
+
+func TestUpdateSkillReinstallsFromRegistryEntry(t *testing.T) {
+	home := t.TempDir()
+	fixture := t.TempDir()
+	writeSkill(t, fixture, "skills", "one", "updated")
+	reg := Registry{Skills: []RegistryEntry{{
+		Name: "one", Source: "github.com/org/repo", Ref: "main", Path: "skills/one", CachePath: "skills/repos/github.com/org/repo/main/skills/one",
+	}}}
+	if err := SaveRegistry(GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+
+	installer := Installer{Home: home, Fetcher: fixtureFetcher{src: fixture}, MaxSkillFileBytes: 6000}
+	updated, err := installer.Update(context.Background(), UpdateRequest{Name: "one", Scope: ScopeGlobal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated) != 1 || updated[0].Name != "one" || updated[0].Description != "updated" {
+		t.Fatalf("updated = %#v", updated)
+	}
+	got, err := LoadRegistry(GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 1 || got.Skills[0].Description != "updated" {
+		t.Fatalf("registry = %#v", got)
 	}
 }
 

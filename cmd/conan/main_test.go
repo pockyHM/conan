@@ -17,6 +17,7 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/logging"
 	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
 )
@@ -168,6 +169,41 @@ func TestSkillsInstallRejectsInvalidGitHubRepo(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid GitHub repository") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSkillsRemoveGlobal(t *testing.T) {
+	home := t.TempDir()
+	reg := skills.Registry{Skills: []skills.RegistryEntry{{
+		Name: "k8s-debug", Description: "Diagnose Kubernetes failures.", Source: "github.com/acme/ops", Ref: "main", Path: "skills/k8s-debug", CachePath: "skills/repos/github.com/acme/ops/main/skills/k8s-debug",
+	}}}
+	if err := skills.SaveRegistry(skills.GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "skills", "remove", "k8s-debug", "--global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "removed k8s-debug") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	got, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 0 {
+		t.Fatalf("registry = %#v, want empty", got)
+	}
+}
+
+func TestSkillsUpdateCommandRegistered(t *testing.T) {
+	stdout, _, err := executeCommand("skills", "update", "--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(stdout, "update [name]") {
+		t.Fatalf("help output = %q", stdout)
 	}
 }
 
