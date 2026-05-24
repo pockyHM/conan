@@ -329,6 +329,11 @@ func formatExplicitSkillMessage(skill skills.Skill, args string, maxChars int) s
 	return fmt.Sprintf("Use Conan skill %q for this request.\n\nUser arguments:\n%s\n\nSkill instructions:\n%s", skill.Name, args, body)
 }
 
+func (m Model) submitSkillMessage(visibleInput string, skill skills.Skill, args string) (Model, tea.Cmd) {
+	next, c := m.submitProcessedMessage(visibleInput, args, formatExplicitSkillMessage(skill, args, m.skillsConfig.MaxSkillChars), nil)
+	return next.(Model), c
+}
+
 func normalizeSubagentConfig(cfg configschema.SubagentConfig) configschema.SubagentConfig {
 	if cfg.MaxParallel <= 0 {
 		cfg.MaxParallel = 3
@@ -1672,9 +1677,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) submitMessage(input string, thinking *bool) (tea.Model, tea.Cmd) {
-	llmInput := input
+	return m.submitProcessedMessage(input, input, input, thinking)
+}
+
+func (m Model) submitProcessedMessage(visibleInput string, referenceInput string, llmInput string, thinking *bool) (tea.Model, tea.Cmd) {
 	submitImages := append([]imageAttachment(nil), m.pendingImages...)
-	if refs := fileref.Parse(input); len(refs) > 0 {
+	if refs := fileref.Parse(referenceInput); len(refs) > 0 {
 		root := m.localWorkspaceRoot
 		if root == "" {
 			root = "."
@@ -1691,7 +1699,7 @@ func (m Model) submitMessage(input string, thinking *bool) (tea.Model, tea.Cmd) 
 			m.status = m.uiLanguage.tr("File reference error: ", "文件引用错误: ") + err.Error()
 			return m, nil
 		}
-		llmInput = fileref.AppendContext(input, loaded)
+		llmInput = fileref.AppendContext(llmInput, loaded)
 	}
 	if len(submitImages) > 0 {
 		totalImages := len(m.attachedImages) + len(submitImages)
@@ -1701,11 +1709,11 @@ func (m Model) submitMessage(input string, thinking *bool) (tea.Model, tea.Cmd) 
 		}
 		m.pendingImages = nil
 		m.attachedImages = append(m.attachedImages, submitImages...)
-		visibleInput := strings.TrimSpace(input + " " + imageChipText(submitImages))
+		visibleInput = strings.TrimSpace(visibleInput + " " + imageChipText(submitImages))
 		llmInput = appendImageToolContext(llmInput, submitImages)
 		return m.startSubmittedMessage(visibleInput, llmInput, thinking)
 	}
-	return m.startSubmittedMessage(input, llmInput, thinking)
+	return m.startSubmittedMessage(visibleInput, llmInput, thinking)
 }
 
 func (m Model) startSubmittedMessage(visibleInput string, llmInput string, thinking *bool) (tea.Model, tea.Cmd) {
@@ -1759,7 +1767,11 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandSkills:
 		summary := m.visibleSkillsSummary()
 		m.messages = append(m.messages, chatMsg{role: "assistant", content: summary})
-		m.status = summary
+		if m.skillsAvailable() {
+			m.status = fmt.Sprintf(m.uiLanguage.tr("%d skills available", "%d 个可用技能"), len(m.skills))
+		} else {
+			m.status = summary
+		}
 	case CommandSkill:
 		name, rest := splitSkillInvocationArg(cmd.Arg)
 		if name == "" {
@@ -1771,8 +1783,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 				return m, nil
 			}
 			visible := strings.TrimSpace("/skill " + name + " " + rest)
-			next, c := m.startSubmittedMessage(visible, formatExplicitSkillMessage(skill, rest, m.skillsConfig.MaxSkillChars), nil)
-			return next.(Model), c
+			return m.submitSkillMessage(visible, skill, rest)
 		}
 	case CommandLang:
 		if strings.TrimSpace(cmd.Arg) != "" {
@@ -1885,8 +1896,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		name, rest := splitSkillInvocationArg(cmd.Arg)
 		if skill, found := m.findSkill(name); found {
 			visible := strings.TrimSpace("/" + name + " " + rest)
-			next, c := m.startSubmittedMessage(visible, formatExplicitSkillMessage(skill, rest, m.skillsConfig.MaxSkillChars), nil)
-			return next.(Model), c
+			return m.submitSkillMessage(visible, skill, rest)
 		}
 		m.status = m.uiLanguage.tr("Unknown command: /", "未知命令: /") + cmd.Arg
 	}

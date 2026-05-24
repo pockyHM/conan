@@ -430,6 +430,9 @@ func TestSlashSkillsListsVisibleSkills(t *testing.T) {
 	if !strings.Contains(visible, "k8s-debug") || !strings.Contains(visible, "Diagnose Kubernetes failures.") {
 		t.Fatalf("skill list not visible; status=%q view=%q", model.status, model.View())
 	}
+	if strings.Contains(model.status, "Diagnose Kubernetes failures.") {
+		t.Fatalf("status should be concise, got %q", model.status)
+	}
 }
 
 func TestSlashSkillInjectsSkillForNextRequest(t *testing.T) {
@@ -469,6 +472,49 @@ func TestSlashSkillInjectsSkillForNextRequest(t *testing.T) {
 		t.Fatalf("request messages missing explicit skill content: %#v", provider.req.Messages)
 	}
 	if got := model.messages[len(model.messages)-1].content; got != "/skill k8s-debug pods failing" {
+		t.Fatalf("visible message = %q", got)
+	}
+}
+
+func TestSlashSkillInjectsReferencedLocalFileContext(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("project notes"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:            "prod",
+		Provider:           provider,
+		Conv:               conversation.New("prod", nil, "test"),
+		LocalWorkspaceRoot: workspace,
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Use kubectl describe before changes.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/skill k8s-debug inspect @README.md"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skill with file reference should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil || len(provider.req.Messages) != 1 {
+		t.Fatalf("request messages = %#v", provider.req)
+	}
+	content := provider.req.Messages[0].Content
+	for _, want := range []string{"Use kubectl describe before changes.", "inspect @README.md", `<file path="README.md">`, "project notes"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("request missing %q:\n%s", want, content)
+		}
+	}
+	if got := model.messages[len(model.messages)-1].content; got != "/skill k8s-debug inspect @README.md" {
 		t.Fatalf("visible message = %q", got)
 	}
 }
