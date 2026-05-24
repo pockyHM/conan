@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/mcp"
+	toolmeta "github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
@@ -252,6 +253,9 @@ func (c *toolCache) Search(query string, nodes []string) []toolSearchResult {
 					Description: doc.tool.Description,
 					Schema:      doc.tool.InputSchema,
 					Nodes:       []string{doc.node},
+					Safety:      string(doc.metadata.Safety),
+					Scope:       string(doc.metadata.Scope),
+					Capability:  append([]string(nil), doc.metadata.Capability...),
 				},
 				score: score,
 			}
@@ -262,6 +266,9 @@ func (c *toolCache) Search(query string, nodes []string) []toolSearchResult {
 			existing.score = score
 			existing.result.Description = doc.tool.Description
 			existing.result.Schema = doc.tool.InputSchema
+			existing.result.Safety = string(doc.metadata.Safety)
+			existing.result.Scope = string(doc.metadata.Scope)
+			existing.result.Capability = append([]string(nil), doc.metadata.Capability...)
 		}
 	}
 
@@ -285,10 +292,11 @@ func (c *toolCache) Search(query string, nodes []string) []toolSearchResult {
 }
 
 type toolSearchDoc struct {
-	node   string
-	tool   mcpproto.ToolDefinition
-	fields []weightedSearchField
-	length float64
+	node     string
+	tool     mcpproto.ToolDefinition
+	metadata toolmeta.Metadata
+	fields   []weightedSearchField
+	length   float64
 }
 
 type weightedSearchField struct {
@@ -297,16 +305,21 @@ type weightedSearchField struct {
 }
 
 func newToolSearchDoc(node string, tool mcpproto.ToolDefinition) toolSearchDoc {
+	metadata, _ := toolmeta.MetadataFor(tool.Name)
 	fields := []weightedSearchField{
 		{weight: 4.0, tokens: tokenizeSearchText(tool.Name)},
 		{weight: 2.0, tokens: tokenizeSearchText(tool.Description)},
 		{weight: 0.75, tokens: tokenizeSearchText(string(tool.InputSchema))},
+		{weight: 5.0, tokens: tokenizeSearchText(strings.Join(metadata.Capability, " "))},
+		{weight: 3.0, tokens: tokenizeSearchText(string(metadata.Safety) + " " + strings.ReplaceAll(string(metadata.Safety), "-", " "))},
+		{weight: 1.5, tokens: tokenizeSearchText(string(metadata.Scope))},
+		{weight: 2.0, tokens: tokenizeSearchText(strings.Join(metadata.Tags, " "))},
 	}
 	length := 0.0
 	for _, field := range fields {
 		length += float64(len(field.tokens)) * field.weight
 	}
-	return toolSearchDoc{node: node, tool: tool, fields: fields, length: length}
+	return toolSearchDoc{node: node, tool: tool, metadata: metadata, fields: fields, length: length}
 }
 
 func averageToolSearchDocLength(docs []toolSearchDoc) float64 {
@@ -421,6 +434,9 @@ type toolSearchResult struct {
 	Description string          `json:"description"`
 	Schema      json.RawMessage `json:"inputSchema,omitempty"`
 	Nodes       []string        `json:"available_on"`
+	Safety      string          `json:"safety,omitempty"`
+	Scope       string          `json:"scope,omitempty"`
+	Capability  []string        `json:"capability,omitempty"`
 }
 
 func fetchNodeTools(clients map[string]*mcp.Client) tea.Cmd {

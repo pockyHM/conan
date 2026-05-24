@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	cfgloader "github.com/pockyHM/conan/internal/config"
 	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/internal/evidence"
 	"github.com/pockyHM/conan/internal/fileguard"
 	"github.com/pockyHM/conan/internal/fileref"
 	"github.com/pockyHM/conan/internal/llm"
@@ -28,9 +29,11 @@ import (
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/nodeadd"
+	runbookpkg "github.com/pockyHM/conan/internal/runbook"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/internal/subagent"
+	toolmeta "github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/models"
 )
@@ -64,6 +67,7 @@ type ModelConfig struct {
 	Skills             []skills.Skill
 	SkillsConfig       configschema.SkillsConfig
 	SkillWarnings      []string
+	IncidentDir        string
 
 	MemoryStore     *memory.Store
 	MemoryExtractor MemoryExtractor
@@ -167,6 +171,8 @@ type Model struct {
 	skills             []skills.Skill
 	skillsConfig       configschema.SkillsConfig
 	skillWarnings      []string
+	incidentDir        string
+	incidentRecorder   *evidence.Recorder
 	pendingToolCall    *llm.ToolCall
 	pendingRisk        *security.RiskAssessment
 	confirmChoice      int // 0=Allow, 1=Deny
@@ -253,6 +259,8 @@ func NewModel(cfg ModelConfig) Model {
 		skills:             cfg.Skills,
 		skillsConfig:       normalizeSkillsConfig(cfg.SkillsConfig),
 		skillWarnings:      append([]string(nil), cfg.SkillWarnings...),
+		incidentDir:        cfg.IncidentDir,
+		incidentRecorder:   evidence.NewRecorder(cfg.Cluster, selectedNodeNamesFromMap(selectedNodes), time.Now),
 		memStore:           cfg.MemoryStore,
 		memoryExtractor:    cfg.MemoryExtractor,
 		subagents:          normalizeSubagentConfig(cfg.Subagents),
@@ -576,6 +584,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.assessment.Reason == "" || msg.assessment.Reason == "allowed" {
 					msg.assessment.Reason = msg.call.Name + " requires confirmation"
 				}
+				m.recordRiskEvidence(msg.call, msg.assessment, "pending confirmation")
 				m.logAuditDecision(msg.call, msg.assessment, "pending confirmation")
 				m.mode = modeConfirm
 				m.pendingToolCall = &msg.call
@@ -584,9 +593,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
 				return m, nil
 			}
+			m.recordRiskEvidence(msg.call, msg.assessment, "dispatched")
 			m.logAuditDecision(msg.call, msg.assessment, "dispatched")
 			return m, m.dispatchTool(msg.streamID, msg.call)
 		case security.RiskDeny:
+			m.recordRiskEvidence(msg.call, msg.assessment, "blocked")
 			m.logAuditDecision(msg.call, msg.assessment, "blocked")
 			denial := "BLOCKED: " + msg.assessment.Reason
 			m.fillToolPlaceholder(msg.call, denial, []nodeToolResult{{Node: "-", Output: denial, Success: false}})
@@ -595,6 +606,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.completeToolAndResume(msg.streamID, msg.call)
 		case security.RiskConfirm:
+			m.recordRiskEvidence(msg.call, msg.assessment, "pending confirmation")
 			m.logAuditDecision(msg.call, msg.assessment, "pending confirmation")
 			m.mode = modeConfirm
 			m.pendingToolCall = &msg.call
@@ -654,6 +666,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.conv != nil {
 				m.conv.AddToolCall(e.ID, e.Name, string(sanitizedArgs))
 			}
+			m.recordToolCallEvidence(llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}, "tool call requested: "+e.Name)
 			if hidden {
 				m.status = hiddenToolStatus(e.Name)
 			}
@@ -760,6 +773,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.conv != nil {
 			m.conv.AddToolResult(msg.Call.ID, aggregatedOutput)
 		}
+		m.recordToolResultEvidence(msg.Call, msg.Results, aggregatedOutput)
 		m.logAuditExecution(msg.Call, msg.Results)
 		return m.completeToolAndResume(msg.streamID, msg.Call)
 
@@ -1232,6 +1246,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if choice == 0 {
 			m.status = m.uiLanguage.tr("Approved, executing...", "已批准，正在执行...")
+			m.recordRiskEvidence(call, derefRiskAssessment(assessment), "approved")
 			m.logAuditDecision(call, derefRiskAssessment(assessment), "approved")
 			return m, m.dispatchTool(m.activeStreamID, call)
 		}
@@ -1245,9 +1260,11 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.status = m.uiLanguage.tr("Approved and added to allowlist, executing...", "已批准并加入白名单，正在执行...")
+			m.recordRiskEvidence(call, derefRiskAssessment(assessment), "approved")
 			m.logAuditDecision(call, derefRiskAssessment(assessment), "approved and allowlisted")
 			return m, m.dispatchTool(m.activeStreamID, call)
 		}
+		m.recordRiskEvidence(call, derefRiskAssessment(assessment), "cancelled")
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
 		cancelled := m.uiLanguage.tr("Cancelled by user", "用户已取消")
 		m.fillToolPlaceholder(call, cancelled, []nodeToolResult{{Node: "-", Output: cancelled, Success: false}})
@@ -1263,6 +1280,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingRisk = nil
 		m.mode = modeChat
 		m.confirmChoice = 0
+		m.recordRiskEvidence(call, derefRiskAssessment(assessment), "cancelled")
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
 		cancelled := m.uiLanguage.tr("Cancelled by user", "用户已取消")
 		m.fillToolPlaceholder(call, cancelled, []nodeToolResult{{Node: "-", Output: cancelled, Success: false}})
@@ -1579,13 +1597,86 @@ func (m Model) renderConfirmFooter() string {
 	lines := []string{
 		inputPromptStyle.Render(m.uiLanguage.tr("Security Review", "安全确认")) + "  " + reason,
 		toolStyle.Render(m.uiLanguage.tr("Command: ", "命令: ")) + command,
+	}
+	if m.pendingToolCall != nil {
+		for _, line := range confirmationSummary(*m.pendingToolCall, m.selectedNodeNames()) {
+			lines = append(lines, toolStyle.Render(line))
+		}
+	}
+	lines = append(lines,
 		strings.Join(opts, "\n"),
 		statusStyle.Render(m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm, Esc to cancel", "使用 ↑↓ 选择，Enter 确认，Esc 取消")),
-	}
+	)
 	if m.pendingRisk != nil && m.pendingRisk.Suggestion != "" {
 		lines = append(lines[:1], append([]string{statusStyle.Render(m.uiLanguage.tr("Suggestion: ", "建议: ")) + m.pendingRisk.Suggestion}, lines[1:]...)...)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func confirmationSummary(call llm.ToolCall, selectedNodes []string) []string {
+	var lines []string
+	lines = append(lines, "Tool: "+call.Name)
+	if meta, ok := toolmeta.MetadataFor(call.Name); ok {
+		lines = append(lines, "Safety: "+string(meta.Safety))
+		lines = append(lines, "Scope: "+string(meta.Scope))
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(call.Arguments, &raw); err != nil {
+		return lines
+	}
+	if node := rawString(raw["node"]); node != "" {
+		lines = append(lines, "Node: "+node)
+	} else if len(selectedNodes) > 0 {
+		lines = append(lines, "Node: "+strings.Join(selectedNodes, ", "))
+	}
+	if inner := rawString(raw["tool"]); inner != "" {
+		lines = append(lines, "Inner tool: "+inner)
+	}
+
+	appendSelectedArgs := func(values map[string]json.RawMessage) {
+		for _, key := range []string{"command", "path", "local_path", "remote_path", "service", "namespace", "package", "name", "host"} {
+			if value := rawDisplayValue(values[key]); value != "" {
+				lines = append(lines, key+": "+value)
+			}
+		}
+	}
+	appendSelectedArgs(raw)
+	var innerArgs map[string]json.RawMessage
+	if err := json.Unmarshal(raw["arguments"], &innerArgs); err == nil {
+		appendSelectedArgs(innerArgs)
+	}
+	return lines
+}
+
+func rawString(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+func rawDisplayValue(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number.String()
+	}
+	var boolean bool
+	if err := json.Unmarshal(raw, &boolean); err == nil {
+		if boolean {
+			return "true"
+		}
+		return "false"
+	}
+	return ""
 }
 
 func (m Model) confirmOptions() []string {
@@ -1977,6 +2068,7 @@ func (m Model) submitProcessedMessage(visibleInput string, referenceInput string
 func (m Model) startSubmittedMessage(visibleInput string, llmInput string, thinking *bool) (tea.Model, tea.Cmd) {
 	if m.provider == nil {
 		m.messages = append(m.messages, chatMsg{role: "user", content: visibleInput})
+		m.recordUserEvidence(visibleInput)
 		if m.conv != nil {
 			m.conv.AddUser(llmInput)
 		}
@@ -1986,6 +2078,7 @@ func (m Model) startSubmittedMessage(visibleInput string, llmInput string, think
 		return m, nil
 	}
 	m.messages = append(m.messages, chatMsg{role: "user", content: visibleInput})
+	m.recordUserEvidence(visibleInput)
 	if m.conv != nil {
 		m.conv.AddUser(llmInput)
 	}
@@ -2004,7 +2097,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /config /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]", "Conan: /help /clear /compact [重点] /config /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit]"),
+			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /config /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit] /incident <start|status|note|export|close> /runbook <draft|preview|run>", "Conan: /help /clear /compact [重点] /config /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit] /incident <start|status|note|export|close> /runbook <draft|preview|run>"),
 		})
 		m.status = m.uiLanguage.tr("Help shown", "已显示帮助")
 	case CommandClear:
@@ -2146,6 +2239,10 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		return m.startManualSubagent(cmd.Arg)
 	case CommandSubagents:
 		return m.applySubagentsCommand(cmd.Arg), nil
+	case CommandIncident:
+		return m.applyIncidentCommand(cmd.Arg)
+	case CommandRunbook:
+		return m.applyRunbookCommand(cmd.Arg)
 	default:
 		name, rest := splitSkillInvocationArg(cmd.Arg)
 		if skill, found := m.findSkill(name); found {
@@ -2300,6 +2397,255 @@ func (m Model) applySubagentsCommand(arg string) Model {
 		m.status = m.uiLanguage.tr("Usage: /subagents [on|off|limit <n>]", "用法: /subagents [on|off|limit <n>]")
 	}
 	return m
+}
+
+func (m Model) applyIncidentCommand(arg string) (Model, tea.Cmd) {
+	fields := strings.Fields(strings.TrimSpace(arg))
+	if len(fields) == 0 {
+		m.status = m.uiLanguage.tr("Usage: /incident start|status|note|export|close", "用法: /incident start|status|note|export|close")
+		return m, nil
+	}
+	if m.incidentRecorder == nil {
+		m.incidentRecorder = evidence.NewRecorder(m.cluster, m.selectedNodeNames(), time.Now)
+	}
+	switch fields[0] {
+	case "start":
+		title := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), fields[0]))
+		if title == "" {
+			m.status = m.uiLanguage.tr("Usage: /incident start <title>", "用法: /incident start <标题>")
+			return m, nil
+		}
+		if current := m.incidentRecorder.Current(); current != nil {
+			m.status = "Incident already open: " + current.Title
+			return m, nil
+		}
+		m.incidentRecorder = evidence.NewRecorder(m.cluster, m.selectedNodeNames(), time.Now)
+		incident, err := m.incidentRecorder.Start(title)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.status = "Incident started: " + incident.Title
+	case "status":
+		incident := m.incidentRecorder.Current()
+		if incident == nil {
+			m.status = "No open incident"
+			return m, nil
+		}
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: fmt.Sprintf("Incident %s\nstatus: %s\nevents: %d", incident.Title, incident.Status, len(m.incidentRecorder.Events()))})
+		m.status = "Incident status shown"
+	case "note":
+		note := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), fields[0]))
+		if note == "" {
+			m.status = m.uiLanguage.tr("Usage: /incident note <content>", "用法: /incident note <内容>")
+			return m, nil
+		}
+		if m.incidentRecorder.Current() == nil {
+			m.status = "Incident note failed: no open incident"
+			return m, nil
+		}
+		m.incidentRecorder.Note(note)
+		m.status = "Incident note added"
+	case "export":
+		rel, err := m.exportIncidentReport()
+		if err != nil {
+			m.status = "Incident export failed: " + err.Error()
+			return m, nil
+		}
+		m.status = "Incident exported: " + rel
+	case "close":
+		current := m.incidentRecorder.Current()
+		if current == nil {
+			m.status = "Incident close failed: no open incident"
+			return m, nil
+		}
+		closed := *current
+		closed.Status = evidence.StatusClosed
+		closed.ClosedAt = time.Now().UTC()
+		rel, err := evidence.ExportMarkdown(m.incidentReportRoot(), closed, m.incidentRecorder.Events(), m.model)
+		if err != nil {
+			m.status = "Incident close failed: " + err.Error()
+			return m, nil
+		}
+		_, _ = m.incidentRecorder.Close(rel)
+		m.status = "Incident closed: " + rel
+	default:
+		m.status = m.uiLanguage.tr("Usage: /incident start|status|note|export|close", "用法: /incident start|status|note|export|close")
+	}
+	return m, nil
+}
+
+func (m Model) applyRunbookCommand(arg string) (Model, tea.Cmd) {
+	fields := strings.Fields(strings.TrimSpace(arg))
+	if len(fields) == 0 {
+		m.status = m.uiLanguage.tr("Usage: /runbook draft|preview|run <path>", "用法: /runbook draft|preview|run <路径>")
+		return m, nil
+	}
+	action := fields[0]
+	pathArg := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), action))
+	switch action {
+	case "draft":
+		if pathArg == "" {
+			latest, err := latestMarkdownFile(filepath.Join(m.incidentReportRoot(), "incidents"))
+			if err != nil {
+				m.status = "Runbook draft failed: " + err.Error()
+				return m, nil
+			}
+			pathArg = filepath.ToSlash(filepath.Join("incidents", filepath.Base(latest)))
+		}
+		content, err := m.readIncidentMarkdown(pathArg)
+		if err != nil {
+			m.status = "Runbook draft failed: " + err.Error()
+			return m, nil
+		}
+		rb, err := runbookpkg.DraftFromIncident(pathArg, content, time.Now().UTC())
+		if err != nil {
+			m.status = "Runbook draft failed: " + err.Error()
+			return m, nil
+		}
+		rel, err := m.writeRunbook(rb)
+		if err != nil {
+			m.status = "Runbook draft failed: " + err.Error()
+			return m, nil
+		}
+		m.status = "Runbook drafted: " + rel
+	case "preview":
+		if pathArg == "" {
+			m.status = m.uiLanguage.tr("Usage: /runbook preview <path>", "用法: /runbook preview <路径>")
+			return m, nil
+		}
+		rb, err := m.loadRunbook(pathArg)
+		if err != nil {
+			m.status = "Runbook preview failed: " + err.Error()
+			return m, nil
+		}
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: runbookpkg.RenderPreview(runbookpkg.BuildPreview(rb))})
+		m.status = "Runbook preview shown"
+	case "run":
+		if pathArg == "" {
+			m.status = m.uiLanguage.tr("Usage: /runbook run <path>", "用法: /runbook run <路径>")
+			return m, nil
+		}
+		content, err := m.readRunbookMarkdown(pathArg)
+		if err != nil {
+			m.status = "Runbook run failed: " + err.Error()
+			return m, nil
+		}
+		prompt := "Execute this Conan runbook. First perform read-only evidence collection. For every [confirm] or [destructive] step, use Conan tools normally so the existing risk review and confirmation flow is enforced. After execution, ask whether to append the outcome to the runbook verification or risk sections.\n\n" + content
+		updated, cmd := m.startSubmittedMessage(prompt, prompt, nil)
+		return updated.(Model), cmd
+	default:
+		m.status = m.uiLanguage.tr("Usage: /runbook draft|preview|run <path>", "用法: /runbook draft|preview|run <路径>")
+	}
+	return m, nil
+}
+
+func (m Model) exportIncidentReport() (string, error) {
+	if m.incidentRecorder == nil || m.incidentRecorder.Current() == nil {
+		return "", fmt.Errorf("no open incident")
+	}
+	root := m.incidentReportRoot()
+	incident := *m.incidentRecorder.Current()
+	return evidence.ExportMarkdown(root, incident, m.incidentRecorder.Events(), m.model)
+}
+
+func (m Model) readIncidentMarkdown(rel string) (string, error) {
+	if !strings.HasPrefix(filepath.ToSlash(filepath.Clean(rel)), "incidents/") {
+		return "", fmt.Errorf("incident path must be under incidents/")
+	}
+	return m.readMemoryMarkdown(rel)
+}
+
+func (m Model) readRunbookMarkdown(rel string) (string, error) {
+	if !strings.HasPrefix(filepath.ToSlash(filepath.Clean(rel)), "runbooks/") {
+		return "", fmt.Errorf("runbook path must be under runbooks/")
+	}
+	return m.readMemoryMarkdown(rel)
+}
+
+func (m Model) readMemoryMarkdown(rel string) (string, error) {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if !strings.HasPrefix(rel, "incidents/") && !strings.HasPrefix(rel, "runbooks/") {
+		return "", fmt.Errorf("path must be under incidents/ or runbooks/")
+	}
+	return memory.NewMarkdownStore(m.incidentReportRoot()).Read(rel)
+}
+
+func (m Model) loadRunbook(rel string) (runbookpkg.Runbook, error) {
+	content, err := m.readRunbookMarkdown(rel)
+	if err != nil {
+		return runbookpkg.Runbook{}, err
+	}
+	return runbookpkg.ParseMarkdown(content)
+}
+
+func (m Model) writeRunbook(rb runbookpkg.Runbook) (string, error) {
+	root := m.incidentReportRoot()
+	date := rb.CreatedAt
+	if date.IsZero() {
+		date = time.Now().UTC()
+	}
+	base := date.Format("2006-01-02") + "-" + runbookpkg.Slug(rb.Title)
+	body := []byte(runbookpkg.RenderMarkdown(rb))
+	for suffix := 0; ; suffix++ {
+		name := base
+		if suffix > 0 {
+			name = fmt.Sprintf("%s-%d", base, suffix+1)
+		}
+		rel := filepath.ToSlash(filepath.Join("runbooks", name+".md"))
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return "", err
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := file.Write(body); err != nil {
+			_ = file.Close()
+			return "", err
+		}
+		if err := file.Close(); err != nil {
+			return "", err
+		}
+		return rel, nil
+	}
+}
+
+func latestMarkdownFile(dir string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.md"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no incident reports found")
+	}
+	sort.Strings(matches)
+	return matches[len(matches)-1], nil
+}
+
+func (m Model) incidentReportRoot() string {
+	if strings.TrimSpace(m.incidentDir) == "" {
+		return "."
+	}
+	if filepath.Base(m.incidentDir) == "incidents" {
+		return filepath.Dir(m.incidentDir)
+	}
+	return m.incidentDir
+}
+
+func selectedNodeNamesFromMap(selected map[string]bool) []string {
+	nodes := make([]string, 0, len(selected))
+	for node, ok := range selected {
+		if ok {
+			nodes = append(nodes, node)
+		}
+	}
+	sort.Strings(nodes)
+	return nodes
 }
 
 func (m Model) newSubagentRequest(role subagent.Role, task string, nodes []string) subagent.Request {
@@ -2515,9 +2861,80 @@ func (m *Model) appendAssistantStreamContent() bool {
 		m.conv.AddAssistant(content)
 	}
 	m.messages = append(m.messages, chatMsg{role: "assistant", content: content, elapsed: m.streamElapsed()})
+	m.recordAssistantEvidence(content)
 	m.streamBuf = ""
 	m.streamReasoningBuf = ""
 	return true
+}
+
+func (m Model) recordUserEvidence(content string) {
+	m.recordEvidence(evidence.Event{Source: evidence.SourceUser, Summary: content})
+}
+
+func (m Model) recordAssistantEvidence(content string) {
+	m.recordEvidence(evidence.Event{Source: evidence.SourceAssistant, Summary: content})
+}
+
+func (m Model) recordToolCallEvidence(call llm.ToolCall, summary string) {
+	m.recordEvidence(evidence.Event{
+		Source:    evidence.SourceTool,
+		ToolName:  call.Name,
+		Arguments: sanitizeToolArguments(call.Name, call.Arguments),
+		Summary:   summary,
+	})
+}
+
+func (m Model) recordToolResultEvidence(call llm.ToolCall, results []nodeToolResult, summary string) {
+	source := evidence.SourceTool
+	if call.Name == metaToolSubagentsRun {
+		source = evidence.SourceSubagent
+	}
+	success := allNodeToolResultsSuccessful(results)
+	nodes := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.Node != "" && result.Node != "-" && result.Node != "local" {
+			nodes = append(nodes, result.Node)
+		}
+	}
+	m.recordEvidence(evidence.Event{
+		Source:    source,
+		ToolName:  call.Name,
+		Arguments: sanitizeToolArguments(call.Name, call.Arguments),
+		Summary:   summary,
+		Nodes:     nodes,
+		Success:   &success,
+	})
+}
+
+func (m Model) recordRiskEvidence(call llm.ToolCall, assessment security.RiskAssessment, outcome string) {
+	m.recordEvidence(evidence.Event{
+		Source:      evidence.SourceRisk,
+		ToolName:    call.Name,
+		Arguments:   sanitizeToolArguments(call.Name, call.Arguments),
+		Summary:     strings.TrimSpace(assessment.Reason),
+		RiskLevel:   riskLevelString(assessment.Level),
+		RiskOutcome: outcome,
+	})
+}
+
+func (m Model) recordEvidence(event evidence.Event) {
+	if m.incidentRecorder == nil || m.incidentRecorder.Current() == nil {
+		return
+	}
+	m.incidentRecorder.Append(event)
+}
+
+func riskLevelString(level security.RiskLevel) string {
+	switch level {
+	case security.RiskAllow:
+		return "allow"
+	case security.RiskConfirm:
+		return "confirm"
+	case security.RiskDeny:
+		return "deny"
+	default:
+		return "unknown"
+	}
 }
 
 func (m *Model) finishEmptyResponse(reason string) {
@@ -3311,6 +3728,9 @@ func (e subagentToolExecutor) ExecuteSubagentTool(ctx context.Context, call llm.
 		result := memory.HandleTool(e.model.memStore, "", call.Name, call.Arguments)
 		return result.Output, result.Success
 	default:
+		if isReadOnlyNodeTool(call.Name) {
+			return e.executeReadOnlyNodeTool(ctx, call)
+		}
 		return "blocked: subagents may only use read-only search, call_tool, memory_search, and memory_read", false
 	}
 }
@@ -3358,6 +3778,19 @@ func (e subagentToolExecutor) executeCallTool(ctx context.Context, call llm.Tool
 	return formatNodeToolResults(result.Results), allNodeToolResultsSuccessful(result.Results)
 }
 
+func (e subagentToolExecutor) executeReadOnlyNodeTool(ctx context.Context, call llm.ToolCall) (string, bool) {
+	nodes := e.targetNodes("")
+	if len(nodes) == 0 {
+		return "no allowed target nodes", false
+	}
+	toolArgs := call.Arguments
+	if toolArgs == nil {
+		toolArgs = json.RawMessage("{}")
+	}
+	result := e.model.fanOutCallTool(0, call, nodes, e.model.clients, call.Name, func() json.RawMessage { return toolArgs }, ctx)
+	return formatNodeToolResults(result.Results), allNodeToolResultsSuccessful(result.Results)
+}
+
 func (e subagentToolExecutor) targetNodes(specified string) []string {
 	allowed := e.nodes
 	if len(allowed) == 0 {
@@ -3379,21 +3812,7 @@ func (e subagentToolExecutor) targetNodes(specified string) []string {
 }
 
 func isReadOnlyNodeTool(name string) bool {
-	switch name {
-	case "fs/read", "fs/list", "fs/stat",
-		"sys/cpu", "sys/mem", "sys/disk", "sys/net", "sys/processes",
-		"svc/list", "svc/status",
-		"log/read", "log/journalctl",
-		"net/ping", "net/traceroute", "net/portcheck",
-		"web/search", "web/fetch",
-		"k8s/pods", "k8s/logs", "k8s/events", "k8s/describe",
-		"pkg/list", "pkg/search",
-		"cron/list", "cron/show",
-		"docker/ps", "docker/images", "docker/logs":
-		return true
-	default:
-		return false
-	}
+	return toolmeta.IsReadOnly(name)
 }
 
 func formatNodeToolResults(results []nodeToolResult) string {

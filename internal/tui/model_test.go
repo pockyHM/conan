@@ -4992,6 +4992,259 @@ func TestIdenticalToolCallsFillPlaceholderByID(t *testing.T) {
 	}
 }
 
+func TestIncidentCommandLifecycleAndExport(t *testing.T) {
+	dir := t.TempDir()
+	model := NewModel(ModelConfig{
+		Cluster:     "prod",
+		Model:       "model",
+		IncidentDir: filepath.Join(dir, "incidents"),
+		Nodes:       []NodeInfo{{Name: "web-1", Host: "10.0.0.1"}},
+	})
+
+	var cmd tea.Cmd
+	model, cmd = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start API latency"})
+	if cmd != nil {
+		t.Fatal("incident start should not return command")
+	}
+	if model.incidentRecorder == nil || model.incidentRecorder.Current() == nil {
+		t.Fatal("incident recorder should have current incident")
+	}
+	if !strings.Contains(model.status, "Incident started") {
+		t.Fatalf("status = %q", model.status)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "note checked nginx logs"})
+	if events := model.incidentRecorder.Events(); len(events) != 1 || events[0].Summary != "checked nginx logs" {
+		t.Fatalf("note events = %#v", events)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "export"})
+	if !strings.Contains(model.status, "incidents/") {
+		t.Fatalf("export status missing path: %q", model.status)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "incidents", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("exported reports = %#v, want one", matches)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "close"})
+	if model.incidentRecorder.Current() != nil {
+		t.Fatal("incident should be closed")
+	}
+}
+
+func TestIncidentStartDoesNotDiscardOpenIncident(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(t.TempDir(), "incidents")})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start First incident"})
+	model.incidentRecorder.Note("first note")
+	first := model.incidentRecorder.Current()
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start Second incident"})
+
+	current := model.incidentRecorder.Current()
+	if current == nil || current.ID != first.ID || current.Title != "First incident" {
+		t.Fatalf("open incident was replaced: before=%#v after=%#v", first, current)
+	}
+	if events := model.incidentRecorder.Events(); len(events) != 1 || events[0].Summary != "first note" {
+		t.Fatalf("existing incident events lost: %#v", events)
+	}
+}
+
+func TestIncidentCloseExportsClosedReport(t *testing.T) {
+	dir := t.TempDir()
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(dir, "incidents")})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start API latency"})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "close"})
+
+	matches, err := filepath.Glob(filepath.Join(dir, "incidents", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("reports = %#v, want one", matches)
+	}
+	content, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"status: closed", "closed_at:"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("closed report missing %q:\n%s", want, string(content))
+		}
+	}
+}
+
+func TestIncidentNoteRequiresOpenIncident(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(t.TempDir(), "incidents")})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "note checked nginx"})
+
+	if !strings.Contains(model.status, "no open incident") {
+		t.Fatalf("status = %q, want no open incident", model.status)
+	}
+}
+
+func TestIncidentRecordsUserToolRiskAndAssistantEvents(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster:     "prod",
+		Model:       "model",
+		IncidentDir: filepath.Join(t.TempDir(), "incidents"),
+		Nodes:       []NodeInfo{{Name: "web-1", Host: "10.0.0.1"}},
+	})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start API latency"})
+
+	updated, _ := model.startSubmittedMessage("check api", "check api", nil)
+	model = updated.(Model)
+	model.recordAssistantEvidence("api recovered")
+	updated, _ = model.Update(riskAssessmentMsg{
+		call:       llm.ToolCall{ID: "risk-1", Name: "svc/restart", Arguments: json.RawMessage(`{"service":"nginx"}`)},
+		assessment: security.RiskAssessment{Level: security.RiskConfirm, Reason: "restart service"},
+	})
+	model = updated.(Model)
+	updated, _ = model.Update(multiToolResultMsg{
+		Call:    llm.ToolCall{ID: "tool-1", Name: "svc/status", Arguments: json.RawMessage(`{"service":"nginx"}`)},
+		Results: []nodeToolResult{{Node: "web-1", Output: "active", Success: true}},
+	})
+	model = updated.(Model)
+
+	var sources []string
+	for _, event := range model.incidentRecorder.Events() {
+		sources = append(sources, string(event.Source))
+	}
+	joined := strings.Join(sources, ",")
+	for _, want := range []string{"user", "assistant", "risk", "tool"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("events missing %s: %#v", want, model.incidentRecorder.Events())
+		}
+	}
+}
+
+func TestRunbookDraftPreviewAndRunCommands(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "incidents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	incidentPath := filepath.Join(root, "incidents", "2026-05-23-api.md")
+	incident := `# API latency incident
+
+incident_id: incident-abc123
+cluster: prod
+
+## 摘要
+
+- API latency recovered.
+
+## 影响范围
+
+- nodes: web-1
+
+## 证据
+
+- 2026-05-23T10:00:00Z tool=svc/status success=true nginx active
+
+## 执行动作
+
+- 2026-05-23T10:05:00Z tool=svc/restart risk=confirm outcome=approved restart nginx
+
+## 验证结果
+
+- Latency recovered.
+`
+	if err := os.WriteFile(incidentPath, []byte(incident), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "prod",
+		Model:       "model",
+		IncidentDir: filepath.Join(root, "incidents"),
+	})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft incidents/2026-05-23-api.md"})
+	matches, err := filepath.Glob(filepath.Join(root, "runbooks", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("runbook drafts = %#v, want one", matches)
+	}
+	relRunbook := filepath.ToSlash(filepath.Join("runbooks", filepath.Base(matches[0])))
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "preview " + relRunbook})
+	if len(model.messages) == 0 || !strings.Contains(model.messages[len(model.messages)-1].content, "Runbook preview") {
+		t.Fatalf("preview message missing: %#v", model.messages)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "run " + relRunbook})
+	if len(model.messages) == 0 || !strings.Contains(model.messages[len(model.messages)-1].content, "Execute this Conan runbook") {
+		t.Fatalf("run injection missing: %#v", model.messages)
+	}
+	if !strings.Contains(model.messages[len(model.messages)-1].content, "existing risk review and confirmation flow") {
+		t.Fatalf("run injection should preserve confirmations:\n%s", model.messages[len(model.messages)-1].content)
+	}
+	if !strings.Contains(model.messages[len(model.messages)-1].content, "ask whether to append the outcome") {
+		t.Fatalf("run injection should ask about promotion back into runbook:\n%s", model.messages[len(model.messages)-1].content)
+	}
+}
+
+func TestRunbookCommandsRejectWrongPathCategories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "incidents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "runbooks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "incidents", "incident.md"), []byte("# Incident\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "runbooks", "runbook.md"), []byte("# Runbook\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(root, "incidents")})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft runbooks/runbook.md"})
+	if !strings.Contains(model.status, "incident path must be under incidents/") {
+		t.Fatalf("draft status = %q", model.status)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "preview incidents/incident.md"})
+	if !strings.Contains(model.status, "runbook path must be under runbooks/") {
+		t.Fatalf("preview status = %q", model.status)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "run incidents/incident.md"})
+	if !strings.Contains(model.status, "runbook path must be under runbooks/") {
+		t.Fatalf("run status = %q", model.status)
+	}
+}
+
+func TestRunbookDraftCreatesUniqueFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "incidents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	incident := "# API latency incident\n\ncluster: prod\n\n## 摘要\n\nok\n"
+	if err := os.WriteFile(filepath.Join(root, "incidents", "incident.md"), []byte(incident), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(root, "incidents")})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft incidents/incident.md"})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft incidents/incident.md"})
+
+	matches, err := filepath.Glob(filepath.Join(root, "runbooks", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("runbook files = %#v, want two unique files", matches)
+	}
+}
+
 func TestToolCallNeedsConfirmation(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	reviewer := security.NewReviewer(security.ReviewerConfig{
@@ -5047,6 +5300,50 @@ func TestToolCallNeedsConfirmation(t *testing.T) {
 	}
 	if strings.Contains(view, "╭") || strings.Contains(view, "╰") {
 		t.Fatalf("confirm mode should render inline at the bottom, not as a separate panel:\n%s", view)
+	}
+}
+
+func TestConfirmationSummaryShowsFileTransferImpact(t *testing.T) {
+	call := llm.ToolCall{
+		Name:      metaToolFilePut,
+		Arguments: json.RawMessage(`{"node":"web-1","local_path":"README.md","remote_path":"/tmp/README.md"}`),
+	}
+
+	lines := confirmationSummary(call, []string{"web-1"})
+	joined := strings.Join(lines, "\n")
+
+	for _, want := range []string{
+		"Tool: file_put",
+		"Safety: mutating",
+		"Scope: node",
+		"Node: web-1",
+		"local_path: README.md",
+		"remote_path: /tmp/README.md",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestConfirmationSummaryShowsCallToolInnerImpact(t *testing.T) {
+	call := llm.ToolCall{
+		Name:      metaToolCallTool,
+		Arguments: json.RawMessage(`{"node":"web-1","tool":"svc/restart","arguments":{"service":"nginx"}}`),
+	}
+
+	lines := confirmationSummary(call, []string{"web-1"})
+	joined := strings.Join(lines, "\n")
+
+	for _, want := range []string{
+		"Tool: call_tool",
+		"Inner tool: svc/restart",
+		"Node: web-1",
+		"service: nginx",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
 	}
 }
 

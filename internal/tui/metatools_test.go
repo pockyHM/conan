@@ -3,11 +3,14 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
@@ -188,6 +191,65 @@ func TestToolCacheSearchMergesDuplicateToolsAcrossNodes(t *testing.T) {
 	}
 }
 
+func TestToolCacheSearchResultsIncludeMetadata(t *testing.T) {
+	cache := newToolCache()
+	cache.Set("node-a", []mcpproto.ToolDefinition{{
+		Name:        "svc/status",
+		Description: "Show service status",
+		InputSchema: []byte(`{"type":"object"}`),
+	}})
+
+	results := cache.Search("service status", []string{"node-a"})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1: %#v", len(results), results)
+	}
+	if results[0].Safety != "read-only" {
+		t.Fatalf("safety = %q, want read-only", results[0].Safety)
+	}
+	if results[0].Scope != "node" {
+		t.Fatalf("scope = %q, want node", results[0].Scope)
+	}
+	if !reflect.DeepEqual(results[0].Capability, []string{"service"}) {
+		t.Fatalf("capability = %#v, want service", results[0].Capability)
+	}
+}
+
+func TestToolCacheSearchRanksCapabilityMetadata(t *testing.T) {
+	cache := newToolCache()
+	cache.Set("node-a", []mcpproto.ToolDefinition{
+		{Name: "exec", Description: "Run a service command", InputSchema: []byte(`{"type":"object"}`)},
+		{Name: "svc/status", Description: "Show daemon state", InputSchema: []byte(`{"type":"object"}`)},
+	})
+
+	results := cache.Search("service read only status", []string{"node-a"})
+
+	if len(results) < 2 {
+		t.Fatalf("results = %#v, want at least 2", results)
+	}
+	if results[0].Name != "svc/status" {
+		t.Fatalf("top result = %q, want svc/status: %#v", results[0].Name, results)
+	}
+}
+
+func TestToolCacheSearchFileTransferMetadata(t *testing.T) {
+	cache := newToolCache()
+	cache.Set("node-a", []mcpproto.ToolDefinition{{
+		Name:        "file_put",
+		Description: "Upload a local file",
+		InputSchema: []byte(`{"type":"object"}`),
+	}})
+
+	results := cache.Search("upload file", []string{"node-a"})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1: %#v", len(results), results)
+	}
+	if results[0].Name != "file_put" || results[0].Safety != "mutating" {
+		t.Fatalf("result = %#v, want mutating file_put", results[0])
+	}
+}
+
 func TestSubagentToolExecutorBlocksNonReadOnlyNodeTool(t *testing.T) {
 	executor := subagentToolExecutor{model: NewModel(ModelConfig{})}
 	output, ok := executor.ExecuteSubagentTool(context.Background(), llm.ToolCall{
@@ -200,5 +262,40 @@ func TestSubagentToolExecutorBlocksNonReadOnlyNodeTool(t *testing.T) {
 	}
 	if !strings.Contains(output, "blocked") {
 		t.Fatalf("output = %q, want blocked message", output)
+	}
+}
+
+func TestSubagentToolExecutorAllowsDirectReadOnlyNodeTool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req mcpproto.JSONRPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		switch req.Method {
+		case "tools/call":
+			_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("nginx active")}}))
+		default:
+			_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, map[string]any{}))
+		}
+	}))
+	defer server.Close()
+	client := mcp.NewClient(mcp.Config{BaseURL: server.URL})
+	model := NewModel(ModelConfig{
+		Clients: map[string]*mcp.Client{"node-a": client},
+		Nodes:   []NodeInfo{{Name: "node-a", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-a": true}
+	executor := subagentToolExecutor{model: model}
+
+	output, ok := executor.ExecuteSubagentTool(context.Background(), llm.ToolCall{
+		Name:      "svc/status",
+		Arguments: json.RawMessage(`{"name":"nginx"}`),
+	})
+
+	if !ok {
+		t.Fatalf("svc/status should be allowed, output=%s", output)
+	}
+	if !strings.Contains(output, "nginx active") {
+		t.Fatalf("output = %q", output)
 	}
 }

@@ -28,6 +28,15 @@ func TestParseSlashCommand(t *testing.T) {
 		{input: "/agent investigator check cpu", kind: CommandAgent, arg: "investigator check cpu"},
 		{input: "/subagents on", kind: CommandSubagents, arg: "on"},
 		{input: "/agents", kind: CommandSubagents},
+		{input: "/incident start API latency", kind: CommandIncident, arg: "start API latency"},
+		{input: "/incident status", kind: CommandIncident, arg: "status"},
+		{input: "/incident note checked nginx logs", kind: CommandIncident, arg: "note checked nginx logs"},
+		{input: "/incident export", kind: CommandIncident, arg: "export"},
+		{input: "/incident close", kind: CommandIncident, arg: "close"},
+		{input: "/runbook draft", kind: CommandRunbook, arg: "draft"},
+		{input: "/runbook draft incidents/2026-05-23-api.md", kind: CommandRunbook, arg: "draft incidents/2026-05-23-api.md"},
+		{input: "/runbook preview runbooks/2026-05-23-nginx-502.md", kind: CommandRunbook, arg: "preview runbooks/2026-05-23-nginx-502.md"},
+		{input: "/runbook run runbooks/2026-05-23-nginx-502.md", kind: CommandRunbook, arg: "run runbooks/2026-05-23-nginx-502.md"},
 	}
 
 	for _, tt := range tests {

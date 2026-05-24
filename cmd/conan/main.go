@@ -476,6 +476,7 @@ func newRootCommand() *cobra.Command {
 			Reviewer:           reviewer,
 			AuditLogger:        auditLog,
 			ConfigHome:         loader.Home(),
+			IncidentDir:        filepath.Join(loader.Home(), "memory", "memory", "incidents"),
 			MemoryStore:        memStore,
 			Subagents:          global.Subagents,
 			LocalWorkspaceRoot: workspaceRoot,
