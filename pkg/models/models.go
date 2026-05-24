@@ -6,6 +6,10 @@ func NewID() string {
 	return uuid.New().String()[:8]
 }
 
+func NewSessionID() string {
+	return uuid.New().String()
+}
+
 const (
 	CategoryEvent           = "event"
 	CategoryExperience      = "experience"

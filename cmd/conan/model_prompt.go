@@ -14,9 +14,9 @@ import (
 )
 
 type prompter struct {
-	in     *bufio.Reader
-	rawIn  io.Reader
-	out    io.Writer
+	in    *bufio.Reader
+	rawIn io.Reader
+	out   io.Writer
 }
 
 func newPrompter(in io.Reader, out io.Writer) *prompter {

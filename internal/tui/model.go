@@ -27,6 +27,7 @@ import (
 	"github.com/pockyHM/conan/internal/localtools"
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/internal/subagent"
@@ -101,7 +102,9 @@ const (
 	modeConfirm
 	modeSession
 	modeNodePrompt
+	modeNodeAddForm
 	modeLangSelect
+	modeConfig
 )
 
 type pingResultMsg struct {
@@ -115,6 +118,14 @@ type nodePromptState struct {
 	field    string
 	label    string
 	secret   bool
+}
+
+type nodeAddFormResultMsg struct {
+	result  nodeadd.Result
+	cluster string
+	tls     bool
+	output  string
+	err     error
 }
 
 const toolOutputPreviewLines = 4
@@ -160,12 +171,14 @@ type Model struct {
 	pendingRisk        *security.RiskAssessment
 	confirmChoice      int // 0=Allow, 1=Deny
 	nodePrompt         nodePromptState
+	nodeAddForm        nodeAddForm
 
 	memStore        *memory.Store
 	memoryExtractor MemoryExtractor
 	subagents       configschema.SubagentConfig
 	subagentResults []subagent.Result
 	sessionList     sessionList
+	configScreen    configScreen
 	ac              autocomplete
 
 	input              string
@@ -780,6 +793,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.completeToolAndResume(msg.streamID, msg.Call)
 
+	case nodeAddFormResultMsg:
+		if msg.err != nil {
+			m.mode = modeNodeAddForm
+			m.nodeAddForm = m.nodeAddForm.withError(msg.output)
+			m.status = msg.output
+			return m, nil
+		}
+		m.mode = modeNodeSelect
+		m = m.applyNodeAddResult(msg.cluster, msg.result, msg.tls)
+		m.nodeAddForm = nodeAddForm{}
+		m.status = m.uiLanguage.tr("Node added and deployed", "节点已添加并部署")
+		m.updateViewportContent()
+		if len(m.clients) > 0 {
+			return m, fetchNodeToolsBeforeNodeAddResume(0, m.clients)
+		}
+		return m, nil
+
 	case pingResultMsg:
 		m.markNodeOnline(msg.node, msg.online)
 		return m, nil
@@ -825,8 +855,14 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeNodePrompt {
 		return m.handleNodePromptKey(key)
 	}
+	if m.mode == modeNodeAddForm {
+		return m.handleNodeAddFormKey(key)
+	}
 	if m.mode == modeLangSelect {
 		return m.handleLangSelectKey(key)
+	}
+	if m.mode == modeConfig {
+		return m.handleConfigKey(key)
 	}
 	if m.mode == modeSession {
 		return m.handleSessionSelectKey(key)
@@ -1098,6 +1134,80 @@ func (m Model) cancelNodePrompt() (tea.Model, tea.Cmd) {
 	return m.completeToolAndResume(state.streamID, state.call)
 }
 
+func (m Model) handleNodeAddFormKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeNodeSelect
+		m.nodeAddForm = nodeAddForm{}
+		m.status = m.uiLanguage.tr("Node add cancelled", "已取消添加节点")
+		return m, nil
+	default:
+		var submitted bool
+		m.nodeAddForm, submitted = m.nodeAddForm.Update(key)
+		if !submitted {
+			return m, nil
+		}
+		return m.submitNodeAddForm()
+	}
+}
+
+func (m Model) submitNodeAddForm() (tea.Model, tea.Cmd) {
+	values, err := m.nodeAddForm.Values()
+	if err != nil {
+		m.nodeAddForm = m.nodeAddForm.withError(err.Error())
+		m.status = err.Error()
+		return m, nil
+	}
+	args := nodeAddArgs{
+		Host:      values.Host,
+		Name:      values.Name,
+		User:      values.User,
+		Password:  values.Password,
+		AgentPort: values.AgentPort,
+	}
+	rawArgs, err := json.Marshal(args)
+	if err != nil {
+		m.nodeAddForm = m.nodeAddForm.withError(err.Error())
+		m.status = err.Error()
+		return m, nil
+	}
+	call := llm.ToolCall{ID: "node-add-form", Name: metaToolNodeAdd, Arguments: rawArgs}
+	runnerModel := m
+	runnerModel.nodeToolsEnabled = true
+	m.status = m.uiLanguage.tr("Adding node...", "正在添加节点...")
+	return m, runnerModel.dispatchNodeAddForm(call)
+}
+
+func (m Model) dispatchNodeAddForm(call llm.ToolCall) tea.Cmd {
+	cmd := m.dispatchNodeAdd(0, call)
+	return func() tea.Msg {
+		msg := cmd()
+		switch result := msg.(type) {
+		case nodeAddResultMsg:
+			return nodeAddFormResultMsg{
+				result:  result.Result,
+				cluster: result.Cluster,
+				tls:     result.TLS,
+				output:  result.Output,
+			}
+		case multiToolResultMsg:
+			var parts []string
+			for _, r := range result.Results {
+				if r.Output != "" {
+					parts = append(parts, r.Output)
+				}
+			}
+			output := strings.Join(parts, "\n")
+			if output == "" {
+				output = "node add failed"
+			}
+			return nodeAddFormResultMsg{output: output, err: fmt.Errorf("%s", output)}
+		default:
+			return nodeAddFormResultMsg{output: fmt.Sprintf("node add failed: unexpected result %T", msg), err: fmt.Errorf("unexpected result %T", msg)}
+		}
+	}
+}
+
 func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyUp:
@@ -1179,6 +1289,12 @@ func (m *Model) addPendingToolToAllowlist(call llm.ToolCall) error {
 func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.Type {
 	case tea.KeyEnter:
+		if m.nodeSelector.AddSelected() {
+			m.mode = modeNodeAddForm
+			m.nodeAddForm = newNodeAddForm(m.uiLanguage)
+			m.status = m.uiLanguage.tr("Enter node details", "输入节点信息")
+			return m, nil
+		}
 		m.selectedNodes = m.nodeSelector.Selected()
 		m.mode = modeChat
 		m.status = fmt.Sprintf(m.uiLanguage.tr("Selected %d node(s)", "已选择 %d 个节点"), len(m.selectedNodes))
@@ -1218,6 +1334,131 @@ func (m Model) handleLangSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) handleConfigKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.configScreen.editMode {
+	case configEditText:
+		switch key.Type {
+		case tea.KeyEnter:
+			return m.saveConfigScreenValue(m.configScreen.EditedValue())
+		case tea.KeyEsc, tea.KeyCtrlC:
+			m.configScreen.CancelEdit()
+			m.status = m.uiLanguage.tr("Config edit cancelled", "已取消配置编辑")
+			return m, nil
+		case tea.KeyBackspace:
+			if len(m.configScreen.editValue) > 0 {
+				runes := []rune(m.configScreen.editValue)
+				m.configScreen.editValue = string(runes[:len(runes)-1])
+			}
+			return m, nil
+		case tea.KeyRunes:
+			m.configScreen.editValue += string(key.Runes)
+			return m, nil
+		case tea.KeySpace:
+			m.configScreen.editValue += " "
+			return m, nil
+		default:
+			return m, nil
+		}
+	case configEditEnum:
+		switch key.Type {
+		case tea.KeyEnter:
+			return m.saveConfigScreenValue(m.configScreen.EditedValue())
+		case tea.KeyEsc, tea.KeyCtrlC:
+			m.configScreen.CancelEdit()
+			m.status = m.uiLanguage.tr("Config selection cancelled", "已取消配置选择")
+			return m, nil
+		case tea.KeyUp:
+			m.configScreen.MoveEnum(-1)
+			return m, nil
+		case tea.KeyDown:
+			m.configScreen.MoveEnum(1)
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+
+	switch key.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeChat
+		m.status = m.uiLanguage.tr("Config closed", "配置已关闭")
+		return m, nil
+	case tea.KeyUp:
+		m.configScreen.Move(-1)
+		return m, nil
+	case tea.KeyDown:
+		m.configScreen.Move(1)
+		return m, nil
+	case tea.KeyRunes:
+		if strings.EqualFold(string(key.Runes), "r") {
+			return m.openConfigScreen()
+		}
+		return m, nil
+	case tea.KeyEnter:
+		item := m.configScreen.SelectedItem()
+		if item.Type == configBool {
+			if item.Value == "true" {
+				return m.saveConfigScreenValue("false")
+			}
+			return m.saveConfigScreenValue("true")
+		}
+		m.configScreen.StartEdit()
+		m.status = m.uiLanguage.tr("Editing config", "正在编辑配置")
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) openConfigScreen() (Model, tea.Cmd) {
+	loader := cfgloader.NewLoader(m.configHome)
+	global, err := loader.LoadGlobal()
+	if err != nil {
+		m.status = m.uiLanguage.tr("Config load failed: ", "配置加载失败: ") + err.Error()
+		return m, nil
+	}
+	m.configScreen = newConfigScreen(global)
+	m.mode = modeConfig
+	m.status = m.uiLanguage.tr("Global config", "全局配置")
+	return m, nil
+}
+
+func (m Model) saveConfigScreenValue(value string) (tea.Model, tea.Cmd) {
+	key := m.configScreen.SelectedKey()
+	previous := *m.configScreen.global
+	if err := m.configScreen.SetValue(key, value); err != nil {
+		m.status = m.uiLanguage.tr("Config validation failed: ", "配置校验失败: ") + err.Error()
+		return m, nil
+	}
+	loader := cfgloader.NewLoader(m.configHome)
+	if err := loader.SaveGlobal(m.configScreen.global); err != nil {
+		selected := m.configScreen.selected
+		m.configScreen = newConfigScreen(&previous)
+		m.configScreen.selected = selected
+		m.status = m.uiLanguage.tr("Config save failed: ", "配置保存失败: ") + err.Error()
+		return m, nil
+	}
+	m.configScreen.CancelEdit()
+	m = m.applyGlobalConfigRuntime(*m.configScreen.global)
+	m.status = m.uiLanguage.tr("Saved config.yaml", "已保存 config.yaml")
+	return m, nil
+}
+
+func (m Model) applyGlobalConfigRuntime(global configschema.GlobalConfig) Model {
+	if strings.TrimSpace(global.DefaultModel) != "" {
+		m.model = strings.TrimSpace(global.DefaultModel)
+	}
+	if strings.TrimSpace(global.DefaultCluster) != "" {
+		m.cluster = strings.TrimSpace(global.DefaultCluster)
+	}
+	if lang, ok := parseUILanguage(global.UILanguage); ok {
+		m = m.applyUILanguage(lang)
+	}
+	m.subagents = normalizeSubagentConfig(global.Subagents)
+	m.vision = normalizeVisionConfig(global.Vision)
+	return m
+}
+
 func (m Model) applyUILanguage(lang uiLanguage) Model {
 	m.uiLanguage = lang
 	m.ac = newAutocompleteWithLanguage(lang)
@@ -1246,8 +1487,14 @@ func (m Model) View() string {
 	if m.mode == modeNodeSelect {
 		return header + "\n\n" + m.nodeSelector.View() + "\n\n" + statusView
 	}
+	if m.mode == modeNodeAddForm {
+		return header + "\n\n" + m.nodeAddForm.View() + "\n\n" + statusView
+	}
 	if m.mode == modeLangSelect {
 		return header + "\n\n" + m.langSelector.View() + "\n\n" + statusView
+	}
+	if m.mode == modeConfig {
+		return header + "\n\n" + m.configScreen.View(m.width, m.uiLanguage) + "\n\n" + statusView
 	}
 	if m.mode == modeSession {
 		return header + "\n\n" + m.sessionList.View(m.width) + "\n\n" + statusView
@@ -1757,7 +2004,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]", "Conan: /help /clear /compact [重点] /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit]"),
+			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /config /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit]", "Conan: /help /clear /compact [重点] /config /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit]"),
 		})
 		m.status = m.uiLanguage.tr("Help shown", "已显示帮助")
 	case CommandClear:
@@ -1790,6 +2037,8 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 			visible := strings.TrimSpace("/skill " + name + " " + rest)
 			return m.submitSkillMessage(visible, skill, rest)
 		}
+	case CommandConfig:
+		return m.openConfigScreen()
 	case CommandLang:
 		if strings.TrimSpace(cmd.Arg) != "" {
 			lang, ok := parseUILanguage(cmd.Arg)
@@ -1828,13 +2077,13 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 			m.status = m.uiLanguage.tr("Usage: /node [off]", "用法: /node [off]")
 		}
 	case CommandNodes:
-		if len(m.nodes) == 0 {
-			m.status = m.uiLanguage.tr("No nodes configured", "未配置节点")
-			return m, nil
-		}
 		m.mode = modeNodeSelect
 		m.prevSelected = m.selectedNodes
 		m.nodeSelector = newNodeSelector(m.nodes, m.selectedNodes, m.uiLanguage)
+		if len(m.nodes) == 0 {
+			m.status = m.uiLanguage.tr("Select Add new node to configure one", "选择添加新节点来配置")
+			return m, nil
+		}
 		m.status = m.uiLanguage.tr("Checking node status...", "正在检查节点状态...")
 		return m, m.pingNodes()
 	case CommandMemory:

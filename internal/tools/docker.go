@@ -41,7 +41,9 @@ func (d *dockerImagesTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"filter":{"type":"string","description":"Filter expression"}}}`)
 }
 func (d *dockerImagesTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ Filter string `json:"filter"` }
+	var args struct {
+		Filter string `json:"filter"`
+	}
 	json.Unmarshal(input, &args)
 	cmd := "docker images"
 	if args.Filter != "" {

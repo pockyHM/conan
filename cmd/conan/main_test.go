@@ -207,13 +207,20 @@ func TestSkillsUpdateCommandRegistered(t *testing.T) {
 	}
 }
 
-func TestTUICommandRegistered(t *testing.T) {
-	stdout, _, err := executeCommand("tui", "--help")
+func TestTUICommandRemovedFromHelp(t *testing.T) {
+	stdout, _, err := executeCommand("--help")
 	if err != nil {
 		t.Fatalf("help: %v", err)
 	}
-	if !strings.Contains(stdout, "Start the interactive TUI") {
+	if strings.Contains(stdout, "tui") || strings.Contains(stdout, "Start the interactive TUI") {
 		t.Fatalf("help output = %q", stdout)
+	}
+}
+
+func TestTUICommandIsNotRegistered(t *testing.T) {
+	_, _, err := executeCommand("tui")
+	if err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("err = %v, want unknown command", err)
 	}
 }
 
@@ -301,7 +308,7 @@ func TestResumeCommandLoadsSessionInTUI(t *testing.T) {
 	}
 }
 
-func TestTUICommandPrintsResumeHintAfterExit(t *testing.T) {
+func TestRootCommandPrintsResumeHintAfterExit(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 	defer logging.Close()
@@ -314,9 +321,9 @@ func TestTUICommandPrintsResumeHintAfterExit(t *testing.T) {
 
 	cmd := newRootCommand()
 	cmd.SetOut(&output)
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	got := output.String()
@@ -342,7 +349,7 @@ func applyTeaCommandForTest(t *testing.T, model tea.Model, cmd tea.Cmd) tea.Mode
 	return next
 }
 
-func TestTUICommandUsesConfiguredStreams(t *testing.T) {
+func TestRootCommandUsesConfiguredStreams(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 	defer logging.Close()
@@ -364,9 +371,9 @@ func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	cmd := newRootCommand()
 	cmd.SetIn(input)
 	cmd.SetOut(&output)
-	cmd.SetArgs([]string{"tui"})
+	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 	if !called {
 		t.Fatal("tui program was not started")
@@ -391,7 +398,7 @@ func TestTUIProgramOptionsEnableMouseCellMotion(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
+func TestRootCommandInitializesConfiguredLogging(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 
@@ -407,9 +414,9 @@ func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	contents, err := os.ReadFile(logFile)
@@ -421,7 +428,7 @@ func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitializesAuditLogger(t *testing.T) {
+func TestRootCommandInitializesAuditLogger(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 
@@ -436,9 +443,9 @@ func TestTUICommandInitializesAuditLogger(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(home, "logs", "audit.log")); err != nil {
@@ -446,7 +453,7 @@ func TestTUICommandInitializesAuditLogger(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
+func TestRootCommandInitializesLoggingWithEmptyFile(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 	defer logging.Close()
@@ -468,9 +475,9 @@ func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	contents, err := os.ReadFile(previousLogFile)
@@ -482,7 +489,7 @@ func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
+func TestRootCommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 	oldRun := runTeaProgram
 	oldVersion := version
 	defer func() {
@@ -560,9 +567,9 @@ func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 }
 

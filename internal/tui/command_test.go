@@ -12,6 +12,7 @@ func TestParseSlashCommand(t *testing.T) {
 		{input: "/clear", kind: CommandClear},
 		{input: "/exit", kind: CommandExit},
 		{input: "/cluster production", kind: CommandCluster, arg: "production"},
+		{input: "/config", kind: CommandConfig},
 		{input: "/lang", kind: CommandLang},
 		{input: "/language zh", kind: CommandLang, arg: "zh"},
 		{input: "/model claude-sonnet", kind: CommandModel, arg: "claude-sonnet"},

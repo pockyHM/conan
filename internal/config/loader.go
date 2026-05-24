@@ -135,35 +135,6 @@ func normalizeModelsForSave(models []configschema.ModelConfig) {
 	}
 }
 
-func yamlPathExists(data []byte, path ...string) (bool, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return false, err
-	}
-	if len(root.Content) == 0 {
-		return false, nil
-	}
-	node := root.Content[0]
-	for _, want := range path {
-		if node.Kind != yaml.MappingNode {
-			return false, nil
-		}
-		found := false
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			if node.Content[i].Value != want {
-				continue
-			}
-			node = node.Content[i+1]
-			found = true
-			break
-		}
-		if !found {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
 func preserveExistingModelAPIKeys(path string, models []configschema.ModelConfig) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -379,7 +350,7 @@ func mergeCluster(base *configschema.ClusterConfig, override configschema.Cluste
 	if override.Inherits != "" {
 		base.Inherits = override.Inherits
 	}
-	mergeAgent(&base.Agent, override.Agent, fields["agent"])
+	mergeAgent(&base.Agent, override.Agent, fields["agent"], fields["agent.web"])
 	if override.NodeDefaults.User != "" {
 		base.NodeDefaults.User = override.NodeDefaults.User
 	}
@@ -388,7 +359,7 @@ func mergeCluster(base *configschema.ClusterConfig, override configschema.Cluste
 	}
 }
 
-func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfig, fields map[string]bool) {
+func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfig, fields map[string]bool, webFields map[string]bool) {
 	if override.Listen != "" {
 		base.Listen = override.Listen
 	}
@@ -416,10 +387,10 @@ func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfi
 	if override.LogLevel != "" {
 		base.LogLevel = override.LogLevel
 	}
-	mergeWeb(&base.Web, override.Web)
+	mergeWeb(&base.Web, override.Web, webFields)
 }
 
-func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig) {
+func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig, fields map[string]bool) {
 	if override.SearchProvider != "" {
 		base.SearchProvider = override.SearchProvider
 	}
@@ -438,7 +409,7 @@ func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig) {
 	if override.FetchMaxChars != 0 {
 		base.FetchMaxChars = override.FetchMaxChars
 	}
-	if override.AllowPrivateNetwork {
+	if fields["allow_private_network"] {
 		base.AllowPrivateNetwork = override.AllowPrivateNetwork
 	}
 }
@@ -522,7 +493,54 @@ func collectFields(node *yaml.Node, fields map[string]map[string]bool) {
 			continue
 		}
 		for j := 0; j+1 < len(value.Content); j += 2 {
-			fields[key][value.Content[j].Value] = true
+			childKey := value.Content[j].Value
+			childValue := value.Content[j+1]
+			fields[key][childKey] = true
+			collectNestedFields(key+"."+childKey, childValue, fields)
 		}
 	}
+}
+
+func collectNestedFields(path string, node *yaml.Node, fields map[string]map[string]bool) {
+	if node.Kind != yaml.MappingNode {
+		return
+	}
+	if fields[path] == nil {
+		fields[path] = map[string]bool{}
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		value := node.Content[i+1]
+		fields[path][key] = true
+		collectNestedFields(path+"."+key, value, fields)
+	}
+}
+
+func yamlPathExists(data []byte, path ...string) (bool, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false, err
+	}
+	if len(root.Content) == 0 {
+		return false, nil
+	}
+	node := root.Content[0]
+	for _, want := range path {
+		if node.Kind != yaml.MappingNode {
+			return false, nil
+		}
+		found := false
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value != want {
+				continue
+			}
+			node = node.Content[i+1]
+			found = true
+			break
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return true, nil
 }

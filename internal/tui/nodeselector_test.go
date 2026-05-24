@@ -37,8 +37,19 @@ func TestNodeSelectorNavigation(t *testing.T) {
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if s.cursor != 3 {
+		t.Fatalf("cursor at add row = %d, want 3", s.cursor)
+	}
+	if !s.AddSelected() {
+		t.Fatal("add row should be selected at bottom")
+	}
+
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyUp})
 	if s.cursor != 2 {
-		t.Fatalf("cursor at bottom = %d, want 2", s.cursor)
+		t.Fatalf("cursor above add row = %d, want 2", s.cursor)
+	}
+	if s.AddSelected() {
+		t.Fatal("node row should not report add selected")
 	}
 }
 
@@ -96,8 +107,19 @@ func TestNodeSelectorView(t *testing.T) {
 func TestNodeSelectorEmptyNodes(t *testing.T) {
 	s := newNodeSelector(nil, nil)
 	view := s.View()
-	if !strings.Contains(view, "No nodes configured") {
-		t.Fatalf("empty selector should show message:\n%s", view)
+	if !strings.Contains(view, "Add new node") {
+		t.Fatalf("empty selector should show add node option:\n%s", view)
+	}
+	if !s.AddSelected() {
+		t.Fatal("empty selector should select add row")
+	}
+}
+
+func TestNodeSelectorAddRowView(t *testing.T) {
+	s := newNodeSelector([]NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}}, nil)
+	view := s.View()
+	if !strings.Contains(view, "Add new node") {
+		t.Fatalf("selector view missing add node option:\n%s", view)
 	}
 }
 

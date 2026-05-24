@@ -23,6 +23,7 @@ var commandRegistry = []commandInfo{
 	{Name: "compact", Description: "Compact conversation context", ArgHint: "[focus]"},
 	{Name: "exit", Description: "Exit Conan"},
 	{Name: "cluster", Description: "Switch/display cluster", ArgHint: "[name]"},
+	{Name: "config", Description: "Open global configuration"},
 	{Name: "skills", Description: "List and manage skills", ArgHint: "[install|remove|update]"},
 	{Name: "skill", Description: "Use a skill", ArgHint: "<name> [arguments]"},
 	{Name: "lang", Description: "Change UI language"},

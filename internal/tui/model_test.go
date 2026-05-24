@@ -26,6 +26,7 @@ import (
 	"github.com/pockyHM/conan/internal/logging"
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/pkg/configschema"
@@ -201,6 +202,200 @@ func TestLangCommandAcceptsDirectLanguageArg(t *testing.T) {
 	}
 	if !strings.Contains(model.View(), "界面语言已切换为 中文") {
 		t.Fatalf("view missing changed language status:\n%s", model.View())
+	}
+}
+
+func TestConfigCommandOpensGlobalConfigPage(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_model: claude\nlogging:\n  level: info\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/config")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeConfig {
+		t.Fatalf("mode = %v, want modeConfig", model.mode)
+	}
+	view := model.View()
+	for _, want := range []string{"Global Config", "default_model", "logging.level", "info"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("config view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestConfigPageSelectsLoggingLevelAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  level: info\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for !strings.Contains(model.configScreen.SelectedKey(), "logging.level") {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	if model.mode != modeConfig {
+		t.Fatalf("mode = %v, want modeConfig", model.mode)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "level: debug") {
+		t.Fatalf("config missing debug level:\n%s", data)
+	}
+	if !strings.Contains(model.View(), "Saved config.yaml") {
+		t.Fatalf("view missing saved status:\n%s", model.View())
+	}
+}
+
+func TestConfigPageEditsStringAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: old\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "old", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "default_cluster" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	for range []rune("old") {
+		nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		model = nextModel.(Model)
+	}
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("prod")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	if model.cluster != "prod" {
+		t.Fatalf("cluster = %q, want prod", model.cluster)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "default_cluster: prod") {
+		t.Fatalf("config missing default_cluster prod:\n%s", data)
+	}
+}
+
+func TestConfigPageTogglesBoolAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  audit: false\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "logging.audit" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "audit: true") {
+		t.Fatalf("config missing audit true:\n%s", data)
+	}
+}
+
+func TestConfigPageRejectsInvalidIntWithoutSaving(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("vision:\n  max_images: 10\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "vision.max_images" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	for range []rune("10") {
+		nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		model = nextModel.(Model)
+	}
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("bad")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "max_images: 10") {
+		t.Fatalf("config should keep max_images 10:\n%s", data)
+	}
+	if !strings.Contains(model.View(), "Config validation failed") {
+		t.Fatalf("view missing validation error:\n%s", model.View())
+	}
+}
+
+func TestConfigPageEditsListAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("security:\n  local_file_whitelist:\n    - README.md\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "security.local_file_whitelist" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(", docs/spec.md")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	contents := string(data)
+	for _, want := range []string{"- README.md", "- docs/spec.md"} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("config missing %q:\n%s", want, contents)
+		}
+	}
+}
+
+func TestConfigPageEscReturnsToChat(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = nextModel.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
 	}
 }
 
@@ -3624,6 +3819,159 @@ func TestNodesCommandOpensSelector(t *testing.T) {
 	}
 }
 
+func TestNodesCommandOpensSelectorWithOnlyAddOptionWhenEmpty(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandNodes})
+	model = next
+
+	if cmd != nil {
+		t.Fatal("/nodes with no nodes should not ping")
+	}
+	if model.mode != modeNodeSelect {
+		t.Fatalf("mode = %v, want node select", model.mode)
+	}
+	if !model.nodeSelector.AddSelected() {
+		t.Fatal("empty selector should select add row")
+	}
+	if !strings.Contains(model.View(), "Add new node") {
+		t.Fatalf("view missing add node option:\n%s", model.View())
+	}
+}
+
+func TestNodeSelectorEnterOnAddRowOpensNodeAddForm(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "test",
+		Model:   "m",
+		Nodes: []NodeInfo{
+			{Name: "node-01", Host: "10.0.1.1", Online: true},
+		},
+	})
+	model.mode = modeNodeSelect
+	model.nodeSelector = newNodeSelector(model.nodes, model.selectedNodes)
+	model.nodeSelector.cursor = len(model.nodes)
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("opening node add form returned command")
+	}
+	if model.mode != modeNodeAddForm {
+		t.Fatalf("mode = %v, want node add form", model.mode)
+	}
+	if !strings.Contains(model.View(), "Add New Node") {
+		t.Fatalf("view missing node add form:\n%s", model.View())
+	}
+}
+
+func TestNodeAddFormSubmitCallsRunnerAndRefreshesSelector(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), "default_cluster: test\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "test", "cluster.yaml"), "name: test\n")
+
+	var gotReq nodeadd.Request
+	model := NewModel(ModelConfig{
+		Cluster:    "test",
+		Model:      "m",
+		ConfigHome: home,
+		NodeAddRunner: nodeAddRunnerFunc(func(_ context.Context, req nodeadd.Request) (nodeadd.Result, error) {
+			gotReq = req
+			return nodeadd.Result{
+				Node: configschema.NodeConfig{
+					Name: req.Name,
+					Host: req.Input,
+					Agent: &configschema.NodeAgentOverride{
+						Port:  req.AgentPort,
+						Token: "agent-token",
+					},
+				},
+				Deployed: true,
+			}, nil
+		}),
+	})
+	model.mode = modeNodeAddForm
+	model.prevSelected = map[string]bool{}
+	model.nodeAddForm = newNodeAddForm(uiLanguageEnglish).
+		withValue(nodeAddFormFieldName, "web-1").
+		withValue(nodeAddFormFieldHost, "10.0.0.12").
+		withValue(nodeAddFormFieldPort, "9281").
+		withValue(nodeAddFormFieldUser, "deploy").
+		withValue(nodeAddFormFieldPassword, "secret")
+	model.nodeAddForm.cursor = nodeAddFormFieldPassword
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submitting node add form returned nil command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if gotReq.ClusterName != "test" || gotReq.Name != "web-1" || gotReq.Input != "10.0.0.12" {
+		t.Fatalf("request identity = %#v", gotReq)
+	}
+	if gotReq.AgentPort != 9281 || gotReq.Username != "deploy" || gotReq.Password != "secret" {
+		t.Fatalf("request deploy fields = %#v", gotReq)
+	}
+	if model.mode != modeNodeSelect {
+		t.Fatalf("mode = %v, want node select", model.mode)
+	}
+	if !model.selectedNodes["web-1"] {
+		t.Fatalf("selected nodes = %#v, want web-1 selected", model.selectedNodes)
+	}
+	if len(model.nodes) != 1 || model.nodes[0].Name != "web-1" {
+		t.Fatalf("nodes = %#v, want web-1", model.nodes)
+	}
+	if !strings.Contains(model.View(), "web-1") || !strings.Contains(model.View(), "10.0.0.12") {
+		t.Fatalf("selector view missing new node:\n%s", model.View())
+	}
+}
+
+func TestNodeAddFormSubmitFailureKeepsFormOpen(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), "default_cluster: test\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "test", "cluster.yaml"), "name: test\n")
+
+	model := NewModel(ModelConfig{
+		Cluster:    "test",
+		Model:      "m",
+		ConfigHome: home,
+		NodeAddRunner: nodeAddRunnerFunc(func(context.Context, nodeadd.Request) (nodeadd.Result, error) {
+			return nodeadd.Result{}, errors.New("deploy failed")
+		}),
+	})
+	model.mode = modeNodeAddForm
+	model.nodeAddForm = newNodeAddForm(uiLanguageEnglish).
+		withValue(nodeAddFormFieldName, "web-1").
+		withValue(nodeAddFormFieldHost, "10.0.0.12").
+		withValue(nodeAddFormFieldPort, "9281").
+		withValue(nodeAddFormFieldUser, "deploy").
+		withValue(nodeAddFormFieldPassword, "secret")
+	model.nodeAddForm.cursor = nodeAddFormFieldPassword
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submitting node add form returned nil command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if model.mode != modeNodeAddForm {
+		t.Fatalf("mode = %v, want node add form", model.mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "deploy failed") {
+		t.Fatalf("view missing error:\n%s", view)
+	}
+	if !strings.Contains(view, "web-1") || !strings.Contains(view, "10.0.0.12") {
+		t.Fatalf("form did not preserve values:\n%s", view)
+	}
+}
+
 func TestNodeCommandEnablesNodeToolsForNextResponse(t *testing.T) {
 	model := NewModel(ModelConfig{})
 	next, _ := model.applyCommand(SlashCommand{Kind: CommandNode})
@@ -4030,11 +4378,14 @@ func TestNodesNoNodesConfigured(t *testing.T) {
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 
-	if model.mode != modeChat {
-		t.Fatal("should stay in chat mode with no nodes")
+	if model.mode != modeNodeSelect {
+		t.Fatal("should enter node selector with no nodes")
 	}
-	if !strings.Contains(model.status, "No nodes") {
-		t.Fatalf("status = %q, want no nodes message", model.status)
+	if !model.nodeSelector.AddSelected() {
+		t.Fatal("add row should be selected when no nodes are configured")
+	}
+	if !strings.Contains(model.View(), "Add new node") {
+		t.Fatalf("view should show add option:\n%s", model.View())
 	}
 }
 

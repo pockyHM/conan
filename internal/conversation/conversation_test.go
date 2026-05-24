@@ -3,6 +3,7 @@ package conversation
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
@@ -44,6 +45,26 @@ func TestConversationAppendsMessagesWithRolesAndToolFields(t *testing.T) {
 	assertMessage(t, msgs[0], RoleUser, "hello", "", "", "")
 	assertMessage(t, msgs[1], RoleAssistant, "hi there", "", "", "")
 	assertMessage(t, msgs[2], RoleTool, "file1\nfile2", "shell", "ls", "file1\nfile2")
+}
+
+func TestNewConversationUsesUUIDSessionID(t *testing.T) {
+	c := New("cluster-a", []string{"node-1"}, "gpt-4.1")
+	if _, err := uuid.Parse(c.ID()); err != nil {
+		t.Fatalf("conversation id %q is not a valid UUID: %v", c.ID(), err)
+	}
+	if len(c.ID()) != 36 {
+		t.Fatalf("conversation id length = %d, want 36", len(c.ID()))
+	}
+}
+
+func TestRestoreWithoutIDUsesUUIDSessionID(t *testing.T) {
+	c := Restore("", "cluster-a", nil, "gpt-4.1", nil)
+	if _, err := uuid.Parse(c.ID()); err != nil {
+		t.Fatalf("restored conversation id %q is not a valid UUID: %v", c.ID(), err)
+	}
+	if len(c.ID()) != 36 {
+		t.Fatalf("restored conversation id length = %d, want 36", len(c.ID()))
+	}
 }
 
 func TestConversationContextKeepsNewestMessagesWithinBudget(t *testing.T) {

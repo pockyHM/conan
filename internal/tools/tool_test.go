@@ -10,8 +10,8 @@ import (
 
 type dummyTool struct{}
 
-func (d *dummyTool) Name() string          { return "test/dummy" }
-func (d *dummyTool) Description() string    { return "A dummy tool" }
+func (d *dummyTool) Name() string        { return "test/dummy" }
+func (d *dummyTool) Description() string { return "A dummy tool" }
 func (d *dummyTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`)
 }

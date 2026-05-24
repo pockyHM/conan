@@ -24,7 +24,7 @@ type Conversation struct {
 
 func New(cluster string, nodes []string, model string) *Conversation {
 	return &Conversation{
-		id:        models.NewID(),
+		id:        models.NewSessionID(),
 		cluster:   cluster,
 		nodes:     append([]string(nil), nodes...),
 		model:     model,
@@ -34,7 +34,7 @@ func New(cluster string, nodes []string, model string) *Conversation {
 
 func Restore(id string, cluster string, nodes []string, model string, messages []models.Message) *Conversation {
 	if id == "" {
-		id = models.NewID()
+		id = models.NewSessionID()
 	}
 	c := &Conversation{
 		id:        id,
@@ -49,7 +49,7 @@ func Restore(id string, cluster string, nodes []string, model string, messages [
 
 func NewWithMessages(id string, cluster string, nodes []string, model string, messages []models.Message) *Conversation {
 	if id == "" {
-		id = models.NewID()
+		id = models.NewSessionID()
 	}
 	c := New(cluster, nodes, model)
 	c.id = id

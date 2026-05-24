@@ -479,6 +479,27 @@ agent:
 	}
 }
 
+func TestLoadClusterAllowsWebPrivateNetworkFalseOverride(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "clusters", "base.yaml"), `agent:
+  web:
+    allow_private_network: true
+`)
+	writeFile(t, filepath.Join(home, "clusters", "dev", "cluster.yaml"), `name: dev
+agent:
+  web:
+    allow_private_network: false
+`)
+
+	cluster, err := NewLoader(home).LoadCluster("dev")
+	if err != nil {
+		t.Fatalf("LoadCluster: %v", err)
+	}
+	if cluster.Cluster.Agent.Web.AllowPrivateNetwork {
+		t.Fatal("expected agent.web.allow_private_network: false to override base true")
+	}
+}
+
 func TestLoadClusterNodeTokenOverridesClusterToken(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), `name: prod

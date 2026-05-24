@@ -491,13 +491,9 @@ func newRootCommand() *cobra.Command {
 		return nil
 	}
 
-	tuiCmd := &cobra.Command{
-		Use:   "tui",
-		Short: "Start the interactive TUI",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTUI(cmd, "")
-		},
+	rootCmd.Args = cobra.NoArgs
+	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return runTUI(cmd, "")
 	}
 
 	resumeCmd := &cobra.Command{
@@ -661,7 +657,7 @@ func newRootCommand() *cobra.Command {
 
 	skillsCmd.AddCommand(skillsListCmd, skillsInstallCmd, skillsRemoveCmd, skillsUpdateCmd)
 
-	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, resumeCmd, skillsCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
+	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, resumeCmd, skillsCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
 }
 

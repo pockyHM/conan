@@ -15,13 +15,15 @@ import (
 
 type echoTool struct{}
 
-func (e *echoTool) Name() string            { return "test/echo" }
-func (e *echoTool) Description() string      { return "Echo tool" }
+func (e *echoTool) Name() string        { return "test/echo" }
+func (e *echoTool) Description() string { return "Echo tool" }
 func (e *echoTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`)
 }
 func (e *echoTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ Msg string `json:"msg"` }
+	var args struct {
+		Msg string `json:"msg"`
+	}
 	json.Unmarshal(input, &args)
 	result := mcpproto.ToolResult{
 		Content: []mcpproto.ContentBlock{mcpproto.TextContent(args.Msg)},

@@ -69,7 +69,9 @@ func (k *k8sEventsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"}}}`)
 }
 func (k *k8sEventsTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ Namespace string `json:"namespace"` }
+	var args struct {
+		Namespace string `json:"namespace"`
+	}
 	json.Unmarshal(input, &args)
 	cmd := "kubectl get events --sort-by=.lastTimestamp"
 	if args.Namespace != "" {
