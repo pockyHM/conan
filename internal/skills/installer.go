@@ -196,7 +196,7 @@ func discoverSkills(repoRoot string, skillRoot string, maxFileBytes int) ([]Skil
 		if d.IsDir() || d.Name() != "SKILL.md" {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := readFileUnderRoot(repoRoot, path)
 		if err != nil {
 			return err
 		}

@@ -2,7 +2,6 @@ package skills
 
 import (
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -23,7 +22,7 @@ func ResolveVisible(home string, cluster string, global Registry, clusterReg Reg
 		if err != nil {
 			return fmt.Errorf("invalid cache path for skill %s: %w", entry.Name, err)
 		}
-		data, err := os.ReadFile(skillPath)
+		data, err := readFileUnderRoot(filepath.Join(home, "skills", "repos"), skillPath)
 		if err != nil {
 			return fmt.Errorf("read skill %s: %w", entry.Name, err)
 		}

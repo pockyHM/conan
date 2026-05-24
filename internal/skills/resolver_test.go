@@ -64,6 +64,34 @@ func TestResolveVisibleRejectsCachePathOutsideRepos(t *testing.T) {
 	}
 }
 
+func TestResolveVisibleRejectsSkillMarkdownSymlinkOutsideCache(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	outsideSkill := filepath.Join(outside, "SKILL.md")
+	if err := os.WriteFile(outsideSkill, []byte("---\nname: escape\ndescription: outside\n---\noutside body"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, "skills", "repos", "global", "escape", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideSkill, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	global := Registry{Skills: []RegistryEntry{{
+		Name: "escape", Description: "outside", CachePath: "skills/repos/global/escape", InstalledAt: time.Now().UTC(),
+	}}}
+
+	_, _, err := ResolveVisible(home, "prod", global, Registry{}, ResolveOptions{MaxSkillFileBytes: 6000})
+	if err == nil {
+		t.Fatal("ResolveVisible succeeded with SKILL.md symlink outside cache")
+	}
+	if !strings.Contains(err.Error(), "symlink") && !strings.Contains(err.Error(), "escapes root") {
+		t.Fatalf("err = %v, want symlink escape error", err)
+	}
+}
+
 func TestResolveVisibleSameScopeDuplicateNewestWins(t *testing.T) {
 	home := t.TempDir()
 	writeSkillBody(t, home, "skills/repos/newer/dupe", "---\nname: dupe\ndescription: newer\n---\nnewer body")

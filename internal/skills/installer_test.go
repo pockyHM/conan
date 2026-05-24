@@ -144,6 +144,30 @@ func TestInstallRejectsInvalidSourcePathBeforeFetch(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsSkillMarkdownSymlinkOutsideRepo(t *testing.T) {
+	fixture := t.TempDir()
+	outside := t.TempDir()
+	outsideSkill := filepath.Join(outside, "SKILL.md")
+	if err := os.WriteFile(outsideSkill, []byte("---\nname: escape\ndescription: outside\n---\noutside body"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(fixture, "skills", "escape", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideSkill, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	_, err := discoverSkills(fixture, "skills", 6000)
+	if err == nil {
+		t.Fatal("discoverSkills succeeded with SKILL.md symlink outside repo")
+	}
+	if !strings.Contains(err.Error(), "symlink") && !strings.Contains(err.Error(), "escapes root") {
+		t.Fatalf("err = %v, want symlink escape error", err)
+	}
+}
+
 func TestInstallFailedFetchPreservesExistingCache(t *testing.T) {
 	home := t.TempDir()
 	src, err := NormalizeGitHubSource("org/repo", "main", "skills")
