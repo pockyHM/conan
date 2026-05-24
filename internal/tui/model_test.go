@@ -407,6 +407,108 @@ func TestDispatchSkillReadDisabledReturnsUnavailableError(t *testing.T) {
 	}
 }
 
+func TestSlashSkillsListsVisibleSkills(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Conv:    conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true},
+	})
+
+	model.input = "/skills"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("/skills returned command %#v, want immediate UI update", cmd)
+	}
+	visible := model.status + "\n" + model.View()
+	if !strings.Contains(visible, "k8s-debug") || !strings.Contains(visible, "Diagnose Kubernetes failures.") {
+		t.Fatalf("skill list not visible; status=%q view=%q", model.status, model.View())
+	}
+}
+
+func TestSlashSkillInjectsSkillForNextRequest(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Use kubectl describe before changes.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/skill k8s-debug pods failing"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skill should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	found := false
+	for _, msg := range provider.req.Messages {
+		if strings.Contains(msg.Content, "Use kubectl describe before changes.") && strings.Contains(msg.Content, "pods failing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("request messages missing explicit skill content: %#v", provider.req.Messages)
+	}
+	if got := model.messages[len(model.messages)-1].content; got != "/skill k8s-debug pods failing" {
+		t.Fatalf("visible message = %q", got)
+	}
+}
+
+func TestSkillShortcutInjectsSkillForNextRequest(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Shortcut skill body.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/k8s-debug pods failing"
+	_, cmd := model.submit()
+	if cmd == nil {
+		t.Fatal("skill shortcut should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	var combined strings.Builder
+	for _, msg := range provider.req.Messages {
+		combined.WriteString(msg.Content)
+		combined.WriteString("\n")
+	}
+	if got := combined.String(); !strings.Contains(got, "Shortcut skill body.") || !strings.Contains(got, "pods failing") {
+		t.Fatalf("request messages missing shortcut skill content:\n%s", got)
+	}
+}
+
 func TestSubmitMessageInjectsReferencedLocalFileContext(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("project notes"), 0644); err != nil {

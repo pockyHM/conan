@@ -264,6 +264,71 @@ func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsCon
 	return cfg
 }
 
+func (m Model) skillsAvailable() bool {
+	return m.skillsConfig.Enabled && len(m.skills) > 0
+}
+
+func (m Model) findSkill(name string) (skills.Skill, bool) {
+	if !m.skillsAvailable() {
+		return skills.Skill{}, false
+	}
+	for _, skill := range m.skills {
+		if skill.Name == name {
+			return skill, true
+		}
+	}
+	return skills.Skill{}, false
+}
+
+func (m Model) visibleSkillsSummary() string {
+	if !m.skillsConfig.Enabled {
+		return m.uiLanguage.tr("Skills are disabled", "技能已禁用")
+	}
+	if len(m.skills) == 0 {
+		return m.uiLanguage.tr("No skills available for this cluster", "当前集群没有可用技能")
+	}
+	lines := make([]string, 0, len(m.skills)+1)
+	lines = append(lines, m.uiLanguage.tr("Available skills:", "可用技能:"))
+	for _, skill := range m.skills {
+		scope := string(skill.Scope)
+		if skill.Scope == skills.ScopeCluster {
+			scope = "cluster:" + skill.Cluster
+		}
+		lines = append(lines, fmt.Sprintf("- %s [%s] %s", skill.Name, scope, skill.Description))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func splitSkillInvocationArg(arg string) (name string, rest string) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return "", ""
+	}
+	fields := strings.Fields(arg)
+	name = fields[0]
+	if len(fields) == 1 {
+		return name, ""
+	}
+	_, rest, _ = strings.Cut(arg, name)
+	return name, strings.TrimSpace(rest)
+}
+
+func formatExplicitSkillMessage(skill skills.Skill, args string, maxChars int) string {
+	raw, err := json.Marshal(map[string]string{
+		"name":   skill.Name,
+		"reason": "explicit slash invocation",
+	})
+	if err != nil {
+		raw = []byte(fmt.Sprintf(`{"name":%q,"reason":"explicit slash invocation"}`, skill.Name))
+	}
+	body := skills.NewToolHandler([]skills.Skill{skill}, maxChars).Handle(raw)
+	args = strings.TrimSpace(args)
+	if args == "" {
+		args = "(none)"
+	}
+	return fmt.Sprintf("Use Conan skill %q for this request.\n\nUser arguments:\n%s\n\nSkill instructions:\n%s", skill.Name, args, body)
+}
+
 func normalizeSubagentConfig(cfg configschema.SubagentConfig) configschema.SubagentConfig {
 	if cfg.MaxParallel <= 0 {
 		cfg.MaxParallel = 3
@@ -1692,13 +1757,22 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 			m.status = m.uiLanguage.tr("Current cluster: ", "当前集群: ") + m.cluster
 		}
 	case CommandSkills:
-		m.status = m.uiLanguage.tr("No skills available for this cluster", "当前集群没有可用技能")
+		summary := m.visibleSkillsSummary()
+		m.messages = append(m.messages, chatMsg{role: "assistant", content: summary})
+		m.status = summary
 	case CommandSkill:
-		if strings.TrimSpace(cmd.Arg) == "" {
+		name, rest := splitSkillInvocationArg(cmd.Arg)
+		if name == "" {
 			m.status = m.uiLanguage.tr("Usage: /skill <name> [arguments]", "用法: /skill <名称> [参数]")
 		} else {
-			name := strings.Fields(cmd.Arg)[0]
-			m.status = m.uiLanguage.tr("Unknown skill: ", "未知技能: ") + name
+			skill, found := m.findSkill(name)
+			if !found {
+				m.status = m.uiLanguage.tr("Unknown skill: ", "未知技能: ") + name
+				return m, nil
+			}
+			visible := strings.TrimSpace("/skill " + name + " " + rest)
+			next, c := m.startSubmittedMessage(visible, formatExplicitSkillMessage(skill, rest, m.skillsConfig.MaxSkillChars), nil)
+			return next.(Model), c
 		}
 	case CommandLang:
 		if strings.TrimSpace(cmd.Arg) != "" {
@@ -1808,6 +1882,12 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandSubagents:
 		return m.applySubagentsCommand(cmd.Arg), nil
 	default:
+		name, rest := splitSkillInvocationArg(cmd.Arg)
+		if skill, found := m.findSkill(name); found {
+			visible := strings.TrimSpace("/" + name + " " + rest)
+			next, c := m.startSubmittedMessage(visible, formatExplicitSkillMessage(skill, rest, m.skillsConfig.MaxSkillChars), nil)
+			return next.(Model), c
+		}
 		m.status = m.uiLanguage.tr("Unknown command: /", "未知命令: /") + cmd.Arg
 	}
 	return m, nil
