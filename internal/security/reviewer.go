@@ -10,6 +10,7 @@ import (
 
 	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/localtools"
+	"github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
@@ -70,12 +71,10 @@ func NewReviewer(cfg ReviewerConfig) *Reviewer {
 // Read-only tools are auto-allowed. Whitelisted shell commands are auto-allowed.
 // Everything else is assessed by the LLM provider (with session caching).
 func (r *Reviewer) Review(ctx context.Context, toolName, toolInput string, targetNodes []string) (RiskAssessment, error) {
-	// Stage 1: read-only tools are always allowed
-	if readOnlyTools[toolName] {
-		return RiskAssessment{Level: RiskAllow, Reason: "read-only tool"}, nil
-	}
-
 	if localtools.IsLocalTool(toolName) {
+		if tools.IsReadOnly(toolName) {
+			return RiskAssessment{Level: RiskAllow, Reason: "read-only tool metadata"}, nil
+		}
 		path := normalizeLocalFilePath(localtools.PathFromCall(toolName, json.RawMessage(toolInput)))
 		if path != "" && r.localFiles.Match(path) {
 			return RiskAssessment{Level: RiskAllow, Reason: "local file allowlist"}, nil
@@ -87,21 +86,18 @@ func (r *Reviewer) Review(ctx context.Context, toolName, toolInput string, targe
 		return RiskAssessment{Level: RiskConfirm, Reason: "managed file transfer requires confirmation"}, nil
 	}
 
+	if toolName != "node_add" {
+		policyDecision := NewPolicy(tools.DefaultMetadata()).Evaluate(toolName, toolInput, targetNodes)
+		if !policyDecision.ContinueLLM && policyDecision.Decided {
+			return RiskAssessment{Level: policyDecision.Level, Reason: policyDecision.Reason}, nil
+		}
+	}
+
 	// Stage 2: whitelist check for shell commands
 	if toolName == "shell/run" || toolName == "exec" {
 		cmd, err := extractCommand(toolInput)
 		if err == nil && !r.blacklist.Match(cmd) && r.allTargetsWhitelisted(targetNodes, cmd) {
 			return RiskAssessment{Level: RiskAllow, Reason: "whitelisted"}, nil
-		}
-	}
-
-	// call_tool delegates to an inner tool
-	if toolName == "call_tool" {
-		var args struct {
-			Tool string `json:"tool"`
-		}
-		if err := json.Unmarshal([]byte(toolInput), &args); err == nil && readOnlyTools[args.Tool] {
-			return RiskAssessment{Level: RiskAllow, Reason: "read-only tool"}, nil
 		}
 	}
 

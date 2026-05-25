@@ -87,6 +87,38 @@ func TestRunnerLoopsThroughReadOnlyToolCalls(t *testing.T) {
 	}
 }
 
+func TestAllowedToolsUsesMetadataForReadOnlyFiltering(t *testing.T) {
+	tools := []llm.ToolDef{
+		{Name: "tool_search"},
+		{Name: "call_tool"},
+		{Name: "svc/status"},
+		{Name: "log/read"},
+		{Name: "memory_search"},
+		{Name: "memory_read"},
+		{Name: "file_put"},
+		{Name: "node_add"},
+		{Name: "memory_patch"},
+		{Name: "exec"},
+	}
+
+	allowed := allowedTools(RoleInvestigator, tools)
+	names := map[string]bool{}
+	for _, tool := range allowed {
+		names[tool.Name] = true
+	}
+
+	for _, want := range []string{"tool_search", "call_tool", "svc/status", "log/read", "memory_search", "memory_read"} {
+		if !names[want] {
+			t.Fatalf("allowed tools missing %s: %#v", want, allowed)
+		}
+	}
+	for _, blocked := range []string{"file_put", "node_add", "memory_patch", "exec"} {
+		if names[blocked] {
+			t.Fatalf("%s should be blocked for investigator: %#v", blocked, allowed)
+		}
+	}
+}
+
 func TestParseTasksValidatesTask(t *testing.T) {
 	_, err := ParseTasks(json.RawMessage(`{"tasks":[{"role":"reviewer","task":"  "}]} `))
 	if err == nil {

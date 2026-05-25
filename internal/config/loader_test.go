@@ -86,6 +86,54 @@ func TestLoadGlobalMissingFileUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadGlobalAppliesSkillsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	loader := NewLoader(dir)
+
+	cfg, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !cfg.Skills.Enabled {
+		t.Fatal("Skills.Enabled = false, want true")
+	}
+	if cfg.Skills.IndexTokenBudget != 800 {
+		t.Fatalf("IndexTokenBudget = %d, want 800", cfg.Skills.IndexTokenBudget)
+	}
+	if cfg.Skills.MaxSkillChars != 6000 {
+		t.Fatalf("MaxSkillChars = %d, want 6000", cfg.Skills.MaxSkillChars)
+	}
+	if cfg.Skills.MaxVisibleSkills != 50 {
+		t.Fatalf("MaxVisibleSkills = %d, want 50", cfg.Skills.MaxVisibleSkills)
+	}
+}
+
+func TestLoadGlobalPreservesExplicitSkillsDisabled(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "config.yaml"), `skills:
+  enabled: false
+`)
+
+	cfg, err := NewLoader(home).LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+
+	if cfg.Skills.Enabled {
+		t.Fatal("Skills.Enabled = true, want explicit false preserved")
+	}
+	if cfg.Skills.IndexTokenBudget != 800 {
+		t.Fatalf("IndexTokenBudget = %d, want 800", cfg.Skills.IndexTokenBudget)
+	}
+	if cfg.Skills.MaxSkillChars != 6000 {
+		t.Fatalf("MaxSkillChars = %d, want 6000", cfg.Skills.MaxSkillChars)
+	}
+	if cfg.Skills.MaxVisibleSkills != 50 {
+		t.Fatalf("MaxVisibleSkills = %d, want 50", cfg.Skills.MaxVisibleSkills)
+	}
+}
+
 func TestLoadGlobalUILanguage(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, filepath.Join(home, "config.yaml"), `ui_language: zh-CN
@@ -428,6 +476,27 @@ agent:
 	}
 	if cluster.Cluster.Agent.TLS {
 		t.Fatal("expected cluster tls: false to override base tls: true")
+	}
+}
+
+func TestLoadClusterAllowsWebPrivateNetworkFalseOverride(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, "clusters", "base.yaml"), `agent:
+  web:
+    allow_private_network: true
+`)
+	writeFile(t, filepath.Join(home, "clusters", "dev", "cluster.yaml"), `name: dev
+agent:
+  web:
+    allow_private_network: false
+`)
+
+	cluster, err := NewLoader(home).LoadCluster("dev")
+	if err != nil {
+		t.Fatalf("LoadCluster: %v", err)
+	}
+	if cluster.Cluster.Agent.Web.AllowPrivateNetwork {
+		t.Fatal("expected agent.web.allow_private_network: false to override base true")
 	}
 }
 

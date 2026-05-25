@@ -25,11 +25,11 @@ func TestModelAddManualFlow(t *testing.T) {
 	home := t.TempDir()
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"1",       // Anthropic
+		"1", // Anthropic
 		"claude-main",
 		"sk-ant-test",
 		"claude-sonnet-4-6",
-		"y",       // set as default
+		"y", // set as default
 		"", "\n",
 	}, "\n")
 	var out bytes.Buffer
@@ -65,11 +65,11 @@ func TestModelAddDiscoveredModels(t *testing.T) {
 	home := t.TempDir()
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"5",       // Qwen (supports list)
+		"5", // Qwen (supports list)
 		"qwen-prod",
 		"sk-qwen-test",
-		"1",       // select first discovered model
-		"y",       // set as default
+		"1", // select first discovered model
+		"y", // set as default
 		"", "\n",
 	}, "\n")
 	var out bytes.Buffer
@@ -96,8 +96,8 @@ func TestModelAddRejectsDuplicateName(t *testing.T) {
 
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"2",         // OpenAI
-		"existing",  // duplicate name
+		"2",        // OpenAI
+		"existing", // duplicate name
 	}, "\n")
 	var out bytes.Buffer
 
@@ -113,7 +113,7 @@ func TestModelAddDiscoveryFallsBackToManual(t *testing.T) {
 
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"5",           // Qwen
+		"5", // Qwen
 		"qwen-fallback",
 		"sk-test",
 		"qwen-custom", // manual model name after discovery failure

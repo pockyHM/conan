@@ -42,7 +42,7 @@ func (s nodeSelector) Update(msg tea.Msg) (nodeSelector, tea.Cmd) {
 				s.cursor--
 			}
 		case tea.KeyDown:
-			if s.cursor < len(s.nodes)-1 {
+			if s.cursor < len(s.nodes) {
 				s.cursor++
 			}
 		case tea.KeySpace:
@@ -65,16 +65,19 @@ func (s nodeSelector) Selected() map[string]bool {
 	return s.checked
 }
 
+func (s nodeSelector) AddSelected() bool {
+	return s.cursor == len(s.nodes)
+}
+
 func (s nodeSelector) SetNodes(nodes []NodeInfo) nodeSelector {
 	s.nodes = nodes
+	if s.cursor > len(s.nodes) {
+		s.cursor = len(s.nodes)
+	}
 	return s
 }
 
 func (s nodeSelector) View() string {
-	if len(s.nodes) == 0 {
-		return s.lang.tr("No nodes configured for this cluster.", "当前集群没有配置节点。")
-	}
-
 	var b strings.Builder
 	b.WriteString(lipgloss.NewStyle().Bold(true).Render(s.lang.tr("Select Target Nodes", "选择目标节点")))
 	b.WriteString("\n")
@@ -101,10 +104,18 @@ func (s nodeSelector) View() string {
 		b.WriteString("\n")
 	}
 
+	cursor := " "
+	if s.AddSelected() {
+		cursor = ">"
+	}
+	addLine := fmt.Sprintf(" %s +  %s", cursor, s.lang.tr("Add new node...", "添加新节点..."))
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Render(addLine))
+	b.WriteString("\n")
+
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Repeat("─", 55))
 	b.WriteString(sep)
 	b.WriteString("\n")
-	b.WriteString(s.lang.tr(" ↑↓ Move  Space Select  Enter Confirm  Esc Cancel", " ↑↓ 移动  Space 选择  Enter 确认  Esc 取消"))
+	b.WriteString(s.lang.tr(" ↑↓ Move  Space Select  Enter Confirm/Add  Esc Cancel", " ↑↓ 移动  Space 选择  Enter 确认/添加  Esc 取消"))
 
 	return b.String()
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pockyHM/conan/internal/llm"
+	toolmeta "github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
@@ -272,7 +273,7 @@ func allowedTools(role Role, tools []llm.ToolDef) []llm.ToolDef {
 	}
 	var result []llm.ToolDef
 	for _, tool := range tools {
-		if allowed[tool.Name] {
+		if allowed[tool.Name] || toolmeta.IsReadOnly(tool.Name) {
 			result = append(result, tool)
 		}
 	}

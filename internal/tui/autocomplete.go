@@ -23,6 +23,9 @@ var commandRegistry = []commandInfo{
 	{Name: "compact", Description: "Compact conversation context", ArgHint: "[focus]"},
 	{Name: "exit", Description: "Exit Conan"},
 	{Name: "cluster", Description: "Switch/display cluster", ArgHint: "[name]"},
+	{Name: "config", Description: "Open global configuration"},
+	{Name: "skills", Description: "List and manage skills", ArgHint: "[install|remove|update]"},
+	{Name: "skill", Description: "Use a skill", ArgHint: "<name> [arguments]"},
 	{Name: "lang", Description: "Change UI language"},
 	{Name: "model", Description: "Switch/display model", ArgHint: "[name]"},
 	{Name: "nodes", Description: "Open node selector"},
@@ -200,6 +203,15 @@ func (a autocomplete) filtered() []commandInfo {
 			result = append(result, cmd)
 		}
 	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Name == a.prefix {
+			return true
+		}
+		if result[j].Name == a.prefix {
+			return false
+		}
+		return false
+	})
 	return result
 }
 

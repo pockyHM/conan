@@ -204,6 +204,39 @@ func TestMemorySearchIncludesMarkdownResults(t *testing.T) {
 	}
 }
 
+func TestMemorySearchAndReadRunbookMarkdown(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "runbooks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(memoryRoot, "runbooks", "2026-05-23-nginx-502.md")
+	content := "# Nginx 502 快速诊断\n\nsummary: nginx runbook\n\n## 步骤\n\n1. [read] svc/status\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	search := HandleTool(store, "conv1", "memory_search", json.RawMessage(`{"query":"nginx runbook","limit":5}`))
+	if !search.Success {
+		t.Fatalf("memory_search failed: %s", search.Output)
+	}
+	if !strings.Contains(search.Output, "runbooks/2026-05-23-nginx-502.md") {
+		t.Fatalf("memory_search missing runbook: %s", search.Output)
+	}
+
+	read := HandleTool(store, "conv1", "memory_read", json.RawMessage(`{"path":"runbooks/2026-05-23-nginx-502.md"}`))
+	if !read.Success {
+		t.Fatalf("memory_read failed: %s", read.Output)
+	}
+	if !strings.Contains(read.Output, "Nginx 502") {
+		t.Fatalf("memory_read missing runbook content: %s", read.Output)
+	}
+}
+
 func TestMemorySearchSkipsSymlinkedMarkdownOutsideRoot(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

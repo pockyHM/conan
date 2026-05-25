@@ -231,8 +231,8 @@ func (w *webFetchTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 		return toolError("unsupported content type: " + contentType), nil
 	}
 	text = strings.TrimSpace(collapseWhitespace(text))
-	if len(text) > maxChars {
-		text = text[:maxChars]
+	if truncatedText, ok := truncateRunes(text, maxChars); ok {
+		text = truncatedText
 		truncated = true
 	}
 	out, _ := json.Marshal(map[string]any{
@@ -255,6 +255,17 @@ func effectiveMaxChars(requested int, configured int) int {
 		return requested
 	}
 	return maxChars
+}
+
+func truncateRunes(text string, maxChars int) (string, bool) {
+	if maxChars <= 0 {
+		return text, false
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text, false
+	}
+	return string(runes[:maxChars]), true
 }
 
 func validateFetchURL(raw string, allowPrivate bool) error {

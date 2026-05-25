@@ -10,6 +10,9 @@ const (
 	CommandCompact   CommandKind = "compact"
 	CommandExit      CommandKind = "exit"
 	CommandCluster   CommandKind = "cluster"
+	CommandConfig    CommandKind = "config"
+	CommandSkills    CommandKind = "skills"
+	CommandSkill     CommandKind = "skill"
 	CommandLang      CommandKind = "lang"
 	CommandModel     CommandKind = "model"
 	CommandNode      CommandKind = "node"
@@ -19,6 +22,8 @@ const (
 	CommandThinking  CommandKind = "thinking"
 	CommandAgent     CommandKind = "agent"
 	CommandSubagents CommandKind = "subagents"
+	CommandIncident  CommandKind = "incident"
+	CommandRunbook   CommandKind = "runbook"
 	CommandUnknown   CommandKind = "unknown"
 )
 
@@ -57,6 +62,12 @@ func ParseSlashCommand(input string) (SlashCommand, bool) {
 		return SlashCommand{Kind: CommandExit, Arg: arg}, true
 	case "cluster":
 		return SlashCommand{Kind: CommandCluster, Arg: arg}, true
+	case "config":
+		return SlashCommand{Kind: CommandConfig, Arg: arg}, true
+	case "skills":
+		return SlashCommand{Kind: CommandSkills, Arg: arg}, true
+	case "skill":
+		return SlashCommand{Kind: CommandSkill, Arg: arg}, true
 	case "lang", "language":
 		return SlashCommand{Kind: CommandLang, Arg: arg}, true
 	case "model":
@@ -75,6 +86,10 @@ func ParseSlashCommand(input string) (SlashCommand, bool) {
 		return SlashCommand{Kind: CommandAgent, Arg: arg}, true
 	case "subagents", "agents":
 		return SlashCommand{Kind: CommandSubagents, Arg: arg}, true
+	case "incident":
+		return SlashCommand{Kind: CommandIncident, Arg: arg}, true
+	case "runbook":
+		return SlashCommand{Kind: CommandRunbook, Arg: arg}, true
 	default:
 		if arg != "" {
 			return SlashCommand{Kind: CommandUnknown, Arg: name + " " + arg}, true

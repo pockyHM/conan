@@ -18,7 +18,9 @@ func (c *cronListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"user":{"type":"string","description":"Crontab user (default: current)"}}}`)
 }
 func (c *cronListTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ User string `json:"user"` }
+	var args struct {
+		User string `json:"user"`
+	}
 	json.Unmarshal(input, &args)
 	cmd := "crontab -l"
 	if args.User != "" {

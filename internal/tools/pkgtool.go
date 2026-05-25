@@ -17,7 +17,9 @@ func (p *pkgListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Filter by package name"}}}`)
 }
 func (p *pkgListTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ Name string `json:"name"` }
+	var args struct {
+		Name string `json:"name"`
+	}
 	json.Unmarshal(input, &args)
 	cmd := "dpkg -l 2>/dev/null || rpm -qa"
 	if args.Name != "" {
@@ -60,7 +62,9 @@ func (p *pkgUpdateTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Package name (empty = update all)"}}}`)
 }
 func (p *pkgUpdateTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ Name string `json:"name"` }
+	var args struct {
+		Name string `json:"name"`
+	}
 	json.Unmarshal(input, &args)
 	var cmd string
 	if args.Name != "" {
@@ -80,7 +84,9 @@ func (p *pkgSearchTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}`)
 }
 func (p *pkgSearchTool) Execute(ctx context.Context, input json.RawMessage) (*mcpproto.ToolResult, error) {
-	var args struct{ Query string `json:"query"` }
+	var args struct {
+		Query string `json:"query"`
+	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return nil, err
 	}

@@ -49,6 +49,10 @@ func (l uiLanguage) commandDescription(name string) string {
 		return "退出 Conan"
 	case "cluster":
 		return "切换/显示集群"
+	case "skills":
+		return "列出和管理技能"
+	case "skill":
+		return "使用技能"
 	case "lang":
 		return "切换界面语言"
 	case "model":

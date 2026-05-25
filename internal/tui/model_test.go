@@ -26,7 +26,9 @@ import (
 	"github.com/pockyHM/conan/internal/logging"
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
@@ -203,6 +205,200 @@ func TestLangCommandAcceptsDirectLanguageArg(t *testing.T) {
 	}
 }
 
+func TestConfigCommandOpensGlobalConfigPage(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_model: claude\nlogging:\n  level: info\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/config")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeConfig {
+		t.Fatalf("mode = %v, want modeConfig", model.mode)
+	}
+	view := model.View()
+	for _, want := range []string{"Global Config", "default_model", "logging.level", "info"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("config view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestConfigPageSelectsLoggingLevelAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  level: info\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for !strings.Contains(model.configScreen.SelectedKey(), "logging.level") {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	if model.mode != modeConfig {
+		t.Fatalf("mode = %v, want modeConfig", model.mode)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "level: debug") {
+		t.Fatalf("config missing debug level:\n%s", data)
+	}
+	if !strings.Contains(model.View(), "Saved config.yaml") {
+		t.Fatalf("view missing saved status:\n%s", model.View())
+	}
+}
+
+func TestConfigPageEditsStringAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: old\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "old", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "default_cluster" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	for range []rune("old") {
+		nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		model = nextModel.(Model)
+	}
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("prod")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	if model.cluster != "prod" {
+		t.Fatalf("cluster = %q, want prod", model.cluster)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "default_cluster: prod") {
+		t.Fatalf("config missing default_cluster prod:\n%s", data)
+	}
+}
+
+func TestConfigPageTogglesBoolAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  audit: false\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "logging.audit" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "audit: true") {
+		t.Fatalf("config missing audit true:\n%s", data)
+	}
+}
+
+func TestConfigPageRejectsInvalidIntWithoutSaving(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("vision:\n  max_images: 10\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "vision.max_images" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	for range []rune("10") {
+		nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		model = nextModel.(Model)
+	}
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("bad")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(data), "max_images: 10") {
+		t.Fatalf("config should keep max_images 10:\n%s", data)
+	}
+	if !strings.Contains(model.View(), "Config validation failed") {
+		t.Fatalf("view missing validation error:\n%s", model.View())
+	}
+}
+
+func TestConfigPageEditsListAndSaves(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("security:\n  local_file_whitelist:\n    - README.md\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: home})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "security.local_file_whitelist" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(", docs/spec.md")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	data, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	contents := string(data)
+	for _, want := range []string{"- README.md", "- docs/spec.md"} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("config missing %q:\n%s", want, contents)
+		}
+	}
+}
+
+func TestConfigPageEscReturnsToChat(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = nextModel.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+}
+
 func TestSystemPromptPrefersSpecializedToolsBeforeExec(t *testing.T) {
 	model := NewModel(ModelConfig{
 		Cluster: "production",
@@ -226,6 +422,375 @@ func TestSystemPromptPrefersSpecializedToolsBeforeExec(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestModelInjectsSkillIndexAndTool(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Model:    "test",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, IndexTokenBudget: 800, MaxSkillChars: 6000, MaxVisibleSkills: 50},
+	})
+
+	next, cmd := model.submitMessage("pods are failing", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submit should start stream")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	if !strings.Contains(provider.req.SystemPrompt, "Available skills:") {
+		t.Fatalf("system prompt missing skills index: %s", provider.req.SystemPrompt)
+	}
+	found := false
+	for _, tool := range provider.req.Tools {
+		if tool.Name == skills.ToolName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("skill_read tool missing from %#v", provider.req.Tools)
+	}
+}
+
+func TestModelSkillsDisabledDoesNotInjectSkillIndexOrTool(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Model:    "test",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false, IndexTokenBudget: 800, MaxSkillChars: 6000, MaxVisibleSkills: 50},
+	})
+
+	next, cmd := model.submitMessage("pods are failing", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submit should start stream")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	if strings.Contains(provider.req.SystemPrompt, "[Skills]") || strings.Contains(provider.req.SystemPrompt, "Available skills:") {
+		t.Fatalf("system prompt should not include skills when disabled: %s", provider.req.SystemPrompt)
+	}
+	for _, tool := range provider.req.Tools {
+		if tool.Name == skills.ToolName {
+			t.Fatalf("skill_read tool should not be exposed when disabled: %#v", provider.req.Tools)
+		}
+	}
+}
+
+func TestModelSkillsDisabledWithZeroLimitsDoesNotExposeTool(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "skill body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false},
+	})
+
+	if strings.Contains(model.buildSystemPromptWithMemory(), "Available skills:") {
+		t.Fatal("system prompt should not include skills when disabled")
+	}
+	for _, tool := range model.availableToolDefs() {
+		if tool.Name == skills.ToolName {
+			t.Fatalf("skill_read tool should not be exposed when disabled: %#v", model.availableToolDefs())
+		}
+	}
+	msg := execCmd(t, model.dispatchTool(7, llm.ToolCall{
+		ID:        "skill-1",
+		Name:      skills.ToolName,
+		Arguments: json.RawMessage(`{"name":"k8s-debug","reason":"diagnose"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success || strings.Contains(result.Results[0].Output, "skill body") {
+		t.Fatalf("disabled skill_read result = %#v", result.Results)
+	}
+}
+
+func TestDispatchSkillRead(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Conv:    conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:    "k8s-debug",
+			Scope:   skills.ScopeCluster,
+			Cluster: "prod",
+			Body:    "skill body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+	msg := execCmd(t, model.dispatchTool(7, llm.ToolCall{
+		ID:        "skill-1",
+		Name:      skills.ToolName,
+		Arguments: json.RawMessage(`{"name":"k8s-debug","reason":"diagnose"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %#v, want one result", result.Results)
+	}
+	if !strings.Contains(result.Results[0].Output, "skill body") {
+		t.Fatalf("output = %q", result.Results[0].Output)
+	}
+}
+
+func TestDispatchSkillReadDisabledReturnsUnavailableError(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Conv:    conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:    "k8s-debug",
+			Scope:   skills.ScopeCluster,
+			Cluster: "prod",
+			Body:    "skill body",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false, MaxSkillChars: 6000},
+	})
+	msg := execCmd(t, model.dispatchTool(7, llm.ToolCall{
+		ID:        "skill-1",
+		Name:      skills.ToolName,
+		Arguments: json.RawMessage(`{"name":"k8s-debug","reason":"diagnose"}`),
+	}))
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("results = %#v, want one result", result.Results)
+	}
+	if result.Results[0].Success {
+		t.Fatalf("skill_read should fail when disabled: %#v", result.Results[0])
+	}
+	if strings.Contains(result.Results[0].Output, "skill body") {
+		t.Fatalf("disabled skill_read leaked body: %q", result.Results[0].Output)
+	}
+	if !strings.Contains(result.Results[0].Output, "not available") {
+		t.Fatalf("output = %q, want not available error", result.Results[0].Output)
+	}
+}
+
+func TestSlashSkillsListsVisibleSkills(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Conv:    conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true},
+	})
+
+	model.input = "/skills"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("/skills returned command %#v, want immediate UI update", cmd)
+	}
+	visible := model.status + "\n" + model.View()
+	if !strings.Contains(visible, "k8s-debug") || !strings.Contains(visible, "Diagnose Kubernetes failures.") {
+		t.Fatalf("skill list not visible; status=%q view=%q", model.status, model.View())
+	}
+	if strings.Contains(model.status, "Diagnose Kubernetes failures.") {
+		t.Fatalf("status should be concise, got %q", model.status)
+	}
+}
+
+func TestSlashSkillInjectsSkillForNextRequest(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Use kubectl describe before changes.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/skill k8s-debug pods failing"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skill should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	found := false
+	for _, msg := range provider.req.Messages {
+		if strings.Contains(msg.Content, "Use kubectl describe before changes.") && strings.Contains(msg.Content, "pods failing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("request messages missing explicit skill content: %#v", provider.req.Messages)
+	}
+	if got := model.messages[len(model.messages)-1].content; got != "/skill k8s-debug pods failing" {
+		t.Fatalf("visible message = %q", got)
+	}
+}
+
+func TestSlashSkillInjectsReferencedLocalFileContext(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("project notes"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:            "prod",
+		Provider:           provider,
+		Conv:               conversation.New("prod", nil, "test"),
+		LocalWorkspaceRoot: workspace,
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Use kubectl describe before changes.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/skill k8s-debug inspect @README.md"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skill with file reference should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil || len(provider.req.Messages) != 1 {
+		t.Fatalf("request messages = %#v", provider.req)
+	}
+	content := provider.req.Messages[0].Content
+	for _, want := range []string{"Use kubectl describe before changes.", "inspect @README.md", `<file path="README.md">`, "project notes"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("request missing %q:\n%s", want, content)
+		}
+	}
+	if got := model.messages[len(model.messages)-1].content; got != "/skill k8s-debug inspect @README.md" {
+		t.Fatalf("visible message = %q", got)
+	}
+}
+
+func TestSlashSkillsRemoveUpdatesVisibleSkills(t *testing.T) {
+	home := t.TempDir()
+	reg := skills.Registry{Skills: []skills.RegistryEntry{{
+		Name: "k8s-debug", Description: "Diagnose Kubernetes failures.", Source: "github.com/acme/ops", Ref: "main", Path: "skills/k8s-debug", CachePath: "skills/repos/github.com/acme/ops/main/skills/k8s-debug",
+	}}}
+	if err := skills.SaveRegistry(skills.GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		ConfigHome: home,
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeGlobal,
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxVisibleSkills: 50, MaxSkillChars: 6000, IndexTokenBudget: 800},
+	})
+
+	model.input = "/skills remove k8s-debug --global"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skills remove should return management command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if len(model.skills) != 0 {
+		t.Fatalf("skills = %#v, want empty after remove", model.skills)
+	}
+	if !strings.Contains(model.status, "Removed skill") {
+		t.Fatalf("status = %q", model.status)
+	}
+	got, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 0 {
+		t.Fatalf("registry = %#v, want empty", got)
+	}
+}
+
+func TestSkillShortcutInjectsSkillForNextRequest(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Shortcut skill body.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/k8s-debug pods failing"
+	_, cmd := model.submit()
+	if cmd == nil {
+		t.Fatal("skill shortcut should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	var combined strings.Builder
+	for _, msg := range provider.req.Messages {
+		combined.WriteString(msg.Content)
+		combined.WriteString("\n")
+	}
+	if got := combined.String(); !strings.Contains(got, "Shortcut skill body.") || !strings.Contains(got, "pods failing") {
+		t.Fatalf("request messages missing shortcut skill content:\n%s", got)
 	}
 }
 
@@ -3254,6 +3819,159 @@ func TestNodesCommandOpensSelector(t *testing.T) {
 	}
 }
 
+func TestNodesCommandOpensSelectorWithOnlyAddOptionWhenEmpty(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandNodes})
+	model = next
+
+	if cmd != nil {
+		t.Fatal("/nodes with no nodes should not ping")
+	}
+	if model.mode != modeNodeSelect {
+		t.Fatalf("mode = %v, want node select", model.mode)
+	}
+	if !model.nodeSelector.AddSelected() {
+		t.Fatal("empty selector should select add row")
+	}
+	if !strings.Contains(model.View(), "Add new node") {
+		t.Fatalf("view missing add node option:\n%s", model.View())
+	}
+}
+
+func TestNodeSelectorEnterOnAddRowOpensNodeAddForm(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "test",
+		Model:   "m",
+		Nodes: []NodeInfo{
+			{Name: "node-01", Host: "10.0.1.1", Online: true},
+		},
+	})
+	model.mode = modeNodeSelect
+	model.nodeSelector = newNodeSelector(model.nodes, model.selectedNodes)
+	model.nodeSelector.cursor = len(model.nodes)
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("opening node add form returned command")
+	}
+	if model.mode != modeNodeAddForm {
+		t.Fatalf("mode = %v, want node add form", model.mode)
+	}
+	if !strings.Contains(model.View(), "Add New Node") {
+		t.Fatalf("view missing node add form:\n%s", model.View())
+	}
+}
+
+func TestNodeAddFormSubmitCallsRunnerAndRefreshesSelector(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), "default_cluster: test\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "test", "cluster.yaml"), "name: test\n")
+
+	var gotReq nodeadd.Request
+	model := NewModel(ModelConfig{
+		Cluster:    "test",
+		Model:      "m",
+		ConfigHome: home,
+		NodeAddRunner: nodeAddRunnerFunc(func(_ context.Context, req nodeadd.Request) (nodeadd.Result, error) {
+			gotReq = req
+			return nodeadd.Result{
+				Node: configschema.NodeConfig{
+					Name: req.Name,
+					Host: req.Input,
+					Agent: &configschema.NodeAgentOverride{
+						Port:  req.AgentPort,
+						Token: "agent-token",
+					},
+				},
+				Deployed: true,
+			}, nil
+		}),
+	})
+	model.mode = modeNodeAddForm
+	model.prevSelected = map[string]bool{}
+	model.nodeAddForm = newNodeAddForm(uiLanguageEnglish).
+		withValue(nodeAddFormFieldName, "web-1").
+		withValue(nodeAddFormFieldHost, "10.0.0.12").
+		withValue(nodeAddFormFieldPort, "9281").
+		withValue(nodeAddFormFieldUser, "deploy").
+		withValue(nodeAddFormFieldPassword, "secret")
+	model.nodeAddForm.cursor = nodeAddFormFieldPassword
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submitting node add form returned nil command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if gotReq.ClusterName != "test" || gotReq.Name != "web-1" || gotReq.Input != "10.0.0.12" {
+		t.Fatalf("request identity = %#v", gotReq)
+	}
+	if gotReq.AgentPort != 9281 || gotReq.Username != "deploy" || gotReq.Password != "secret" {
+		t.Fatalf("request deploy fields = %#v", gotReq)
+	}
+	if model.mode != modeNodeSelect {
+		t.Fatalf("mode = %v, want node select", model.mode)
+	}
+	if !model.selectedNodes["web-1"] {
+		t.Fatalf("selected nodes = %#v, want web-1 selected", model.selectedNodes)
+	}
+	if len(model.nodes) != 1 || model.nodes[0].Name != "web-1" {
+		t.Fatalf("nodes = %#v, want web-1", model.nodes)
+	}
+	if !strings.Contains(model.View(), "web-1") || !strings.Contains(model.View(), "10.0.0.12") {
+		t.Fatalf("selector view missing new node:\n%s", model.View())
+	}
+}
+
+func TestNodeAddFormSubmitFailureKeepsFormOpen(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "config.yaml"), "default_cluster: test\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "test", "cluster.yaml"), "name: test\n")
+
+	model := NewModel(ModelConfig{
+		Cluster:    "test",
+		Model:      "m",
+		ConfigHome: home,
+		NodeAddRunner: nodeAddRunnerFunc(func(context.Context, nodeadd.Request) (nodeadd.Result, error) {
+			return nodeadd.Result{}, errors.New("deploy failed")
+		}),
+	})
+	model.mode = modeNodeAddForm
+	model.nodeAddForm = newNodeAddForm(uiLanguageEnglish).
+		withValue(nodeAddFormFieldName, "web-1").
+		withValue(nodeAddFormFieldHost, "10.0.0.12").
+		withValue(nodeAddFormFieldPort, "9281").
+		withValue(nodeAddFormFieldUser, "deploy").
+		withValue(nodeAddFormFieldPassword, "secret")
+	model.nodeAddForm.cursor = nodeAddFormFieldPassword
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submitting node add form returned nil command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if model.mode != modeNodeAddForm {
+		t.Fatalf("mode = %v, want node add form", model.mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "deploy failed") {
+		t.Fatalf("view missing error:\n%s", view)
+	}
+	if !strings.Contains(view, "web-1") || !strings.Contains(view, "10.0.0.12") {
+		t.Fatalf("form did not preserve values:\n%s", view)
+	}
+}
+
 func TestNodeCommandEnablesNodeToolsForNextResponse(t *testing.T) {
 	model := NewModel(ModelConfig{})
 	next, _ := model.applyCommand(SlashCommand{Kind: CommandNode})
@@ -3660,11 +4378,14 @@ func TestNodesNoNodesConfigured(t *testing.T) {
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 
-	if model.mode != modeChat {
-		t.Fatal("should stay in chat mode with no nodes")
+	if model.mode != modeNodeSelect {
+		t.Fatal("should enter node selector with no nodes")
 	}
-	if !strings.Contains(model.status, "No nodes") {
-		t.Fatalf("status = %q, want no nodes message", model.status)
+	if !model.nodeSelector.AddSelected() {
+		t.Fatal("add row should be selected when no nodes are configured")
+	}
+	if !strings.Contains(model.View(), "Add new node") {
+		t.Fatalf("view should show add option:\n%s", model.View())
 	}
 }
 
@@ -4271,6 +4992,259 @@ func TestIdenticalToolCallsFillPlaceholderByID(t *testing.T) {
 	}
 }
 
+func TestIncidentCommandLifecycleAndExport(t *testing.T) {
+	dir := t.TempDir()
+	model := NewModel(ModelConfig{
+		Cluster:     "prod",
+		Model:       "model",
+		IncidentDir: filepath.Join(dir, "incidents"),
+		Nodes:       []NodeInfo{{Name: "web-1", Host: "10.0.0.1"}},
+	})
+
+	var cmd tea.Cmd
+	model, cmd = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start API latency"})
+	if cmd != nil {
+		t.Fatal("incident start should not return command")
+	}
+	if model.incidentRecorder == nil || model.incidentRecorder.Current() == nil {
+		t.Fatal("incident recorder should have current incident")
+	}
+	if !strings.Contains(model.status, "Incident started") {
+		t.Fatalf("status = %q", model.status)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "note checked nginx logs"})
+	if events := model.incidentRecorder.Events(); len(events) != 1 || events[0].Summary != "checked nginx logs" {
+		t.Fatalf("note events = %#v", events)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "export"})
+	if !strings.Contains(model.status, "incidents/") {
+		t.Fatalf("export status missing path: %q", model.status)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "incidents", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("exported reports = %#v, want one", matches)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "close"})
+	if model.incidentRecorder.Current() != nil {
+		t.Fatal("incident should be closed")
+	}
+}
+
+func TestIncidentStartDoesNotDiscardOpenIncident(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(t.TempDir(), "incidents")})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start First incident"})
+	model.incidentRecorder.Note("first note")
+	first := model.incidentRecorder.Current()
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start Second incident"})
+
+	current := model.incidentRecorder.Current()
+	if current == nil || current.ID != first.ID || current.Title != "First incident" {
+		t.Fatalf("open incident was replaced: before=%#v after=%#v", first, current)
+	}
+	if events := model.incidentRecorder.Events(); len(events) != 1 || events[0].Summary != "first note" {
+		t.Fatalf("existing incident events lost: %#v", events)
+	}
+}
+
+func TestIncidentCloseExportsClosedReport(t *testing.T) {
+	dir := t.TempDir()
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(dir, "incidents")})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start API latency"})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "close"})
+
+	matches, err := filepath.Glob(filepath.Join(dir, "incidents", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("reports = %#v, want one", matches)
+	}
+	content, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"status: closed", "closed_at:"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("closed report missing %q:\n%s", want, string(content))
+		}
+	}
+}
+
+func TestIncidentNoteRequiresOpenIncident(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(t.TempDir(), "incidents")})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "note checked nginx"})
+
+	if !strings.Contains(model.status, "no open incident") {
+		t.Fatalf("status = %q, want no open incident", model.status)
+	}
+}
+
+func TestIncidentRecordsUserToolRiskAndAssistantEvents(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster:     "prod",
+		Model:       "model",
+		IncidentDir: filepath.Join(t.TempDir(), "incidents"),
+		Nodes:       []NodeInfo{{Name: "web-1", Host: "10.0.0.1"}},
+	})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start API latency"})
+
+	updated, _ := model.startSubmittedMessage("check api", "check api", nil)
+	model = updated.(Model)
+	model.recordAssistantEvidence("api recovered")
+	updated, _ = model.Update(riskAssessmentMsg{
+		call:       llm.ToolCall{ID: "risk-1", Name: "svc/restart", Arguments: json.RawMessage(`{"service":"nginx"}`)},
+		assessment: security.RiskAssessment{Level: security.RiskConfirm, Reason: "restart service"},
+	})
+	model = updated.(Model)
+	updated, _ = model.Update(multiToolResultMsg{
+		Call:    llm.ToolCall{ID: "tool-1", Name: "svc/status", Arguments: json.RawMessage(`{"service":"nginx"}`)},
+		Results: []nodeToolResult{{Node: "web-1", Output: "active", Success: true}},
+	})
+	model = updated.(Model)
+
+	var sources []string
+	for _, event := range model.incidentRecorder.Events() {
+		sources = append(sources, string(event.Source))
+	}
+	joined := strings.Join(sources, ",")
+	for _, want := range []string{"user", "assistant", "risk", "tool"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("events missing %s: %#v", want, model.incidentRecorder.Events())
+		}
+	}
+}
+
+func TestRunbookDraftPreviewAndRunCommands(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "incidents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	incidentPath := filepath.Join(root, "incidents", "2026-05-23-api.md")
+	incident := `# API latency incident
+
+incident_id: incident-abc123
+cluster: prod
+
+## 摘要
+
+- API latency recovered.
+
+## 影响范围
+
+- nodes: web-1
+
+## 证据
+
+- 2026-05-23T10:00:00Z tool=svc/status success=true nginx active
+
+## 执行动作
+
+- 2026-05-23T10:05:00Z tool=svc/restart risk=confirm outcome=approved restart nginx
+
+## 验证结果
+
+- Latency recovered.
+`
+	if err := os.WriteFile(incidentPath, []byte(incident), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "prod",
+		Model:       "model",
+		IncidentDir: filepath.Join(root, "incidents"),
+	})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft incidents/2026-05-23-api.md"})
+	matches, err := filepath.Glob(filepath.Join(root, "runbooks", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("runbook drafts = %#v, want one", matches)
+	}
+	relRunbook := filepath.ToSlash(filepath.Join("runbooks", filepath.Base(matches[0])))
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "preview " + relRunbook})
+	if len(model.messages) == 0 || !strings.Contains(model.messages[len(model.messages)-1].content, "Runbook preview") {
+		t.Fatalf("preview message missing: %#v", model.messages)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "run " + relRunbook})
+	if len(model.messages) == 0 || !strings.Contains(model.messages[len(model.messages)-1].content, "Execute this Conan runbook") {
+		t.Fatalf("run injection missing: %#v", model.messages)
+	}
+	if !strings.Contains(model.messages[len(model.messages)-1].content, "existing risk review and confirmation flow") {
+		t.Fatalf("run injection should preserve confirmations:\n%s", model.messages[len(model.messages)-1].content)
+	}
+	if !strings.Contains(model.messages[len(model.messages)-1].content, "ask whether to append the outcome") {
+		t.Fatalf("run injection should ask about promotion back into runbook:\n%s", model.messages[len(model.messages)-1].content)
+	}
+}
+
+func TestRunbookCommandsRejectWrongPathCategories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "incidents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "runbooks"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "incidents", "incident.md"), []byte("# Incident\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "runbooks", "runbook.md"), []byte("# Runbook\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(root, "incidents")})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft runbooks/runbook.md"})
+	if !strings.Contains(model.status, "incident path must be under incidents/") {
+		t.Fatalf("draft status = %q", model.status)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "preview incidents/incident.md"})
+	if !strings.Contains(model.status, "runbook path must be under runbooks/") {
+		t.Fatalf("preview status = %q", model.status)
+	}
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "run incidents/incident.md"})
+	if !strings.Contains(model.status, "runbook path must be under runbooks/") {
+		t.Fatalf("run status = %q", model.status)
+	}
+}
+
+func TestRunbookDraftCreatesUniqueFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "incidents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	incident := "# API latency incident\n\ncluster: prod\n\n## 摘要\n\nok\n"
+	if err := os.WriteFile(filepath.Join(root, "incidents", "incident.md"), []byte(incident), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(root, "incidents")})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft incidents/incident.md"})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandRunbook, Arg: "draft incidents/incident.md"})
+
+	matches, err := filepath.Glob(filepath.Join(root, "runbooks", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("runbook files = %#v, want two unique files", matches)
+	}
+}
+
 func TestToolCallNeedsConfirmation(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	reviewer := security.NewReviewer(security.ReviewerConfig{
@@ -4326,6 +5300,50 @@ func TestToolCallNeedsConfirmation(t *testing.T) {
 	}
 	if strings.Contains(view, "╭") || strings.Contains(view, "╰") {
 		t.Fatalf("confirm mode should render inline at the bottom, not as a separate panel:\n%s", view)
+	}
+}
+
+func TestConfirmationSummaryShowsFileTransferImpact(t *testing.T) {
+	call := llm.ToolCall{
+		Name:      metaToolFilePut,
+		Arguments: json.RawMessage(`{"node":"web-1","local_path":"README.md","remote_path":"/tmp/README.md"}`),
+	}
+
+	lines := confirmationSummary(call, []string{"web-1"})
+	joined := strings.Join(lines, "\n")
+
+	for _, want := range []string{
+		"Tool: file_put",
+		"Safety: mutating",
+		"Scope: node",
+		"Node: web-1",
+		"local_path: README.md",
+		"remote_path: /tmp/README.md",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestConfirmationSummaryShowsCallToolInnerImpact(t *testing.T) {
+	call := llm.ToolCall{
+		Name:      metaToolCallTool,
+		Arguments: json.RawMessage(`{"node":"web-1","tool":"svc/restart","arguments":{"service":"nginx"}}`),
+	}
+
+	lines := confirmationSummary(call, []string{"web-1"})
+	joined := strings.Join(lines, "\n")
+
+	for _, want := range []string{
+		"Tool: call_tool",
+		"Inner tool: svc/restart",
+		"Node: web-1",
+		"service: nginx",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("summary missing %q:\n%s", want, joined)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestNewWebToolsExposesFetchWithoutSearchConfig(t *testing.T) {
@@ -75,6 +76,30 @@ func TestWebFetchExtractsHTMLText(t *testing.T) {
 	}
 	if strings.Contains(output, "ignore()") {
 		t.Fatalf("output should not include script text: %s", output)
+	}
+}
+
+func TestWebFetchMaxCharsTruncatesAtRuneBoundary(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("你好世界"))
+	}))
+	defer srv.Close()
+
+	tool := &webFetchTool{cfg: WebToolConfig{AllowPrivateNetwork: true, FetchMaxChars: 2000, FetchMaxBytes: 1 << 20}}
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"url":"`+srv.URL+`","max_chars":3}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("result is error: %#v", result)
+	}
+	output := result.Content[0].Text
+	if !utf8.ValidString(output) {
+		t.Fatalf("output is invalid UTF-8: %q", output)
+	}
+	if !strings.Contains(output, `"text":"你好世"`) {
+		t.Fatalf("output = %s, want three complete runes", output)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/internal/tui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -350,6 +351,31 @@ func newRootCommand() *cobra.Command {
 			selectedCluster = "default"
 		}
 
+		var visibleSkills []skills.Skill
+		var skillWarnings []string
+		if global.Skills.Enabled {
+			globalSkillReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(loader.Home()))
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load global skills: %v\n", err)
+			} else {
+				clusterSkillReg, err := skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load cluster skills: %v\n", err)
+				} else {
+					visibleSkills, skillWarnings, err = skills.ResolveVisible(loader.Home(), selectedCluster, globalSkillReg, clusterSkillReg, skills.ResolveOptions{
+						MaxSkillFileBytes: 256 * 1024,
+						MaxVisibleSkills:  global.Skills.MaxVisibleSkills,
+						IndexCharBudget:   global.Skills.IndexTokenBudget,
+					})
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load skills: %v\n", err)
+						visibleSkills = nil
+						skillWarnings = nil
+					}
+				}
+			}
+		}
+
 		provider, modelName, err := llm.NewProvider(global.Models, global.DefaultModel)
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
@@ -450,9 +476,13 @@ func newRootCommand() *cobra.Command {
 			Reviewer:           reviewer,
 			AuditLogger:        auditLog,
 			ConfigHome:         loader.Home(),
+			IncidentDir:        filepath.Join(loader.Home(), "memory", "memory", "incidents"),
 			MemoryStore:        memStore,
 			Subagents:          global.Subagents,
 			LocalWorkspaceRoot: workspaceRoot,
+			Skills:             visibleSkills,
+			SkillsConfig:       global.Skills,
+			SkillWarnings:      skillWarnings,
 		})
 		finalModel, err := runTeaProgram(model, cmd.InOrStdin(), cmd.OutOrStdout())
 		if err != nil {
@@ -462,13 +492,9 @@ func newRootCommand() *cobra.Command {
 		return nil
 	}
 
-	tuiCmd := &cobra.Command{
-		Use:   "tui",
-		Short: "Start the interactive TUI",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTUI(cmd, "")
-		},
+	rootCmd.Args = cobra.NoArgs
+	rootCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return runTUI(cmd, "")
 	}
 
 	resumeCmd := &cobra.Command{
@@ -480,7 +506,159 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 
-	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, tuiCmd, resumeCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
+	skillsCmd := &cobra.Command{Use: "skills", Short: "Skill commands"}
+	var skillsGlobal bool
+	var skillsCluster string
+	var skillsRef string
+	var skillsPath string
+	resolveSkillsScope := func() (string, string, error) {
+		scope := skills.ScopeCluster
+		targetCluster := skillsCluster
+		if skillsGlobal {
+			return skills.ScopeGlobal, "", nil
+		}
+		if targetCluster == "" {
+			targetCluster = clusterName
+		}
+		if targetCluster == "" {
+			globalCfg, err := cfgloader.NewLoader(home).LoadGlobal()
+			if err != nil {
+				return "", "", err
+			}
+			targetCluster = globalCfg.DefaultCluster
+		}
+		if targetCluster == "" {
+			return "", "", fmt.Errorf("--cluster is required when using cluster-scoped skills")
+		}
+		return scope, targetCluster, nil
+	}
+
+	skillsListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List installed skills",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loader := cfgloader.NewLoader(home)
+			globalReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(loader.Home()))
+			if err != nil {
+				return err
+			}
+			selectedCluster := skillsCluster
+			if selectedCluster == "" {
+				selectedCluster = clusterName
+			}
+			if selectedCluster == "" {
+				globalCfg, err := loader.LoadGlobal()
+				if err != nil {
+					return err
+				}
+				selectedCluster = globalCfg.DefaultCluster
+			}
+			var clusterReg skills.Registry
+			if selectedCluster != "" {
+				clusterReg, err = skills.LoadRegistry(skills.ClusterRegistryPath(loader.Home(), selectedCluster))
+				if err != nil {
+					return err
+				}
+			}
+			if len(globalReg.Skills) == 0 && len(clusterReg.Skills) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "No skills installed")
+				return nil
+			}
+			for _, entry := range globalReg.Skills {
+				fmt.Fprintf(cmd.OutOrStdout(), "global\t%s\t%s\n", entry.Name, entry.Description)
+			}
+			for _, entry := range clusterReg.Skills {
+				fmt.Fprintf(cmd.OutOrStdout(), "cluster:%s\t%s\t%s\n", selectedCluster, entry.Name, entry.Description)
+			}
+			return nil
+		},
+	}
+
+	skillsInstallCmd := &cobra.Command{
+		Use:   "install <github-url>",
+		Short: "Install skills from a public GitHub repository",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope, targetCluster, err := resolveSkillsScope()
+			if err != nil {
+				return err
+			}
+			source, err := skills.NormalizeGitHubSource(args[0], skillsRef, skillsPath)
+			if err != nil {
+				return err
+			}
+			installer := skills.Installer{Home: cfgloader.NewLoader(home).Home(), MaxSkillFileBytes: 256 * 1024}
+			installed, err := installer.Install(cmd.Context(), skills.InstallRequest{Source: source, Scope: scope, Cluster: targetCluster})
+			if err != nil {
+				return err
+			}
+			for _, skill := range installed {
+				fmt.Fprintf(cmd.OutOrStdout(), "installed %s\n", skill.Name)
+			}
+			return nil
+		},
+	}
+
+	skillsRemoveCmd := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove an installed skill",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope, targetCluster, err := resolveSkillsScope()
+			if err != nil {
+				return err
+			}
+			installer := skills.Installer{Home: cfgloader.NewLoader(home).Home(), MaxSkillFileBytes: 256 * 1024}
+			removed, err := installer.Remove(skills.RemoveRequest{Name: args[0], Scope: scope, Cluster: targetCluster})
+			if err != nil {
+				return err
+			}
+			if !removed {
+				return fmt.Errorf("skill not found: %s", args[0])
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "removed %s\n", args[0])
+			return nil
+		},
+	}
+
+	skillsUpdateCmd := &cobra.Command{
+		Use:   "update [name]",
+		Short: "Update installed skills",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope, targetCluster, err := resolveSkillsScope()
+			if err != nil {
+				return err
+			}
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			installer := skills.Installer{Home: cfgloader.NewLoader(home).Home(), MaxSkillFileBytes: 256 * 1024}
+			updated, err := installer.Update(cmd.Context(), skills.UpdateRequest{Name: name, Scope: scope, Cluster: targetCluster})
+			if err != nil {
+				return err
+			}
+			for _, skill := range updated {
+				fmt.Fprintf(cmd.OutOrStdout(), "updated %s\n", skill.Name)
+			}
+			return nil
+		},
+	}
+	skillsInstallCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Install globally")
+	skillsInstallCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to install into or list from")
+	skillsInstallCmd.Flags().StringVar(&skillsRef, "ref", "", "Git ref to install (default repository branch)")
+	skillsInstallCmd.Flags().StringVar(&skillsPath, "path", "skills", "Repository skills path")
+	skillsListCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to list")
+	skillsRemoveCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Remove globally")
+	skillsRemoveCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to remove from")
+	skillsUpdateCmd.Flags().BoolVar(&skillsGlobal, "global", false, "Update globally")
+	skillsUpdateCmd.Flags().StringVar(&skillsCluster, "cluster", "", "Cluster to update")
+
+	skillsCmd.AddCommand(skillsListCmd, skillsInstallCmd, skillsRemoveCmd, skillsUpdateCmd)
+
+	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, resumeCmd, skillsCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
 }
 

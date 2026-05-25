@@ -40,7 +40,9 @@ func (f fakePrompter) PromptIP(hostname string) (string, error)           { retu
 
 type fakeResolver struct{ ips []net.IP }
 
-func (f fakeResolver) LookupHost(ctx context.Context, host string) ([]net.IP, error) { return f.ips, nil }
+func (f fakeResolver) LookupHost(ctx context.Context, host string) ([]net.IP, error) {
+	return f.ips, nil
+}
 
 type fakeNodeWriter struct {
 	written configschema.NodeConfig

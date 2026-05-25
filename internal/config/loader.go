@@ -115,7 +115,15 @@ func (l *Loader) LoadGlobal() (*configschema.GlobalConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	skillsEnabledSet, err := yamlPathExists(data, "skills", "enabled")
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	skillsExplicitlyDisabled := skillsEnabledSet && !cfg.Skills.Enabled
 	applyGlobalDefaults(cfg)
+	if skillsExplicitlyDisabled {
+		cfg.Skills.Enabled = false
+	}
 	applyAgentDeployDefaults(cfg, l.home)
 	normalizeModelsForLoad(cfg.Models)
 	return cfg, nil
@@ -253,6 +261,18 @@ func applyGlobalDefaults(cfg *configschema.GlobalConfig) {
 	if cfg.Vision.MaxSummaryCharsPerImage == 0 {
 		cfg.Vision.MaxSummaryCharsPerImage = 1200
 	}
+	if !cfg.Skills.Enabled {
+		cfg.Skills.Enabled = true
+	}
+	if cfg.Skills.IndexTokenBudget == 0 {
+		cfg.Skills.IndexTokenBudget = 800
+	}
+	if cfg.Skills.MaxSkillChars == 0 {
+		cfg.Skills.MaxSkillChars = 6000
+	}
+	if cfg.Skills.MaxVisibleSkills == 0 {
+		cfg.Skills.MaxVisibleSkills = 50
+	}
 }
 
 func applyAgentDeployDefaults(cfg *configschema.GlobalConfig, home string) {
@@ -330,7 +350,7 @@ func mergeCluster(base *configschema.ClusterConfig, override configschema.Cluste
 	if override.Inherits != "" {
 		base.Inherits = override.Inherits
 	}
-	mergeAgent(&base.Agent, override.Agent, fields["agent"])
+	mergeAgent(&base.Agent, override.Agent, fields["agent"], fields["agent.web"])
 	if override.NodeDefaults.User != "" {
 		base.NodeDefaults.User = override.NodeDefaults.User
 	}
@@ -339,7 +359,7 @@ func mergeCluster(base *configschema.ClusterConfig, override configschema.Cluste
 	}
 }
 
-func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfig, fields map[string]bool) {
+func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfig, fields map[string]bool, webFields map[string]bool) {
 	if override.Listen != "" {
 		base.Listen = override.Listen
 	}
@@ -367,10 +387,10 @@ func mergeAgent(base *configschema.AgentConfig, override configschema.AgentConfi
 	if override.LogLevel != "" {
 		base.LogLevel = override.LogLevel
 	}
-	mergeWeb(&base.Web, override.Web)
+	mergeWeb(&base.Web, override.Web, webFields)
 }
 
-func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig) {
+func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig, fields map[string]bool) {
 	if override.SearchProvider != "" {
 		base.SearchProvider = override.SearchProvider
 	}
@@ -389,7 +409,7 @@ func mergeWeb(base *configschema.WebConfig, override configschema.WebConfig) {
 	if override.FetchMaxChars != 0 {
 		base.FetchMaxChars = override.FetchMaxChars
 	}
-	if override.AllowPrivateNetwork {
+	if fields["allow_private_network"] {
 		base.AllowPrivateNetwork = override.AllowPrivateNetwork
 	}
 }
@@ -473,7 +493,54 @@ func collectFields(node *yaml.Node, fields map[string]map[string]bool) {
 			continue
 		}
 		for j := 0; j+1 < len(value.Content); j += 2 {
-			fields[key][value.Content[j].Value] = true
+			childKey := value.Content[j].Value
+			childValue := value.Content[j+1]
+			fields[key][childKey] = true
+			collectNestedFields(key+"."+childKey, childValue, fields)
 		}
 	}
+}
+
+func collectNestedFields(path string, node *yaml.Node, fields map[string]map[string]bool) {
+	if node.Kind != yaml.MappingNode {
+		return
+	}
+	if fields[path] == nil {
+		fields[path] = map[string]bool{}
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		value := node.Content[i+1]
+		fields[path][key] = true
+		collectNestedFields(path+"."+key, value, fields)
+	}
+}
+
+func yamlPathExists(data []byte, path ...string) (bool, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return false, err
+	}
+	if len(root.Content) == 0 {
+		return false, nil
+	}
+	node := root.Content[0]
+	for _, want := range path {
+		if node.Kind != yaml.MappingNode {
+			return false, nil
+		}
+		found := false
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value != want {
+				continue
+			}
+			node = node.Content[i+1]
+			found = true
+			break
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	return true, nil
 }

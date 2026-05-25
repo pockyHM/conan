@@ -17,6 +17,7 @@ import (
 	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/logging"
 	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
 )
@@ -117,13 +118,109 @@ func TestFilesGetDownloadsAgentFileToLocalPath(t *testing.T) {
 	}
 }
 
-func TestTUICommandRegistered(t *testing.T) {
-	stdout, _, err := executeCommand("tui", "--help")
+func TestSkillsListEmpty(t *testing.T) {
+	home := t.TempDir()
+
+	stdout, _, err := executeCommand("--home", home, "skills", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "No skills installed") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestSkillsListUsesDefaultCluster(t *testing.T) {
+	home := t.TempDir()
+	clusterDir := filepath.Join(home, "clusters", "prod")
+	if err := os.MkdirAll(clusterDir, 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: prod\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	registry := `skills:
+  - name: k8s-debug
+    description: Diagnose Kubernetes failures.
+    source: github.com/acme/ops
+    ref: main
+    path: skills/k8s-debug
+    cache_path: skills/repos/github.com/acme/ops/main/skills/k8s-debug
+`
+	if err := os.WriteFile(filepath.Join(clusterDir, "skills.yaml"), []byte(registry), 0644); err != nil {
+		t.Fatalf("write skills: %v", err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "skills", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "cluster:prod") || !strings.Contains(stdout, "k8s-debug") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestSkillsInstallRejectsInvalidGitHubRepo(t *testing.T) {
+	home := t.TempDir()
+
+	_, _, err := executeCommand("--home", home, "skills", "install", "not-a-valid-source", "--global")
+	if err == nil {
+		t.Fatal("err = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "invalid GitHub repository") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSkillsRemoveGlobal(t *testing.T) {
+	home := t.TempDir()
+	reg := skills.Registry{Skills: []skills.RegistryEntry{{
+		Name: "k8s-debug", Description: "Diagnose Kubernetes failures.", Source: "github.com/acme/ops", Ref: "main", Path: "skills/k8s-debug", CachePath: "skills/repos/github.com/acme/ops/main/skills/k8s-debug",
+	}}}
+	if err := skills.SaveRegistry(skills.GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "skills", "remove", "k8s-debug", "--global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "removed k8s-debug") {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	got, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 0 {
+		t.Fatalf("registry = %#v, want empty", got)
+	}
+}
+
+func TestSkillsUpdateCommandRegistered(t *testing.T) {
+	stdout, _, err := executeCommand("skills", "update", "--help")
 	if err != nil {
 		t.Fatalf("help: %v", err)
 	}
-	if !strings.Contains(stdout, "Start the interactive TUI") {
+	if !strings.Contains(stdout, "update [name]") {
 		t.Fatalf("help output = %q", stdout)
+	}
+}
+
+func TestTUICommandRemovedFromHelp(t *testing.T) {
+	stdout, _, err := executeCommand("--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if strings.Contains(stdout, "tui") || strings.Contains(stdout, "Start the interactive TUI") {
+		t.Fatalf("help output = %q", stdout)
+	}
+}
+
+func TestTUICommandIsNotRegistered(t *testing.T) {
+	_, _, err := executeCommand("tui")
+	if err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("err = %v, want unknown command", err)
 	}
 }
 
@@ -211,7 +308,7 @@ func TestResumeCommandLoadsSessionInTUI(t *testing.T) {
 	}
 }
 
-func TestTUICommandPrintsResumeHintAfterExit(t *testing.T) {
+func TestRootCommandPrintsResumeHintAfterExit(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 	defer logging.Close()
@@ -224,9 +321,9 @@ func TestTUICommandPrintsResumeHintAfterExit(t *testing.T) {
 
 	cmd := newRootCommand()
 	cmd.SetOut(&output)
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	got := output.String()
@@ -252,7 +349,7 @@ func applyTeaCommandForTest(t *testing.T, model tea.Model, cmd tea.Cmd) tea.Mode
 	return next
 }
 
-func TestTUICommandUsesConfiguredStreams(t *testing.T) {
+func TestRootCommandUsesConfiguredStreams(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 	defer logging.Close()
@@ -274,9 +371,9 @@ func TestTUICommandUsesConfiguredStreams(t *testing.T) {
 	cmd := newRootCommand()
 	cmd.SetIn(input)
 	cmd.SetOut(&output)
-	cmd.SetArgs([]string{"tui"})
+	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 	if !called {
 		t.Fatal("tui program was not started")
@@ -301,7 +398,7 @@ func TestTUIProgramOptionsEnableMouseCellMotion(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
+func TestRootCommandInitializesConfiguredLogging(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 
@@ -317,9 +414,9 @@ func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	contents, err := os.ReadFile(logFile)
@@ -331,7 +428,7 @@ func TestTUICommandInitializesConfiguredLogging(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitializesAuditLogger(t *testing.T) {
+func TestRootCommandInitializesAuditLogger(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 
@@ -346,9 +443,9 @@ func TestTUICommandInitializesAuditLogger(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	if _, err := os.Stat(filepath.Join(home, "logs", "audit.log")); err != nil {
@@ -356,7 +453,7 @@ func TestTUICommandInitializesAuditLogger(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
+func TestRootCommandInitializesLoggingWithEmptyFile(t *testing.T) {
 	oldRun := runTeaProgram
 	defer func() { runTeaProgram = oldRun }()
 	defer logging.Close()
@@ -378,9 +475,9 @@ func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 
 	contents, err := os.ReadFile(previousLogFile)
@@ -392,7 +489,7 @@ func TestTUICommandInitializesLoggingWithEmptyFile(t *testing.T) {
 	}
 }
 
-func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
+func TestRootCommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 	oldRun := runTeaProgram
 	oldVersion := version
 	defer func() {
@@ -470,9 +567,9 @@ func TestTUICommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 	}
 
 	cmd := newRootCommand()
-	cmd.SetArgs([]string{"--home", home, "tui"})
+	cmd.SetArgs([]string{"--home", home})
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("tui: %v", err)
+		t.Fatalf("root: %v", err)
 	}
 }
 

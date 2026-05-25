@@ -9,7 +9,7 @@ import (
 type RiskLevel int
 
 const (
-	RiskAllow   RiskLevel = iota
+	RiskAllow RiskLevel = iota
 	RiskConfirm
 	RiskDeny
 )
