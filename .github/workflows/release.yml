@@ -19,6 +19,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+        env:
+          CGO_ENABLED: 0
 
   release:
     needs: test
@@ -50,6 +52,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.goos == 'linux' && '0' || '1' }}
         run: |
           go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
             -o "conan-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/conan
@@ -58,6 +61,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
         run: |
           go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
             -o "conan-agent-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/conan-agent
