@@ -66,12 +66,13 @@ type GlobalConfig struct {
 }
 
 type ModelConfig struct {
-	Name     string `yaml:"name"`
-	Type     string `yaml:"type"` // "anthropic" or "openai"
-	Endpoint string `yaml:"endpoint"`
-	Model    string `yaml:"model"`
-	APIKey   string `yaml:"api_key"`
-	Thinking *bool  `yaml:"thinking,omitempty"`
+	Name                string `yaml:"name"`
+	Type                string `yaml:"type"` // "anthropic" or "openai"
+	Endpoint            string `yaml:"endpoint"`
+	UseEndpointDirectly bool   `yaml:"use_endpoint_directly,omitempty"`
+	Model               string `yaml:"model"`
+	APIKey              string `yaml:"api_key"`
+	Thinking            *bool  `yaml:"thinking,omitempty"`
 }
 
 type SecurityConfig struct {

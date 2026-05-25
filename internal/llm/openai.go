@@ -14,19 +14,21 @@ import (
 )
 
 type OpenAIConfig struct {
-	APIKey   string
-	Model    string
-	BaseURL  string
-	Client   *http.Client
-	Thinking *bool
+	APIKey              string
+	Model               string
+	BaseURL             string
+	UseEndpointDirectly bool
+	Client              *http.Client
+	Thinking            *bool
 }
 
 type OpenAIProvider struct {
-	apiKey   string
-	model    string
-	baseURL  string
-	client   *http.Client
-	thinking *bool
+	apiKey              string
+	model               string
+	baseURL             string
+	useEndpointDirectly bool
+	client              *http.Client
+	thinking            *bool
 }
 
 func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
@@ -39,11 +41,12 @@ func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
 		client = http.DefaultClient
 	}
 	return &OpenAIProvider{
-		apiKey:   cfg.APIKey,
-		model:    cfg.Model,
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		client:   client,
-		thinking: cfg.Thinking,
+		apiKey:              cfg.APIKey,
+		model:               cfg.Model,
+		baseURL:             strings.TrimRight(baseURL, "/"),
+		useEndpointDirectly: cfg.UseEndpointDirectly,
+		client:              client,
+		thinking:            cfg.Thinking,
 	}
 }
 
@@ -197,7 +200,11 @@ func thinkingType(enabled bool) string {
 }
 
 func (p *OpenAIProvider) doRequest(ctx context.Context, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
+	endpoint := p.baseURL
+	if !p.useEndpointDirectly {
+		endpoint += "/chat/completions"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

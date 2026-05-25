@@ -215,6 +215,8 @@ skills:
 
 Conan 支持 Anthropic 和 OpenAI 兼容提供方。配置中的 API Key 可以使用 `${OPENAI_API_KEY}` 这类环境变量引用。
 
+在 `model add` 里，可以用上下键移动提供方和模型列表，按 Enter 确认。自定义提供方需要选择 OpenAI 兼容或 Anthropic 兼容协议。自定义端点会按输入值原样访问，Conan 不会再追加 `/chat/completions` 或 `/v1/messages`。如果无法获取模型列表，就手动输入模型名称。
+
 ## 节点和 Agent
 
 `conan-agent` 运行在被管节点上，对外提供 MCP 运维工具。添加并部署节点：

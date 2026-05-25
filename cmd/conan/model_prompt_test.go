@@ -89,6 +89,82 @@ func TestModelAddDiscoveredModels(t *testing.T) {
 	}
 }
 
+func TestModelAddCustomOpenAIUsesDirectEndpoint(t *testing.T) {
+	home := t.TempDir()
+	loader := cfgloader.NewLoader(home)
+	input := strings.Join([]string{
+		"7", // Custom
+		"1", // OpenAI-compatible
+		"custom-openai",
+		"sk-custom",
+		"https://example.com/chat",
+		"custom-model", // manual model name after discovery failure
+		"y",            // set as default
+		"", "\n",
+	}, "\n")
+	var out bytes.Buffer
+
+	lister := stubLister{err: fmt.Errorf("network error")}
+	err := runModelAdd(strings.NewReader(input), &out, loader, lister)
+	if err != nil {
+		t.Fatalf("runModelAdd: %v", err)
+	}
+
+	global, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	m := global.Models[0]
+	if m.Type != "openai" {
+		t.Fatalf("type = %q, want openai", m.Type)
+	}
+	if m.Endpoint != "https://example.com/chat" {
+		t.Fatalf("endpoint = %q", m.Endpoint)
+	}
+	if !m.UseEndpointDirectly {
+		t.Fatal("UseEndpointDirectly = false, want true")
+	}
+	if m.Model != "custom-model" {
+		t.Fatalf("model = %q, want custom-model", m.Model)
+	}
+}
+
+func TestModelAddCustomAnthropicUsesDirectEndpoint(t *testing.T) {
+	home := t.TempDir()
+	loader := cfgloader.NewLoader(home)
+	input := strings.Join([]string{
+		"7", // Custom
+		"2", // Anthropic-compatible
+		"custom-anthropic",
+		"sk-ant",
+		"https://example.com/messages",
+		"claude-custom",
+		"y", // set as default
+		"", "\n",
+	}, "\n")
+	var out bytes.Buffer
+
+	err := runModelAdd(strings.NewReader(input), &out, loader, stubLister{})
+	if err != nil {
+		t.Fatalf("runModelAdd: %v", err)
+	}
+
+	global, err := loader.LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	m := global.Models[0]
+	if m.Type != "anthropic" {
+		t.Fatalf("type = %q, want anthropic", m.Type)
+	}
+	if !m.UseEndpointDirectly {
+		t.Fatal("UseEndpointDirectly = false, want true")
+	}
+	if m.Model != "claude-custom" {
+		t.Fatalf("model = %q, want claude-custom", m.Model)
+	}
+}
+
 func TestModelAddRejectsDuplicateName(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := filepath.Join(home, "config.yaml")

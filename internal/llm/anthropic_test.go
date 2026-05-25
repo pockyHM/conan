@@ -54,6 +54,69 @@ func TestAnthropicChat(t *testing.T) {
 	}
 }
 
+func TestAnthropicChatUsesDirectEndpoint(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{
+			"id":"msg-test",
+			"type":"message",
+			"role":"assistant",
+			"content":[{"type":"text","text":"direct"}],
+			"stop_reason":"end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider(AnthropicConfig{
+		APIKey:              "test-key",
+		Model:               "claude-sonnet-4-6",
+		BaseURL:             server.URL + "/custom/messages",
+		UseEndpointDirectly: true,
+	})
+	_, err := p.Chat(context.Background(), &ChatRequest{
+		Messages: []models.Message{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotPath != "/custom/messages" {
+		t.Fatalf("path = %q, want /custom/messages", gotPath)
+	}
+}
+
+func TestAnthropicChatAppendsDefaultRoute(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{
+			"id":"msg-test",
+			"type":"message",
+			"role":"assistant",
+			"content":[{"type":"text","text":"base"}],
+			"stop_reason":"end_turn"
+		}`)
+	}))
+	defer server.Close()
+
+	p := NewAnthropicProvider(AnthropicConfig{
+		APIKey:  "test-key",
+		Model:   "claude-sonnet-4-6",
+		BaseURL: server.URL,
+	})
+	_, err := p.Chat(context.Background(), &ChatRequest{
+		Messages: []models.Message{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotPath != "/v1/messages" {
+		t.Fatalf("path = %q, want /v1/messages", gotPath)
+	}
+}
+
 func TestAnthropicStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

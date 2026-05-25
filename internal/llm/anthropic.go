@@ -14,17 +14,19 @@ import (
 )
 
 type AnthropicConfig struct {
-	APIKey  string
-	Model   string
-	BaseURL string
-	Client  *http.Client
+	APIKey              string
+	Model               string
+	BaseURL             string
+	UseEndpointDirectly bool
+	Client              *http.Client
 }
 
 type AnthropicProvider struct {
-	apiKey  string
-	model   string
-	baseURL string
-	client  *http.Client
+	apiKey              string
+	model               string
+	baseURL             string
+	useEndpointDirectly bool
+	client              *http.Client
 }
 
 func NewAnthropicProvider(cfg AnthropicConfig) *AnthropicProvider {
@@ -37,10 +39,11 @@ func NewAnthropicProvider(cfg AnthropicConfig) *AnthropicProvider {
 		client = http.DefaultClient
 	}
 	return &AnthropicProvider{
-		apiKey:  cfg.APIKey,
-		model:   cfg.Model,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  client,
+		apiKey:              cfg.APIKey,
+		model:               cfg.Model,
+		baseURL:             strings.TrimRight(baseURL, "/"),
+		useEndpointDirectly: cfg.UseEndpointDirectly,
+		client:              client,
 	}
 }
 
@@ -170,7 +173,11 @@ func (p *AnthropicProvider) buildVisionBody(req *VisionRequest) ([]byte, error) 
 }
 
 func (p *AnthropicProvider) doRequest(ctx context.Context, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/messages", bytes.NewReader(body))
+	endpoint := p.baseURL
+	if !p.useEndpointDirectly {
+		endpoint += "/v1/messages"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

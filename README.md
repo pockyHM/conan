@@ -215,6 +215,8 @@ Interactive model setup:
 
 Conan supports Anthropic and OpenAI-compatible providers. API keys in config can use environment references such as `${OPENAI_API_KEY}`.
 
+In `model add`, move through provider and model lists with Up/Down and press Enter to confirm. For custom providers, choose whether the endpoint speaks the OpenAI-compatible or Anthropic-compatible protocol. Custom endpoints are used exactly as entered; Conan does not append `/chat/completions` or `/v1/messages`. If model discovery is unavailable, enter the model name manually.
+
 ## Nodes And Agents
 
 `conan-agent` runs on managed nodes and exposes MCP tools for operations tasks. Add and deploy a node:

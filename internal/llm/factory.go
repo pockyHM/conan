@@ -48,16 +48,18 @@ func providerFromConfig(cfg configschema.ModelConfig) (Provider, string, error) 
 	switch cfg.Type {
 	case "anthropic":
 		return NewAnthropicProvider(AnthropicConfig{
-			APIKey:  cfg.APIKey,
-			Model:   cfg.Model,
-			BaseURL: cfg.Endpoint,
+			APIKey:              cfg.APIKey,
+			Model:               cfg.Model,
+			BaseURL:             cfg.Endpoint,
+			UseEndpointDirectly: cfg.UseEndpointDirectly,
 		}), cfg.Name, nil
 	case "openai":
 		return NewOpenAIProvider(OpenAIConfig{
-			APIKey:   cfg.APIKey,
-			Model:    cfg.Model,
-			BaseURL:  cfg.Endpoint,
-			Thinking: cfg.Thinking,
+			APIKey:              cfg.APIKey,
+			Model:               cfg.Model,
+			BaseURL:             cfg.Endpoint,
+			UseEndpointDirectly: cfg.UseEndpointDirectly,
+			Thinking:            cfg.Thinking,
 		}), cfg.Name, nil
 	default:
 		return nil, "", fmt.Errorf("unknown model type: %s", cfg.Type)

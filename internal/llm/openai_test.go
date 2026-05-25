@@ -47,6 +47,69 @@ func TestOpenAIChat(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatUsesDirectEndpoint(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{
+			"id":"chatcmpl-test",
+			"choices":[{
+				"message":{"role":"assistant","content":"direct"},
+				"finish_reason":"stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider(OpenAIConfig{
+		APIKey:              "test-key",
+		Model:               "gpt-4.1",
+		BaseURL:             server.URL + "/custom/openai",
+		UseEndpointDirectly: true,
+	})
+	_, err := p.Chat(context.Background(), &ChatRequest{
+		Messages: []models.Message{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotPath != "/custom/openai" {
+		t.Fatalf("path = %q, want /custom/openai", gotPath)
+	}
+}
+
+func TestOpenAIChatAppendsDefaultRoute(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{
+			"id":"chatcmpl-test",
+			"choices":[{
+				"message":{"role":"assistant","content":"base"},
+				"finish_reason":"stop"
+			}]
+		}`)
+	}))
+	defer server.Close()
+
+	p := NewOpenAIProvider(OpenAIConfig{
+		APIKey:  "test-key",
+		Model:   "gpt-4.1",
+		BaseURL: server.URL + "/v1",
+	})
+	_, err := p.Chat(context.Background(), &ChatRequest{
+		Messages: []models.Message{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want /v1/chat/completions", gotPath)
+	}
+}
+
 func TestOpenAIStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

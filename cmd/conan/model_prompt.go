@@ -46,15 +46,23 @@ func (p *prompter) askSecret(prompt string) (string, error) {
 }
 
 func (p *prompter) choose(prompt string, options []string) (int, error) {
-	for i, opt := range options {
-		fmt.Fprintf(p.out, "  %d) %s\n", i+1, opt)
+	if len(options) == 0 {
+		return 0, fmt.Errorf("no options available")
 	}
-	fmt.Fprintf(p.out, "%s [1-%d]: ", prompt, len(options))
+
+	if f, ok := p.rawIn.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		return p.chooseInteractive(f, prompt, options)
+	}
+
+	renderChoice(p.out, prompt, options, 0)
 	line, err := p.in.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
 	line = strings.TrimSpace(line)
+	if line == "" {
+		return 0, nil
+	}
 	var idx int
 	for _, ch := range line {
 		if ch >= '1' && ch <= '9' {
@@ -66,6 +74,59 @@ func (p *prompter) choose(prompt string, options []string) (int, error) {
 		return 0, fmt.Errorf("invalid selection: %q", line)
 	}
 	return idx - 1, nil
+}
+
+func (p *prompter) chooseInteractive(f *os.File, prompt string, options []string) (int, error) {
+	oldState, err := term.MakeRaw(int(f.Fd()))
+	if err != nil {
+		return 0, err
+	}
+	defer term.Restore(int(f.Fd()), oldState)
+
+	selected := 0
+	renderChoice(p.out, prompt, options, selected)
+	buf := make([]byte, 3)
+	for {
+		n, err := f.Read(buf)
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			continue
+		}
+		switch {
+		case buf[0] == '\r' || buf[0] == '\n':
+			fmt.Fprintln(p.out)
+			return selected, nil
+		case n >= 3 && buf[0] == 0x1b && buf[1] == '[' && buf[2] == 'A':
+			if selected > 0 {
+				selected--
+				moveChoiceCursorUp(p.out, len(options))
+				renderChoice(p.out, prompt, options, selected)
+			}
+		case n >= 3 && buf[0] == 0x1b && buf[1] == '[' && buf[2] == 'B':
+			if selected < len(options)-1 {
+				selected++
+				moveChoiceCursorUp(p.out, len(options))
+				renderChoice(p.out, prompt, options, selected)
+			}
+		}
+	}
+}
+
+func renderChoice(out io.Writer, prompt string, options []string, selected int) {
+	fmt.Fprintf(out, "%s\n", prompt)
+	for i, opt := range options {
+		cursor := "  "
+		if i == selected {
+			cursor = "> "
+		}
+		fmt.Fprintf(out, "%s%s\n", cursor, opt)
+	}
+}
+
+func moveChoiceCursorUp(out io.Writer, optionCount int) {
+	fmt.Fprintf(out, "\x1b[%dA", optionCount+1)
 }
 
 func (p *prompter) confirm(prompt string) (bool, error) {
@@ -89,6 +150,22 @@ func runModelAdd(in io.Reader, out io.Writer, loader *cfgloader.Loader, lister M
 		return err
 	}
 	preset := modelPresets[idx]
+	if preset.NeedsType {
+		idx, err := pr.choose("Compatibility", []string{"OpenAI-compatible", "Anthropic-compatible"})
+		if err != nil {
+			return err
+		}
+		switch idx {
+		case 0:
+			preset.Type = "openai"
+			preset.SupportsList = true
+			preset.DefaultModelHint = "gpt-4.1"
+		case 1:
+			preset.Type = "anthropic"
+			preset.SupportsList = false
+			preset.DefaultModelHint = "claude-sonnet-4-6"
+		}
+	}
 
 	configName, err := pr.ask("Config name: ")
 	if err != nil {
@@ -140,11 +217,12 @@ func runModelAdd(in io.Reader, out io.Writer, loader *cfgloader.Loader, lister M
 	}
 
 	global.Models = append(global.Models, configschema.ModelConfig{
-		Name:     configName,
-		Type:     preset.Type,
-		Endpoint: endpoint,
-		Model:    modelID,
-		APIKey:   apiKey,
+		Name:                configName,
+		Type:                preset.Type,
+		Endpoint:            endpoint,
+		UseEndpointDirectly: preset.UseEndpointDirectly,
+		Model:               modelID,
+		APIKey:              apiKey,
 	})
 	if setDefault {
 		global.DefaultModel = configName
@@ -159,7 +237,7 @@ func runModelAdd(in io.Reader, out io.Writer, loader *cfgloader.Loader, lister M
 
 func selectModel(pr *prompter, lister ModelLister, preset ModelPreset, endpoint, apiKey string) (string, error) {
 	if !preset.SupportsList {
-		return pr.ask(fmt.Sprintf("Model [%s]: ", preset.DefaultModelHint))
+		return askModelName(pr, preset.DefaultModelHint)
 	}
 
 	fmt.Fprint(pr.out, "Fetching available models...\n")
@@ -167,10 +245,10 @@ func selectModel(pr *prompter, lister ModelLister, preset ModelPreset, endpoint,
 	models, err := lister.ListModels(ctx, endpoint, apiKey)
 	if err != nil {
 		fmt.Fprintf(pr.out, "Warning: could not fetch models (%v)\n", err)
-		return pr.ask(fmt.Sprintf("Model [%s]: ", preset.DefaultModelHint))
+		return askModelName(pr, preset.DefaultModelHint)
 	}
 	if len(models) == 0 {
-		return pr.ask(fmt.Sprintf("Model [%s]: ", preset.DefaultModelHint))
+		return askModelName(pr, preset.DefaultModelHint)
 	}
 
 	options := append(models, "Enter manually")
@@ -179,7 +257,25 @@ func selectModel(pr *prompter, lister ModelLister, preset ModelPreset, endpoint,
 		return "", err
 	}
 	if idx == len(models) {
-		return pr.ask(fmt.Sprintf("Model [%s]: ", preset.DefaultModelHint))
+		return askModelName(pr, preset.DefaultModelHint)
 	}
 	return models[idx], nil
+}
+
+func askModelName(pr *prompter, defaultHint string) (string, error) {
+	prompt := "Model: "
+	if defaultHint != "" {
+		prompt = fmt.Sprintf("Model [%s]: ", defaultHint)
+	}
+	model, err := pr.ask(prompt)
+	if err != nil {
+		return "", err
+	}
+	if model == "" {
+		model = defaultHint
+	}
+	if model == "" {
+		return "", fmt.Errorf("model is required")
+	}
+	return model, nil
 }
