@@ -118,15 +118,29 @@ func newModelRemoveCommand(cfg modelCommandConfig) *cobra.Command {
 }
 
 func newModelAddCommand(cfg modelCommandConfig) *cobra.Command {
-	return &cobra.Command{
+	var flags ModelAddFlags
+
+	cmd := &cobra.Command{
 		Use:   "add",
-		Short: "Interactively add a model configuration",
+		Short: "Add a model configuration",
+		Long:  "Interactively add a model configuration, or use flags for non-interactive mode.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			loader := cfgloader.NewLoader(*cfg.home)
-			return runModelAdd(cmd.InOrStdin(), cmd.OutOrStdout(), loader, OpenAIModelLister{})
+			return runModelAdd(cmd.InOrStdin(), cmd.OutOrStdout(), loader, OpenAIModelLister{}, LiveConnectionTester{}, flags)
 		},
 	}
+
+	cmd.Flags().StringVar(&flags.Provider, "provider", "", "Provider ID (anthropic, openai, glm, glm-coding, minimax, minimax-cn, qwen, kimi, custom)")
+	cmd.Flags().StringVar(&flags.APIKey, "api-key", "", "API key (or set environment variable)")
+	cmd.Flags().StringVar(&flags.Model, "model", "", "Model ID (e.g. gpt-4.1, claude-sonnet-4-6)")
+	cmd.Flags().StringVar(&flags.Name, "name", "", "Config name (auto-generated if omitted)")
+	cmd.Flags().StringVar(&flags.Type, "type", "", "Compatibility type for custom provider (openai or anthropic)")
+	cmd.Flags().StringVar(&flags.Endpoint, "endpoint", "", "API endpoint URL (required for custom)")
+	cmd.Flags().StringVar(&flags.EndpointMode, "endpoint-mode", "base", "Endpoint mode for custom: base or full")
+	cmd.Flags().BoolVar(&flags.SetDefault, "default", false, "Set as default model")
+
+	return cmd
 }
 
 func modelExists(models []configschema.ModelConfig, name string) bool {

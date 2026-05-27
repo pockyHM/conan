@@ -4,31 +4,84 @@
 
 Conan is an AI operations assistant that runs in your terminal. The main entry is the `conan` TUI: you talk to the model, select nodes, reference local files, attach images, install skills, and let Conan call safe node tools through `conan-agent`.
 
-## Quick Start
+## Installation
 
-Build the binaries:
+### One-click install (Linux & macOS)
 
 ```bash
-make build
+curl -fsSL https://raw.githubusercontent.com/pockyHM/conan/main/install.sh | bash
 ```
+
+This auto-detects your OS and architecture, downloads `conan` to `/usr/local/bin`, and on Linux also downloads `conan-agent` to `~/.conan/agent/<arch>/conan-agent`. After installation it launches `conan model add` to configure your first model.
+
+Install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pockyHM/conan/main/install.sh | bash -s -- 0.0.1
+```
+
+### Manual download
+
+Download binaries from [GitHub Releases](https://github.com/pockyHM/conan/releases).
+
+**conan (CLI — Linux & macOS)**
+
+```bash
+# Linux amd64
+curl -fSL -o /usr/local/bin/conan https://github.com/pockyHM/conan/releases/latest/download/conan-linux-amd64
+chmod +x /usr/local/bin/conan
+
+# Linux arm64
+curl -fSL -o /usr/local/bin/conan https://github.com/pockyHM/conan/releases/latest/download/conan-linux-arm64
+chmod +x /usr/local/bin/conan
+
+# macOS arm64 (Apple Silicon)
+curl -fSL -o /usr/local/bin/conan https://github.com/pockyHM/conan/releases/latest/download/conan-darwin-arm64
+chmod +x /usr/local/bin/conan
+```
+
+**conan-agent (Linux only)**
+
+```bash
+# amd64
+mkdir -p ~/.conan/agent/amd64
+curl -fSL -o ~/.conan/agent/amd64/conan-agent https://github.com/pockyHM/conan/releases/latest/download/conan-agent-linux-amd64
+chmod +x ~/.conan/agent/amd64/conan-agent
+
+# arm64
+mkdir -p ~/.conan/agent/arm64
+curl -fSL -o ~/.conan/agent/arm64/conan-agent https://github.com/pockyHM/conan/releases/latest/download/conan-agent-linux-arm64
+chmod +x ~/.conan/agent/arm64/conan-agent
+```
+
+Then configure the agent binary paths in `~/.conan/config.yaml`:
+
+```yaml
+agent_deploy:
+  binaries:
+    amd64: ~/.conan/agent/amd64/conan-agent
+    arm64: ~/.conan/agent/arm64/conan-agent
+```
+
+## Quick Start
 
 Add a model:
 
 ```bash
-./bin/conan model add
-./bin/conan model use <name>
+conan model add
+conan model use <name>
 ```
 
 Add a node and deploy `conan-agent`:
 
 ```bash
-./bin/conan node add <hostname-or-ip> --user <ssh-user>
+conan node add <hostname-or-ip> --user <ssh-user>
 ```
 
 Start Conan:
 
 ```bash
-./bin/conan
+conan
 ```
 
 `conan` without a subcommand opens the interactive TUI. Use `--home <path>` to choose a Conan home directory and `--cluster <name>` to choose a cluster.

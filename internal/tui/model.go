@@ -48,6 +48,7 @@ type NodeInfo struct {
 type ModelConfig struct {
 	Cluster            string
 	Model              string
+	ModelConfigs       []configschema.ModelConfig
 	UILanguage         string
 	InitialSessionID   string
 	Version            string
@@ -108,6 +109,7 @@ const (
 	modeNodePrompt
 	modeNodeAddForm
 	modeLangSelect
+	modeModelSelect
 	modeConfig
 )
 
@@ -146,6 +148,7 @@ type Model struct {
 	initialSessionID string
 	cliVersion       string
 	provider         llm.Provider
+	modelConfigs     []configschema.ModelConfig
 	visionProvider   llm.VisionProvider
 	visionError      string
 	vision           configschema.VisionConfig
@@ -158,10 +161,11 @@ type Model struct {
 	selectedNodes    map[string]bool
 	nodeToolsEnabled bool
 
-	mode         tuiMode
-	nodeSelector nodeSelector
-	langSelector langSelector
-	prevSelected map[string]bool
+	mode          tuiMode
+	nodeSelector  nodeSelector
+	langSelector  langSelector
+	modelSelector modelSelector
+	prevSelected  map[string]bool
 
 	reviewer           *security.Reviewer
 	auditLog           *security.AuditLogger
@@ -238,6 +242,7 @@ func NewModel(cfg ModelConfig) Model {
 		cluster:            cfg.Cluster,
 		clusterExplicit:    clusterExplicit,
 		model:              cfg.Model,
+		modelConfigs:       append([]configschema.ModelConfig(nil), cfg.ModelConfigs...),
 		uiLanguage:         language,
 		initialSessionID:   cfg.InitialSessionID,
 		cliVersion:         cfg.Version,
@@ -875,6 +880,9 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeLangSelect {
 		return m.handleLangSelectKey(key)
 	}
+	if m.mode == modeModelSelect {
+		return m.handleModelSelectKey(key)
+	}
 	if m.mode == modeConfig {
 		return m.handleConfigKey(key)
 	}
@@ -1352,6 +1360,28 @@ func (m Model) handleLangSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) handleModelSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		selected, ok := m.modelSelector.Selected()
+		if !ok {
+			m.mode = modeChat
+			m.status = m.uiLanguage.tr("No configured models", "没有已配置模型")
+			return m, nil
+		}
+		m.mode = modeChat
+		return m.switchModel(selected.Name)
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeChat
+		m.status = m.uiLanguage.tr("Model selection cancelled", "已取消模型选择")
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.modelSelector, cmd = m.modelSelector.Update(key)
+		return m, cmd
+	}
+}
+
 func (m Model) handleConfigKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.configScreen.editMode {
 	case configEditText:
@@ -1498,6 +1528,57 @@ func (m Model) saveUILanguage(lang uiLanguage) error {
 	return loader.SaveGlobal(global)
 }
 
+func (m Model) switchModel(name string) (Model, tea.Cmd) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		m.status = m.uiLanguage.tr("Usage: /model <name>", "用法: /model <名称>")
+		return m, nil
+	}
+	if len(m.modelConfigs) == 0 {
+		m.model = name
+		m.status = m.uiLanguage.tr("Model switched to ", "已切换模型: ") + name
+		return m, nil
+	}
+	if _, ok := findModelConfig(m.modelConfigs, name); !ok {
+		m.status = m.uiLanguage.tr("Unknown model: ", "未知模型: ") + name
+		return m, nil
+	}
+	provider, modelName, err := llm.NewProvider(m.modelConfigs, name)
+	if err != nil {
+		m.status = m.uiLanguage.tr("Model switch failed: ", "模型切换失败: ") + err.Error()
+		return m, nil
+	}
+	if provider != nil {
+		provider = llm.NewRetryProvider(provider, llm.DefaultRetryConfig())
+	}
+	m.provider = provider
+	m.model = modelName
+	m.visionProvider = nil
+	m.visionError = ""
+	if visionProvider, _, err := llm.NewVisionProvider(m.modelConfigs, name); err != nil {
+		m.visionError = err.Error()
+	} else if chatProvider, ok := visionProvider.(llm.Provider); ok {
+		if retryProvider, ok := llm.NewRetryProvider(chatProvider, llm.DefaultRetryConfig()).(llm.VisionProvider); ok {
+			m.visionProvider = retryProvider
+		} else {
+			m.visionProvider = visionProvider
+		}
+	} else {
+		m.visionProvider = visionProvider
+	}
+	m.status = m.uiLanguage.tr("Model switched to ", "已切换模型: ") + modelName
+	return m, nil
+}
+
+func findModelConfig(models []configschema.ModelConfig, name string) (configschema.ModelConfig, bool) {
+	for _, model := range models {
+		if model.Name == name {
+			return model, true
+		}
+	}
+	return configschema.ModelConfig{}, false
+}
+
 func (m Model) View() string {
 	header := renderHeader(m.cluster, m.model, len(m.selectedNodes), len(m.nodes), m.uiLanguage)
 	statusView := m.renderStatus()
@@ -1510,6 +1591,9 @@ func (m Model) View() string {
 	}
 	if m.mode == modeLangSelect {
 		return header + "\n\n" + m.langSelector.View() + "\n\n" + statusView
+	}
+	if m.mode == modeModelSelect {
+		return header + "\n\n" + m.modelSelector.View() + "\n\n" + statusView
 	}
 	if m.mode == modeConfig {
 		return header + "\n\n" + m.configScreen.View(m.width, m.uiLanguage) + "\n\n" + statusView
@@ -2153,11 +2237,16 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		return m, nil
 	case CommandModel:
 		if cmd.Arg != "" {
-			m.model = cmd.Arg
-			m.status = m.uiLanguage.tr("Model switched to ", "已切换模型: ") + cmd.Arg
-		} else {
-			m.status = m.uiLanguage.tr("Current model: ", "当前模型: ") + m.model
+			return m.switchModel(cmd.Arg)
 		}
+		if len(m.modelConfigs) == 0 {
+			m.status = m.uiLanguage.tr("No configured models", "没有已配置模型")
+			return m, nil
+		}
+		m.mode = modeModelSelect
+		m.modelSelector = newModelSelector(m.modelConfigs, m.model, m.uiLanguage)
+		m.status = m.uiLanguage.tr("Select model", "选择模型")
+		return m, nil
 	case CommandNode:
 		switch strings.TrimSpace(cmd.Arg) {
 		case "":

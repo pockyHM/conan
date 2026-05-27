@@ -4,31 +4,84 @@
 
 Conan 是一个运行在终端里的 AI 运维助手。主要入口是 `conan` TUI：你可以和模型对话、选择节点、引用本地文件、附加图片、安装 skills，并让 Conan 通过 `conan-agent` 调用安全的节点工具。
 
-## 快速开始
+## 安装
 
-构建二进制：
+### 一键安装（Linux & macOS）
 
 ```bash
-make build
+curl -fsSL https://raw.githubusercontent.com/pockyHM/conan/main/install.sh | bash
 ```
+
+自动检测系统和架构，下载 `conan` 到 `/usr/local/bin`，Linux 上还会下载 `conan-agent` 到 `~/.conan/agent/<架构>/conan-agent`。安装完成后自动进入 `conan model add` 配置第一个模型。
+
+安装指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pockyHM/conan/main/install.sh | bash -s -- 0.0.1
+```
+
+### 手动下载
+
+从 [GitHub Releases](https://github.com/pockyHM/conan/releases) 下载二进制文件。
+
+**conan（CLI — Linux & macOS）**
+
+```bash
+# Linux amd64
+curl -fSL -o /usr/local/bin/conan https://github.com/pockyHM/conan/releases/latest/download/conan-linux-amd64
+chmod +x /usr/local/bin/conan
+
+# Linux arm64
+curl -fSL -o /usr/local/bin/conan https://github.com/pockyHM/conan/releases/latest/download/conan-linux-arm64
+chmod +x /usr/local/bin/conan
+
+# macOS arm64 (Apple Silicon)
+curl -fSL -o /usr/local/bin/conan https://github.com/pockyHM/conan/releases/latest/download/conan-darwin-arm64
+chmod +x /usr/local/bin/conan
+```
+
+**conan-agent（仅 Linux）**
+
+```bash
+# amd64
+mkdir -p ~/.conan/agent/amd64
+curl -fSL -o ~/.conan/agent/amd64/conan-agent https://github.com/pockyHM/conan/releases/latest/download/conan-agent-linux-amd64
+chmod +x ~/.conan/agent/amd64/conan-agent
+
+# arm64
+mkdir -p ~/.conan/agent/arm64
+curl -fSL -o ~/.conan/agent/arm64/conan-agent https://github.com/pockyHM/conan/releases/latest/download/conan-agent-linux-arm64
+chmod +x ~/.conan/agent/arm64/conan-agent
+```
+
+然后在 `~/.conan/config.yaml` 里配置 agent 二进制路径：
+
+```yaml
+agent_deploy:
+  binaries:
+    amd64: ~/.conan/agent/amd64/conan-agent
+    arm64: ~/.conan/agent/arm64/conan-agent
+```
+
+## 快速开始
 
 添加模型：
 
 ```bash
-./bin/conan model add
-./bin/conan model use <名称>
+conan model add
+conan model use <名称>
 ```
 
 添加节点并部署 `conan-agent`：
 
 ```bash
-./bin/conan node add <hostname-or-ip> --user <ssh-user>
+conan node add <hostname-or-ip> --user <ssh-user>
 ```
 
 启动 Conan：
 
 ```bash
-./bin/conan
+conan
 ```
 
 不带子命令运行 `conan` 会进入交互式 TUI。使用 `--home <path>` 指定 Conan home 目录，使用 `--cluster <name>` 指定集群。

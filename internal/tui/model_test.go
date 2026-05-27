@@ -205,6 +205,47 @@ func TestLangCommandAcceptsDirectLanguageArg(t *testing.T) {
 	}
 }
 
+func TestModelCommandWithoutArgOpensSelectorAndSwitchesModel(t *testing.T) {
+	models := []configschema.ModelConfig{
+		{Name: "claude", Type: "anthropic", Model: "claude-sonnet-4-6", APIKey: "sk-ant"},
+		{Name: "gpt", Type: "openai", Model: "gpt-4.1", APIKey: "sk-oai"},
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ModelConfigs: models})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/model")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeModelSelect {
+		t.Fatalf("mode = %v, want modeModelSelect", model.mode)
+	}
+	view := model.View()
+	for _, want := range []string{"Select Model", "claude", "gpt", "(current)"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("model selector view missing %q:\n%s", want, view)
+		}
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.model != "gpt" {
+		t.Fatalf("model = %q, want gpt", model.model)
+	}
+	if _, ok := model.provider.(*llm.RetryProvider); !ok {
+		t.Fatalf("provider = %T, want *llm.RetryProvider", model.provider)
+	}
+	if !strings.Contains(model.View(), "Model switched to gpt") {
+		t.Fatalf("view missing switched status:\n%s", model.View())
+	}
+}
+
 func TestConfigCommandOpensGlobalConfigPage(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_model: claude\nlogging:\n  level: info\n"), 0600); err != nil {

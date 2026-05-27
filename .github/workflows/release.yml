@@ -58,6 +58,7 @@ jobs:
             -o "conan-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/conan
 
       - name: Build conan-agent
+        if: matrix.goos == 'linux'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -66,13 +67,18 @@ jobs:
           go build -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}" \
             -o "conan-agent-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/conan-agent
 
-      - name: Upload artifacts
+      - name: Upload conan
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: |
-            conan-${{ matrix.goos }}-${{ matrix.goarch }}
-            conan-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: conan-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: conan-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Upload conan-agent
+        if: matrix.goos == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: conan-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: conan-agent-${{ matrix.goos }}-${{ matrix.goarch }}
 
   publish:
     needs: release

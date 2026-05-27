@@ -462,6 +462,7 @@ func newRootCommand() *cobra.Command {
 		model := tui.NewModel(tui.ModelConfig{
 			Cluster:            selectedCluster,
 			Model:              modelName,
+			ModelConfigs:       global.Models,
 			UILanguage:         global.UILanguage,
 			InitialSessionID:   initialSessionID,
 			Version:            version,
