@@ -172,6 +172,23 @@ func (p *AnthropicProvider) buildVisionBody(req *VisionRequest) ([]byte, error) 
 	return json.Marshal(body)
 }
 
+func (p *AnthropicProvider) CurlCommand(req *ChatRequest) string {
+	debugReq := sanitizeChatRequest(req)
+	body, err := p.buildBody(debugReq, false)
+	if err != nil {
+		return ""
+	}
+	endpoint := p.baseURL
+	if !p.useEndpointDirectly {
+		endpoint += "/v1/messages"
+	}
+	return buildCurl(endpoint, map[string]string{
+		"Content-Type":      "application/json",
+		"x-api-key":         maskKey(p.apiKey),
+		"anthropic-version": "2023-06-01",
+	}, body)
+}
+
 func (p *AnthropicProvider) doRequest(ctx context.Context, body []byte) (*http.Response, error) {
 	endpoint := p.baseURL
 	if !p.useEndpointDirectly {

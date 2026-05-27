@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -43,7 +44,7 @@ func (p *RetryProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespon
 		if attempt == maxRetries || !retryable {
 			return nil, err
 		}
-		if err := p.wait(ctx, attempt, maxRetries, err); err != nil {
+		if err := p.wait(ctx, attempt, maxRetries, err, req); err != nil {
 			return nil, err
 		}
 	}
@@ -62,7 +63,7 @@ func (p *RetryProvider) ChatStream(ctx context.Context, req *ChatRequest) (<-cha
 		if attempt == maxRetries || !retryable {
 			return nil, err
 		}
-		if err := p.wait(ctx, attempt, maxRetries, err); err != nil {
+		if err := p.wait(ctx, attempt, maxRetries, err, req); err != nil {
 			return nil, err
 		}
 	}
@@ -90,16 +91,23 @@ func (p *RetryProvider) DescribeImages(ctx context.Context, req *VisionRequest) 
 		if attempt == maxRetries || !retryable {
 			return nil, err
 		}
-		if err := p.wait(ctx, attempt, maxRetries, err); err != nil {
+		if err := p.wait(ctx, attempt, maxRetries, err, nil); err != nil {
 			return nil, err
 		}
 	}
 	return nil, lastErr
 }
 
-func (p *RetryProvider) wait(ctx context.Context, attempt int, maxRetries int, err error) error {
+func (p *RetryProvider) wait(ctx context.Context, attempt int, maxRetries int, err error, req *ChatRequest) error {
 	delay := p.cfg.BaseDelay * time.Duration(1<<attempt)
 	slog.Info("retrying llm request", "attempt", attempt+1, "max_retries", maxRetries, "delay", delay, "error", err)
+	if req != nil {
+		if cb, ok := p.inner.(CurlBuilder); ok {
+			if curl := cb.CurlCommand(req); curl != "" {
+				fmt.Printf("---\n%s\n---\n", curl)
+			}
+		}
+	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {

@@ -199,6 +199,22 @@ func thinkingType(enabled bool) string {
 	return "disabled"
 }
 
+func (p *OpenAIProvider) CurlCommand(req *ChatRequest) string {
+	debugReq := sanitizeChatRequest(req)
+	body, err := p.buildBody(debugReq, false)
+	if err != nil {
+		return ""
+	}
+	endpoint := p.baseURL
+	if !p.useEndpointDirectly {
+		endpoint += "/chat/completions"
+	}
+	return buildCurl(endpoint, map[string]string{
+		"Content-Type":  "application/json",
+		"Authorization": "Bearer " + maskKey(p.apiKey),
+	}, body)
+}
+
 func (p *OpenAIProvider) doRequest(ctx context.Context, body []byte) (*http.Response, error) {
 	endpoint := p.baseURL
 	if !p.useEndpointDirectly {

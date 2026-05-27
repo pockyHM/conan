@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
@@ -18,6 +19,10 @@ const (
 type Provider interface {
 	Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error)
 	ChatStream(ctx context.Context, req *ChatRequest) (<-chan ChatEvent, error)
+}
+
+type CurlBuilder interface {
+	CurlCommand(req *ChatRequest) string
 }
 
 type VisionProvider interface {
@@ -110,3 +115,44 @@ type ErrorEvent struct {
 }
 
 func (ErrorEvent) chatEvent() {}
+
+func sanitizeChatRequest(req *ChatRequest) *ChatRequest {
+	msgs := make([]models.Message, len(req.Messages))
+	for i, m := range req.Messages {
+		msgs[i] = m
+		if m.Role == "user" && m.ToolCallID == "" {
+			msgs[i].Content = "hello"
+		}
+	}
+	return &ChatRequest{
+		SystemPrompt: req.SystemPrompt,
+		Messages:     msgs,
+		Tools:        req.Tools,
+		MaxTokens:    req.MaxTokens,
+		Thinking:     req.Thinking,
+	}
+}
+
+func maskKey(key string) string {
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
+}
+
+func buildCurl(endpoint string, headers map[string]string, body []byte) string {
+	var sb strings.Builder
+	sb.WriteString("curl -X POST ")
+	sb.WriteString(shellEscape(endpoint))
+	for k, v := range headers {
+		sb.WriteString(" \\\n  -H ")
+		sb.WriteString(shellEscape(k + ": " + v))
+	}
+	sb.WriteString(" \\\n  -d ")
+	sb.WriteString(shellEscape(string(body)))
+	return sb.String()
+}
+
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
