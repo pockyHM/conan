@@ -8,10 +8,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// k8s/pods
+// k8s_pods
 type k8sPodsTool struct{}
 
-func (k *k8sPodsTool) Name() string        { return "k8s/pods" }
+func (k *k8sPodsTool) Name() string        { return "k8s_pods" }
 func (k *k8sPodsTool) Description() string { return "List Kubernetes pods" }
 func (k *k8sPodsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string","description":"Namespace"},"label_selector":{"type":"string","description":"Label selector"}}}`)
@@ -32,10 +32,10 @@ func (k *k8sPodsTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return runCommand(ctx, cmd)
 }
 
-// k8s/logs
+// k8s_logs
 type k8sLogsTool struct{}
 
-func (k *k8sLogsTool) Name() string        { return "k8s/logs" }
+func (k *k8sLogsTool) Name() string        { return "k8s_logs" }
 func (k *k8sLogsTool) Description() string { return "Get pod logs" }
 func (k *k8sLogsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"pod":{"type":"string"},"tail":{"type":"integer"},"follow":{"type":"boolean"}},"required":["pod"]}`)
@@ -60,10 +60,10 @@ func (k *k8sLogsTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return runCommand(ctx, cmd)
 }
 
-// k8s/events
+// k8s_events
 type k8sEventsTool struct{}
 
-func (k *k8sEventsTool) Name() string        { return "k8s/events" }
+func (k *k8sEventsTool) Name() string        { return "k8s_events" }
 func (k *k8sEventsTool) Description() string { return "List Kubernetes events" }
 func (k *k8sEventsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"}}}`)
@@ -80,10 +80,10 @@ func (k *k8sEventsTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	return runCommand(ctx, cmd)
 }
 
-// k8s/describe
+// k8s_describe
 type k8sDescribeTool struct{}
 
-func (k *k8sDescribeTool) Name() string        { return "k8s/describe" }
+func (k *k8sDescribeTool) Name() string        { return "k8s_describe" }
 func (k *k8sDescribeTool) Description() string { return "Describe a Kubernetes resource" }
 func (k *k8sDescribeTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"resource":{"type":"string","description":"Resource type (e.g. pod)"},"name":{"type":"string","description":"Resource name"},"namespace":{"type":"string"}},"required":["resource","name"]}`)
@@ -104,10 +104,10 @@ func (k *k8sDescribeTool) Execute(ctx context.Context, input json.RawMessage) (*
 	return runCommand(ctx, cmd)
 }
 
-// k8s/apply
+// k8s_apply
 type k8sApplyTool struct{}
 
-func (k *k8sApplyTool) Name() string        { return "k8s/apply" }
+func (k *k8sApplyTool) Name() string        { return "k8s_apply" }
 func (k *k8sApplyTool) Description() string { return "Apply Kubernetes manifest" }
 func (k *k8sApplyTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"manifest":{"type":"string","description":"YAML manifest content"},"namespace":{"type":"string"}},"required":["manifest"]}`)
@@ -127,10 +127,10 @@ func (k *k8sApplyTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	return runCommand(ctx, cmd)
 }
 
-// k8s/delete
+// k8s_delete
 type k8sDeleteTool struct{}
 
-func (k *k8sDeleteTool) Name() string        { return "k8s/delete" }
+func (k *k8sDeleteTool) Name() string        { return "k8s_delete" }
 func (k *k8sDeleteTool) Description() string { return "Delete Kubernetes resource" }
 func (k *k8sDeleteTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"resource":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}},"required":["resource","name"]}`)

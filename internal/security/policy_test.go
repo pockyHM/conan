@@ -7,7 +7,7 @@ import (
 )
 
 func TestPolicyEvaluateReadOnlyToolMetadata(t *testing.T) {
-	decision := NewPolicy(tools.DefaultMetadata()).Evaluate("svc/status", `{"name":"nginx"}`, []string{"node-a"})
+	decision := NewPolicy(tools.DefaultMetadata()).Evaluate("svc_status", `{"name":"nginx"}`, []string{"node-a"})
 
 	if decision.Level != RiskAllow {
 		t.Fatalf("level = %v, want allow", decision.Level)
@@ -34,14 +34,14 @@ func TestPolicyEvaluateMutatingToolMetadata(t *testing.T) {
 func TestPolicyEvaluateCallToolInnerMetadata(t *testing.T) {
 	policy := NewPolicy(tools.DefaultMetadata())
 
-	read := policy.Evaluate("call_tool", `{"node":"node-a","tool":"svc/status","arguments":{"name":"nginx"}}`, []string{"node-a"})
+	read := policy.Evaluate("call_tool", `{"node":"node-a","tool":"svc_status","arguments":{"name":"nginx"}}`, []string{"node-a"})
 	if read.Level != RiskAllow {
-		t.Fatalf("call_tool svc/status = %#v, want allow", read)
+		t.Fatalf("call_tool svc_status = %#v, want allow", read)
 	}
 
-	missing := policy.Evaluate("call_tool", `{"node":"node-a","tool":"svc/restart","arguments":{"name":"nginx"}}`, []string{"node-a"})
+	missing := policy.Evaluate("call_tool", `{"node":"node-a","tool":"svc_restart","arguments":{"name":"nginx"}}`, []string{"node-a"})
 	if missing.Level != RiskConfirm {
-		t.Fatalf("call_tool svc/restart = %#v, want confirm", missing)
+		t.Fatalf("call_tool svc_restart = %#v, want confirm", missing)
 	}
 }
 
@@ -57,7 +57,7 @@ func TestPolicyEvaluateDestructiveContinuesReview(t *testing.T) {
 }
 
 func TestPolicyEvaluateUnknownToolConfirms(t *testing.T) {
-	decision := NewPolicy(tools.DefaultMetadata()).Evaluate("missing/tool", `{}`, nil)
+	decision := NewPolicy(tools.DefaultMetadata()).Evaluate("missing_tool", `{}`, nil)
 
 	if decision.Level != RiskConfirm {
 		t.Fatalf("level = %v, want confirm", decision.Level)

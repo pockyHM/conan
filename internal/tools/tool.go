@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 
 	"github.com/pockyHM/conan/pkg/mcpproto"
@@ -37,6 +38,7 @@ func (r *Registry) Register(tool Tool) {
 func (r *Registry) Get(name string) (Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	name = normalizeToolName(name)
 	if r.disabled[name] {
 		return nil, false
 	}
@@ -59,13 +61,17 @@ func (r *Registry) List() []Tool {
 func (r *Registry) Disable(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.disabled[name] = true
+	r.disabled[normalizeToolName(name)] = true
 }
 
 func (r *Registry) DisableAll(names []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, n := range names {
-		r.disabled[n] = true
+		r.disabled[normalizeToolName(n)] = true
 	}
+}
+
+func normalizeToolName(name string) string {
+	return strings.ReplaceAll(strings.TrimSpace(name), "/", "_")
 }

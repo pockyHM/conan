@@ -36,7 +36,7 @@ func NewAnthropicProvider(cfg AnthropicConfig) *AnthropicProvider {
 	}
 	client := cfg.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultHTTPClient()
 	}
 	return &AnthropicProvider{
 		apiKey:              cfg.APIKey,

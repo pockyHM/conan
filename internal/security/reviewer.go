@@ -15,18 +15,18 @@ import (
 )
 
 var readOnlyTools = map[string]bool{
-	"fs/read": true, "fs/list": true, "fs/stat": true,
-	"sys/cpu": true, "sys/mem": true, "sys/disk": true, "sys/net": true, "sys/processes": true,
-	"svc/status": true, "svc/list": true,
-	"log/read": true, "log/journalctl": true,
-	"net/ping": true, "net/traceroute": true, "net/portcheck": true, "net/curl": true,
-	"web/search": true, "web/fetch": true,
-	"docker/ps": true, "docker/images": true, "docker/logs": true,
-	"k8s/pods": true, "k8s/logs": true, "k8s/events": true, "k8s/describe": true,
-	"pkg/list": true, "pkg/search": true,
-	"cron/list": true, "cron/show": true,
+	"fs_read": true, "fs_list": true, "fs_stat": true,
+	"sys_cpu": true, "sys_mem": true, "sys_disk": true, "sys_net": true, "sys_processes": true,
+	"svc_status": true, "svc_list": true,
+	"log_read": true, "log_journalctl": true,
+	"net_ping": true, "net_traceroute": true, "net_portcheck": true, "net_curl": true,
+	"web_search": true, "web_fetch": true,
+	"docker_ps": true, "docker_images": true, "docker_logs": true,
+	"k8s_pods": true, "k8s_logs": true, "k8s_events": true, "k8s_describe": true,
+	"pkg_list": true, "pkg_search": true,
+	"cron_list": true, "cron_show": true,
 	"tool_search":   true,
-	"local/fs/read": true, "local/fs/list": true, "local/fs/stat": true,
+	"local_fs_read": true, "local_fs_list": true, "local_fs_stat": true,
 }
 
 // ReviewerConfig holds configuration for creating a new Reviewer.
@@ -40,7 +40,7 @@ type ReviewerConfig struct {
 
 // Reviewer implements the two-stage security review pipeline:
 // 1. Read-only tools are auto-allowed
-// 2. shell/run commands are checked against a whitelist
+// 2. shell_run commands are checked against a whitelist
 // 3. Everything else goes to an LLM-based risk assessment
 type Reviewer struct {
 	nodeWhitelists map[string]Whitelist
@@ -94,7 +94,7 @@ func (r *Reviewer) Review(ctx context.Context, toolName, toolInput string, targe
 	}
 
 	// Stage 2: whitelist check for shell commands
-	if toolName == "shell/run" || toolName == "exec" {
+	if toolName == "shell_run" || toolName == "exec" {
 		cmd, err := extractCommand(toolInput)
 		if err == nil && !r.blacklist.Match(cmd) && r.allTargetsWhitelisted(targetNodes, cmd) {
 			return RiskAssessment{Level: RiskAllow, Reason: "whitelisted"}, nil
@@ -210,7 +210,7 @@ func sortedCopy(values []string) []string {
 	return cp
 }
 
-// extractCommand parses the command field from a shell/run tool input JSON.
+// extractCommand parses the command field from a shell_run tool input JSON.
 func extractCommand(toolInput string) (string, error) {
 	var input struct {
 		Command string `json:"command"`

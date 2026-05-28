@@ -278,7 +278,7 @@ Conan 支持 Anthropic 和 OpenAI 兼容提供方。配置中的 API Key 可以�
 ./bin/conan node add 10.0.0.12 --name web-1 --user root
 ```
 
-常用变体：
+添加节点的常用变体：
 
 ```bash
 ./bin/conan node add web-1.example.com --no-deploy
@@ -286,6 +286,16 @@ Conan 支持 Anthropic 和 OpenAI 兼容提供方。配置中的 API Key 可以�
 ./bin/conan node add web-1.example.com --update --rotate-token
 ./bin/conan node add web-1.example.com --agent-bin ./bin/conan-agent-linux-amd64
 ```
+
+更新已有节点上的 `conan-agent`：
+
+```bash
+./bin/conan node update web-1.example.com --cluster prod
+./bin/conan node update --all --cluster prod
+./bin/conan node update --all-cluster
+```
+
+`node update` 会读取已配置节点和已保存的 SSH 凭据，重新上传本地 `conan-agent` 二进制、刷新远端配置和 systemd unit，并重启 `conan-agent`。可以用 `--agent-bin` 指定本地二进制，用 `--user`、`--password` 或 `--ssh-port` 覆盖 SSH 连接参数。
 
 查看清单和连通性：
 

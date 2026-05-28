@@ -21,8 +21,8 @@ func TestRenderMarkdownIncludesRequiredHeadingsAndMetadata(t *testing.T) {
 	approved := true
 	events := []Event{
 		{Source: SourceAssistant, Timestamp: time.Date(2026, 5, 23, 10, 3, 0, 0, time.UTC), Summary: "Latency recovered"},
-		{Source: SourceTool, Timestamp: time.Date(2026, 5, 23, 10, 1, 0, 0, time.UTC), ToolName: "svc/status", Summary: "nginx active", Success: &approved},
-		{Source: SourceRisk, Timestamp: time.Date(2026, 5, 23, 10, 2, 0, 0, time.UTC), ToolName: "svc/restart", Summary: "restart approved", RiskLevel: "confirm", RiskOutcome: "approved"},
+		{Source: SourceTool, Timestamp: time.Date(2026, 5, 23, 10, 1, 0, 0, time.UTC), ToolName: "svc_status", Summary: "nginx active", Success: &approved},
+		{Source: SourceRisk, Timestamp: time.Date(2026, 5, 23, 10, 2, 0, 0, time.UTC), ToolName: "svc_restart", Summary: "restart approved", RiskLevel: "confirm", RiskOutcome: "approved"},
 	}
 
 	md := RenderMarkdown(incident, events, "claude-sonnet")

@@ -8,7 +8,7 @@ func TestMetadataForKnownTools(t *testing.T) {
 		safety     Safety
 		capability string
 	}{
-		{name: "svc/status", safety: SafetyReadOnly, capability: "service"},
+		{name: "svc_status", safety: SafetyReadOnly, capability: "service"},
 		{name: "node_add", safety: SafetyMutating, capability: "node"},
 		{name: "exec", safety: SafetyDestructive, capability: "shell"},
 	}
@@ -29,21 +29,21 @@ func TestMetadataForKnownTools(t *testing.T) {
 
 func TestDefaultMetadataCoversBuiltInAndMetaTools(t *testing.T) {
 	for _, name := range []string{
-		"shell/run",
-		"fs/read", "fs/list", "fs/stat",
-		"sys/cpu", "sys/mem", "sys/disk", "sys/net", "sys/processes",
-		"svc/list", "svc/status",
-		"log/read", "log/journalctl",
-		"net/ping", "net/traceroute", "net/portcheck", "net/curl",
-		"web/search", "web/fetch",
-		"docker/ps", "docker/images", "docker/logs",
-		"k8s/pods", "k8s/logs", "k8s/events", "k8s/describe",
-		"pkg/list", "pkg/search",
-		"cron/list", "cron/show",
+		"shell_run",
+		"fs_read", "fs_list", "fs_stat",
+		"sys_cpu", "sys_mem", "sys_disk", "sys_net", "sys_processes",
+		"svc_list", "svc_status",
+		"log_read", "log_journalctl",
+		"net_ping", "net_traceroute", "net_portcheck", "net_curl",
+		"web_search", "web_fetch",
+		"docker_ps", "docker_images", "docker_logs",
+		"k8s_pods", "k8s_logs", "k8s_events", "k8s_describe",
+		"pkg_list", "pkg_search",
+		"cron_list", "cron_show",
 		"tool_search", "call_tool", "subagents_run",
 		"file_put", "file_get", "node_add", "image_analyze",
 		"memory_search", "memory_read", "memory_patch", "memory_write_note", "memory_promote",
-		"local/fs/read", "local/fs/list", "local/fs/stat", "local/fs/write", "local/fs/patch", "local/fs/delete",
+		"local_fs_read", "local_fs_list", "local_fs_stat", "local_fs_write", "local_fs_patch", "local_fs_delete",
 	} {
 		meta, ok := MetadataFor(name)
 		if !ok {
@@ -65,13 +65,13 @@ func TestDefaultMetadataCoversBuiltInAndMetaTools(t *testing.T) {
 }
 
 func TestIsReadOnlyUsesMetadata(t *testing.T) {
-	if !IsReadOnly("log/read") {
-		t.Fatal("log/read should be read-only")
+	if !IsReadOnly("log_read") {
+		t.Fatal("log_read should be read-only")
 	}
 	if IsReadOnly("file_put") {
 		t.Fatal("file_put should not be read-only")
 	}
-	if IsReadOnly("missing/tool") {
+	if IsReadOnly("missing_tool") {
 		t.Fatal("missing tool should not be read-only")
 	}
 }

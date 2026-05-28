@@ -96,7 +96,7 @@ func TestServerAuth(t *testing.T) {
 func TestServerToolCall(t *testing.T) {
 	base := newTestServer(t)
 	req, _ := http.NewRequest(http.MethodPost, base+"/rpc", bytes.NewBufferString(
-		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"test/echo","arguments":{"msg":"integration"}}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"test_echo","arguments":{"msg":"integration"}}}`,
 	))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)

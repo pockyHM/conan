@@ -586,6 +586,35 @@ func TestNodeAddCommandRegistered(t *testing.T) {
 	}
 }
 
+func TestNodeUpdateCommandRegistered(t *testing.T) {
+	stdout, _, err := executeCommand("node", "update", "--help")
+	if err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	if !strings.Contains(stdout, "update [hostname-or-ip]") {
+		t.Fatalf("help output = %q", stdout)
+	}
+	for _, want := range []string{"--all", "--all-cluster", "--agent-bin"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("help output missing %q: %q", want, stdout)
+		}
+	}
+}
+
+func TestNodeUpdateAllRequiresClusterFlag(t *testing.T) {
+	_, _, err := executeCommand("node", "update", "--all")
+	if err == nil || !strings.Contains(err.Error(), "--cluster is required when using --all") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNodeUpdateAllClusterRejectsNodeArg(t *testing.T) {
+	_, _, err := executeCommand("node", "update", "--all-cluster", "web-1")
+	if err == nil || !strings.Contains(err.Error(), "--all-cluster does not accept a node argument") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestNodeAddNoDeployWritesConfig(t *testing.T) {
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, "clusters", "prod"), 0755); err != nil {

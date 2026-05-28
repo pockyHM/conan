@@ -24,21 +24,21 @@ type RootedFS struct {
 
 func ToolDefs() []llm.ToolDef {
 	return []llm.ToolDef{
-		{Name: "local/fs/read", Description: "Read a local workspace text file only. Binary and image files are refused. Output is capped at 64KiB unless a smaller max_bytes is provided. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"Line offset, 0-based"},"limit":{"type":"integer","description":"Max lines to read"},"max_bytes":{"type":"integer","description":"Max output bytes, capped at 65536"}},"required":["path"]}`)},
-		{Name: "local/fs/list", Description: "List local workspace directory contents. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`)},
-		{Name: "local/fs/stat", Description: "Get local workspace file metadata. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		{Name: "local/fs/write", Description: "Create or overwrite a local workspace text file only. Binary and image paths/content are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
-		{Name: "local/fs/patch", Description: "Edit a local workspace text file. Use old_text/new_text for exact replacement, or start_line/end_line/content for 1-based inclusive line range replacement. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"start_line":{"type":"integer","description":"1-based first line to replace"},"end_line":{"type":"integer","description":"1-based last line to replace, inclusive. Defaults to start_line."},"content":{"type":"string","description":"Replacement content for line range mode"}},"required":["path"]}`)},
-		{Name: "local/fs/delete", Description: "Delete a local workspace text file only. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		{Name: "local_fs_read", Description: "Read a local workspace text file only. Binary and image files are refused. Output is capped at 64KiB unless a smaller max_bytes is provided. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","description":"Line offset, 0-based"},"limit":{"type":"integer","description":"Max lines to read"},"max_bytes":{"type":"integer","description":"Max output bytes, capped at 65536"}},"required":["path"]}`)},
+		{Name: "local_fs_list", Description: "List local workspace directory contents. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"recursive":{"type":"boolean"}},"required":["path"]}`)},
+		{Name: "local_fs_stat", Description: "Get local workspace file metadata. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		{Name: "local_fs_write", Description: "Create or overwrite a local workspace text file only. Binary and image paths/content are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
+		{Name: "local_fs_patch", Description: "Edit a local workspace text file. Use old_text/new_text for exact replacement, or start_line/end_line/content for 1-based inclusive line range replacement. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"start_line":{"type":"integer","description":"1-based first line to replace"},"end_line":{"type":"integer","description":"1-based last line to replace, inclusive. Defaults to start_line."},"content":{"type":"string","description":"Replacement content for line range mode"}},"required":["path"]}`)},
+		{Name: "local_fs_delete", Description: "Delete a local workspace text file only. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
 	}
 }
 
 func IsLocalTool(name string) bool {
-	return strings.HasPrefix(name, "local/fs/")
+	return strings.HasPrefix(name, "local_fs_")
 }
 
 func IsReadOnly(name string) bool {
-	return name == "local/fs/read" || name == "local/fs/list" || name == "local/fs/stat"
+	return name == "local_fs_read" || name == "local_fs_list" || name == "local_fs_stat"
 }
 
 func PathFromCall(name string, input json.RawMessage) string {
@@ -54,17 +54,17 @@ func PathFromCall(name string, input json.RawMessage) string {
 
 func Handle(fsys RootedFS, name string, input json.RawMessage) Result {
 	switch name {
-	case "local/fs/read":
+	case "local_fs_read":
 		return fsys.read(input)
-	case "local/fs/list":
+	case "local_fs_list":
 		return fsys.list(input)
-	case "local/fs/stat":
+	case "local_fs_stat":
 		return fsys.stat(input)
-	case "local/fs/write":
+	case "local_fs_write":
 		return fsys.write(input)
-	case "local/fs/patch":
+	case "local_fs_patch":
 		return fsys.patch(input)
-	case "local/fs/delete":
+	case "local_fs_delete":
 		return fsys.delete(input)
 	default:
 		return Result{Output: "unknown local tool: " + name, Success: false}

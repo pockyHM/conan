@@ -13,16 +13,16 @@ import (
 func TestNewWebToolsExposesFetchWithoutSearchConfig(t *testing.T) {
 	tools := NewWebTools(WebToolConfig{})
 
-	if len(tools) != 1 || tools[0].Name() != "web/fetch" {
-		t.Fatalf("tools = %#v, want only web/fetch", toolNames(tools))
+	if len(tools) != 1 || tools[0].Name() != "web_fetch" {
+		t.Fatalf("tools = %#v, want only web_fetch", toolNames(tools))
 	}
 }
 
 func TestNewWebToolsExposesSearchWhenConfigured(t *testing.T) {
 	tools := NewWebTools(WebToolConfig{SearchProvider: "brave", SearchAPIKey: "test-key"})
 
-	if got := toolNames(tools); strings.Join(got, ",") != "web/fetch,web/search" {
-		t.Fatalf("tools = %#v, want web/fetch and web/search", got)
+	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,web_search" {
+		t.Fatalf("tools = %#v, want web_fetch and web_search", got)
 	}
 }
 

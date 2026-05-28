@@ -9,10 +9,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// cron/list
+// cron_list
 type cronListTool struct{}
 
-func (c *cronListTool) Name() string        { return "cron/list" }
+func (c *cronListTool) Name() string        { return "cron_list" }
 func (c *cronListTool) Description() string { return "List crontab entries" }
 func (c *cronListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"user":{"type":"string","description":"Crontab user (default: current)"}}}`)
@@ -29,10 +29,10 @@ func (c *cronListTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	return runCommand(ctx, cmd)
 }
 
-// cron/add
+// cron_add
 type cronAddTool struct{}
 
-func (c *cronAddTool) Name() string        { return "cron/add" }
+func (c *cronAddTool) Name() string        { return "cron_add" }
 func (c *cronAddTool) Description() string { return "Add crontab entry" }
 func (c *cronAddTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"schedule":{"type":"string","description":"Cron schedule expression"},"command":{"type":"string","description":"Command to run"},"user":{"type":"string"}},"required":["schedule","command"]}`)
@@ -59,10 +59,10 @@ func (c *cronAddTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("cron job added: " + entry)}}, nil
 }
 
-// cron/remove
+// cron_remove
 type cronRemoveTool struct{}
 
-func (c *cronRemoveTool) Name() string        { return "cron/remove" }
+func (c *cronRemoveTool) Name() string        { return "cron_remove" }
 func (c *cronRemoveTool) Description() string { return "Remove crontab entry by line content" }
 func (c *cronRemoveTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Pattern to match for removal"},"user":{"type":"string"}},"required":["pattern"]}`)
@@ -83,10 +83,10 @@ func (c *cronRemoveTool) Execute(ctx context.Context, input json.RawMessage) (*m
 	return runCommand(ctx, cmd)
 }
 
-// cron/show
+// cron_show
 type cronShowTool struct{}
 
-func (c *cronShowTool) Name() string        { return "cron/show" }
+func (c *cronShowTool) Name() string        { return "cron_show" }
 func (c *cronShowTool) Description() string { return "Show crontab entries matching pattern" }
 func (c *cronShowTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Grep pattern"},"user":{"type":"string"}},"required":["pattern"]}`)

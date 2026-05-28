@@ -172,7 +172,7 @@ func TestAnthropicStreamToolCall(t *testing.T) {
 		writeSSE(w, flusher, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
 		writeSSE(w, flusher, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Checking."}}`)
 		writeSSE(w, flusher, "content_block_stop", `{"type":"content_block_stop","index":0}`)
-		writeSSE(w, flusher, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"shell/run","input":{}}}`)
+		writeSSE(w, flusher, "content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"shell_run","input":{}}}`)
 		writeSSE(w, flusher, "content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"df -h\"}"}}`)
 		writeSSE(w, flusher, "content_block_stop", `{"type":"content_block_stop","index":1}`)
 		writeSSE(w, flusher, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`)
@@ -211,7 +211,7 @@ func TestAnthropicStreamToolCall(t *testing.T) {
 	if len(toolCalls) != 1 {
 		t.Fatalf("toolCalls = %d, want 1", len(toolCalls))
 	}
-	if toolCalls[0].ID != "toolu_123" || toolCalls[0].Name != "shell/run" {
+	if toolCalls[0].ID != "toolu_123" || toolCalls[0].Name != "shell_run" {
 		t.Fatalf("toolCall = %+v", toolCalls[0])
 	}
 	var args map[string]string

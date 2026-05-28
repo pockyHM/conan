@@ -13,11 +13,11 @@ func TestIsMemoryTool(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"memory/save", true},
-		{"memory/update", true},
-		{"memory/delete", true},
-		{"memory/search", true},
-		{"shell/run", false},
+		{"memory_save", true},
+		{"memory_update", true},
+		{"memory_delete", true},
+		{"memory_search", true},
+		{"shell_run", false},
 		{"memory", false},
 	}
 	for _, tt := range tests {
@@ -45,7 +45,7 @@ func TestToolDefsExposeImplicitUnderscoreNames(t *testing.T) {
 			t.Fatalf("ToolDefs missing %s; names=%v", want, names)
 		}
 	}
-	for _, legacy := range []string{"memory/save", "memory/search", "memory/update", "memory/delete"} {
+	for _, legacy := range []string{"memory_save", "memory_update", "memory_delete"} {
 		for _, name := range names {
 			if name == legacy {
 				t.Fatalf("ToolDefs should not expose legacy name %s", legacy)
@@ -55,7 +55,7 @@ func TestToolDefsExposeImplicitUnderscoreNames(t *testing.T) {
 }
 
 func TestMemoryToolAliases(t *testing.T) {
-	for _, name := range []string{"memory_save", "memory/save", "memory_search", "memory/search"} {
+	for _, name := range []string{"memory_save", "memory_search"} {
 		if !IsMemoryTool(name) {
 			t.Fatalf("IsMemoryTool(%q) = false, want true", name)
 		}
@@ -215,7 +215,7 @@ func TestMemorySearchAndReadRunbookMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(memoryRoot, "runbooks", "2026-05-23-nginx-502.md")
-	content := "# Nginx 502 快速诊断\n\nsummary: nginx runbook\n\n## 步骤\n\n1. [read] svc/status\n"
+	content := "# Nginx 502 快速诊断\n\nsummary: nginx runbook\n\n## 步骤\n\n1. [read] svc_status\n"
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestHandleMemorySave(t *testing.T) {
 		"content":  "Found cache settings causing OOM",
 		"tags":     "nginx, memory, production",
 	})
-	result := HandleTool(store, "conv1", "memory/save", args)
+	result := HandleTool(store, "conv1", "memory_save", args)
 	if !result.Success {
 		t.Fatalf("save failed: %s", result.Output)
 	}
@@ -418,13 +418,13 @@ func TestHandleMemorySearch(t *testing.T) {
 		"content":  "Found cache settings causing OOM",
 		"tags":     "nginx",
 	})
-	HandleTool(store, "conv1", "memory/save", saveArgs)
+	HandleTool(store, "conv1", "memory_save", saveArgs)
 
 	searchArgs, _ := json.Marshal(map[string]interface{}{
 		"query": "nginx",
 		"limit": 5,
 	})
-	result := HandleTool(store, "conv1", "memory/search", searchArgs)
+	result := HandleTool(store, "conv1", "memory_search", searchArgs)
 	if !result.Success {
 		t.Fatalf("search failed: %s", result.Output)
 	}
@@ -445,7 +445,7 @@ func TestHandleMemoryUpdate(t *testing.T) {
 		"title":    "Original",
 		"content":  "Original content",
 	})
-	result := HandleTool(store, "conv1", "memory/save", saveArgs)
+	result := HandleTool(store, "conv1", "memory_save", saveArgs)
 	idStart := strings.Index(result.Output, "Saved memory ") + len("Saved memory ")
 	idEnd := strings.Index(result.Output[idStart:], ":")
 	id := result.Output[idStart : idStart+idEnd]
@@ -455,7 +455,7 @@ func TestHandleMemoryUpdate(t *testing.T) {
 		"title":   "Updated",
 		"content": "Updated content",
 	})
-	result = HandleTool(store, "conv1", "memory/update", updateArgs)
+	result = HandleTool(store, "conv1", "memory_update", updateArgs)
 	if !result.Success {
 		t.Fatalf("update failed: %s", result.Output)
 	}
@@ -476,13 +476,13 @@ func TestHandleMemoryDelete(t *testing.T) {
 	saveArgs, _ := json.Marshal(map[string]string{
 		"category": "event", "title": "Temp", "content": "Temporary",
 	})
-	result := HandleTool(store, "conv1", "memory/save", saveArgs)
+	result := HandleTool(store, "conv1", "memory_save", saveArgs)
 	idStart := strings.Index(result.Output, "Saved memory ") + len("Saved memory ")
 	idEnd := strings.Index(result.Output[idStart:], ":")
 	id := result.Output[idStart : idStart+idEnd]
 
 	delArgs, _ := json.Marshal(map[string]string{"id": id})
-	result = HandleTool(store, "conv1", "memory/delete", delArgs)
+	result = HandleTool(store, "conv1", "memory_delete", delArgs)
 	if !result.Success {
 		t.Fatalf("delete failed: %s", result.Output)
 	}
@@ -492,7 +492,7 @@ func TestHandleUnknownTool(t *testing.T) {
 	store, _ := Open(t.TempDir())
 	defer store.Close()
 
-	result := HandleTool(store, "", "memory/unknown", json.RawMessage(`{}`))
+	result := HandleTool(store, "", "memory_unknown", json.RawMessage(`{}`))
 	if result.Success {
 		t.Fatal("expected failure for unknown tool")
 	}
@@ -502,7 +502,7 @@ func TestHandleInvalidArgs(t *testing.T) {
 	store, _ := Open(t.TempDir())
 	defer store.Close()
 
-	result := HandleTool(store, "", "memory/save", json.RawMessage(`invalid`))
+	result := HandleTool(store, "", "memory_save", json.RawMessage(`invalid`))
 	if result.Success {
 		t.Fatal("expected failure for invalid JSON")
 	}
@@ -513,7 +513,7 @@ func TestSearchNoResults(t *testing.T) {
 	defer store.Close()
 
 	searchArgs, _ := json.Marshal(map[string]interface{}{"query": "nonexistent"})
-	result := HandleTool(store, "conv1", "memory/search", searchArgs)
+	result := HandleTool(store, "conv1", "memory_search", searchArgs)
 	if !result.Success {
 		t.Fatalf("search failed: %s", result.Output)
 	}

@@ -6,11 +6,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/localtools"
 	"github.com/pockyHM/conan/internal/mcp"
+	"github.com/pockyHM/conan/internal/memory"
+	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
@@ -43,6 +47,33 @@ func TestMetaToolDescriptionsPreferSearchBeforeExec(t *testing.T) {
 	for _, want := range []string{"download", "managed file transfer", "do not use tool_search", "scp", "text file", "binary and image"} {
 		if !strings.Contains(descriptions[metaToolFileGet], want) {
 			t.Fatalf("file_get description missing %q: %s", want, descriptions[metaToolFileGet])
+		}
+	}
+}
+
+func TestExposedToolNamesMatchOpenAIPattern(t *testing.T) {
+	pattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	var tools []llm.ToolDef
+	tools = append(tools, metaToolDefs...)
+	tools = append(tools, nodeManagementToolDefs...)
+	tools = append(tools, imageToolDefs...)
+	tools = append(tools, localtools.ToolDefs()...)
+	tools = append(tools, skills.ToolDefs()...)
+	for _, def := range memory.ToolDefs() {
+		raw, err := json.Marshal(def)
+		if err != nil {
+			t.Fatalf("marshal memory tool: %v", err)
+		}
+		var tool llm.ToolDef
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			t.Fatalf("unmarshal memory tool: %v", err)
+		}
+		tools = append(tools, tool)
+	}
+
+	for _, tool := range tools {
+		if !pattern.MatchString(tool.Name) {
+			t.Fatalf("tool name %q does not match OpenAI tool pattern", tool.Name)
 		}
 	}
 }
@@ -130,7 +161,7 @@ func TestToolCacheSearchMatchesInputSchema(t *testing.T) {
 	cache := newToolCache()
 	cache.Set("node-a", []mcpproto.ToolDefinition{
 		{
-			Name:        "docker/logs",
+			Name:        "docker_logs",
 			Description: "Get container logs",
 			InputSchema: []byte(`{"type":"object","properties":{"container":{"type":"string","description":"Container name or ID"},"tail":{"type":"integer","description":"Last N lines"}}}`),
 		},
@@ -141,8 +172,8 @@ func TestToolCacheSearchMatchesInputSchema(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1: %#v", len(results), results)
 	}
-	if results[0].Name != "docker/logs" {
-		t.Fatalf("result name = %q, want docker/logs", results[0].Name)
+	if results[0].Name != "docker_logs" {
+		t.Fatalf("result name = %q, want docker_logs", results[0].Name)
 	}
 }
 
@@ -150,12 +181,12 @@ func TestToolCacheSearchRanksNameMatchAboveDescriptionOnlyMatch(t *testing.T) {
 	cache := newToolCache()
 	cache.Set("node-a", []mcpproto.ToolDefinition{
 		{
-			Name:        "log/read",
+			Name:        "log_read",
 			Description: "Read a file from disk",
 			InputSchema: []byte(`{"type":"object"}`),
 		},
 		{
-			Name:        "fs/read",
+			Name:        "fs_read",
 			Description: "Read log file contents",
 			InputSchema: []byte(`{"type":"object"}`),
 		},
@@ -166,15 +197,15 @@ func TestToolCacheSearchRanksNameMatchAboveDescriptionOnlyMatch(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("results = %d, want 2: %#v", len(results), results)
 	}
-	if results[0].Name != "log/read" {
-		t.Fatalf("top result = %q, want log/read: %#v", results[0].Name, results)
+	if results[0].Name != "log_read" {
+		t.Fatalf("top result = %q, want log_read: %#v", results[0].Name, results)
 	}
 }
 
 func TestToolCacheSearchMergesDuplicateToolsAcrossNodes(t *testing.T) {
 	cache := newToolCache()
 	tool := mcpproto.ToolDefinition{
-		Name:        "k8s/logs",
+		Name:        "k8s_logs",
 		Description: "Get pod logs",
 		InputSchema: []byte(`{"type":"object"}`),
 	}
@@ -194,7 +225,7 @@ func TestToolCacheSearchMergesDuplicateToolsAcrossNodes(t *testing.T) {
 func TestToolCacheSearchResultsIncludeMetadata(t *testing.T) {
 	cache := newToolCache()
 	cache.Set("node-a", []mcpproto.ToolDefinition{{
-		Name:        "svc/status",
+		Name:        "svc_status",
 		Description: "Show service status",
 		InputSchema: []byte(`{"type":"object"}`),
 	}})
@@ -219,7 +250,7 @@ func TestToolCacheSearchRanksCapabilityMetadata(t *testing.T) {
 	cache := newToolCache()
 	cache.Set("node-a", []mcpproto.ToolDefinition{
 		{Name: "exec", Description: "Run a service command", InputSchema: []byte(`{"type":"object"}`)},
-		{Name: "svc/status", Description: "Show daemon state", InputSchema: []byte(`{"type":"object"}`)},
+		{Name: "svc_status", Description: "Show daemon state", InputSchema: []byte(`{"type":"object"}`)},
 	})
 
 	results := cache.Search("service read only status", []string{"node-a"})
@@ -227,8 +258,8 @@ func TestToolCacheSearchRanksCapabilityMetadata(t *testing.T) {
 	if len(results) < 2 {
 		t.Fatalf("results = %#v, want at least 2", results)
 	}
-	if results[0].Name != "svc/status" {
-		t.Fatalf("top result = %q, want svc/status: %#v", results[0].Name, results)
+	if results[0].Name != "svc_status" {
+		t.Fatalf("top result = %q, want svc_status: %#v", results[0].Name, results)
 	}
 }
 
@@ -254,11 +285,11 @@ func TestSubagentToolExecutorBlocksNonReadOnlyNodeTool(t *testing.T) {
 	executor := subagentToolExecutor{model: NewModel(ModelConfig{})}
 	output, ok := executor.ExecuteSubagentTool(context.Background(), llm.ToolCall{
 		Name:      metaToolCallTool,
-		Arguments: json.RawMessage(`{"node":"node-a","tool":"docker/exec","arguments":{"container":"api","command":"restart"}}`),
+		Arguments: json.RawMessage(`{"node":"node-a","tool":"docker_exec","arguments":{"container":"api","command":"restart"}}`),
 	})
 
 	if ok {
-		t.Fatalf("docker/exec should be blocked, output=%s", output)
+		t.Fatalf("docker_exec should be blocked, output=%s", output)
 	}
 	if !strings.Contains(output, "blocked") {
 		t.Fatalf("output = %q, want blocked message", output)
@@ -288,12 +319,12 @@ func TestSubagentToolExecutorAllowsDirectReadOnlyNodeTool(t *testing.T) {
 	executor := subagentToolExecutor{model: model}
 
 	output, ok := executor.ExecuteSubagentTool(context.Background(), llm.ToolCall{
-		Name:      "svc/status",
+		Name:      "svc_status",
 		Arguments: json.RawMessage(`{"name":"nginx"}`),
 	})
 
 	if !ok {
-		t.Fatalf("svc/status should be allowed, output=%s", output)
+		t.Fatalf("svc_status should be allowed, output=%s", output)
 	}
 	if !strings.Contains(output, "nginx active") {
 		t.Fatalf("output = %q", output)

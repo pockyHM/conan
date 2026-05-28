@@ -8,10 +8,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// docker/ps
+// docker_ps
 type dockerPsTool struct{}
 
-func (d *dockerPsTool) Name() string        { return "docker/ps" }
+func (d *dockerPsTool) Name() string        { return "docker_ps" }
 func (d *dockerPsTool) Description() string { return "List Docker containers" }
 func (d *dockerPsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"all":{"type":"boolean","description":"Show all containers (default running only)"},"filter":{"type":"string","description":"Filter expression"}}}`)
@@ -32,10 +32,10 @@ func (d *dockerPsTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	return runCommand(ctx, cmd)
 }
 
-// docker/images
+// docker_images
 type dockerImagesTool struct{}
 
-func (d *dockerImagesTool) Name() string        { return "docker/images" }
+func (d *dockerImagesTool) Name() string        { return "docker_images" }
 func (d *dockerImagesTool) Description() string { return "List Docker images" }
 func (d *dockerImagesTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"filter":{"type":"string","description":"Filter expression"}}}`)
@@ -52,10 +52,10 @@ func (d *dockerImagesTool) Execute(ctx context.Context, input json.RawMessage) (
 	return runCommand(ctx, cmd)
 }
 
-// docker/logs
+// docker_logs
 type dockerLogsTool struct{}
 
-func (d *dockerLogsTool) Name() string        { return "docker/logs" }
+func (d *dockerLogsTool) Name() string        { return "docker_logs" }
 func (d *dockerLogsTool) Description() string { return "Get container logs" }
 func (d *dockerLogsTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"container":{"type":"string","description":"Container name or ID"},"tail":{"type":"integer","description":"Last N lines"}},"required":["container"]}`)
@@ -75,10 +75,10 @@ func (d *dockerLogsTool) Execute(ctx context.Context, input json.RawMessage) (*m
 	return runCommand(ctx, cmd)
 }
 
-// docker/exec
+// docker_exec
 type dockerExecTool struct{}
 
-func (d *dockerExecTool) Name() string        { return "docker/exec" }
+func (d *dockerExecTool) Name() string        { return "docker_exec" }
 func (d *dockerExecTool) Description() string { return "Execute command in container" }
 func (d *dockerExecTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"container":{"type":"string","description":"Container name or ID"},"command":{"type":"string","description":"Command to execute"}},"required":["container","command"]}`)
@@ -95,10 +95,10 @@ func (d *dockerExecTool) Execute(ctx context.Context, input json.RawMessage) (*m
 	return runCommand(ctx, cmd)
 }
 
-// docker/run
+// docker_run
 type dockerRunTool struct{}
 
-func (d *dockerRunTool) Name() string        { return "docker/run" }
+func (d *dockerRunTool) Name() string        { return "docker_run" }
 func (d *dockerRunTool) Description() string { return "Run a Docker container" }
 func (d *dockerRunTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"image":{"type":"string"},"name":{"type":"string"},"ports":{"type":"array","items":{"type":"string"}},"detach":{"type":"boolean"},"env":{"type":"object","additionalProperties":{"type":"string"}}},"required":["image"]}`)
@@ -131,10 +131,10 @@ func (d *dockerRunTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	return runCommand(ctx, cmd)
 }
 
-// docker/compose
+// docker_compose
 type dockerComposeTool struct{}
 
-func (d *dockerComposeTool) Name() string        { return "docker/compose" }
+func (d *dockerComposeTool) Name() string        { return "docker_compose" }
 func (d *dockerComposeTool) Description() string { return "Run docker compose command" }
 func (d *dockerComposeTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","description":"Compose action (up, down, ps, logs)"},"file":{"type":"string","description":"Compose file path"}},"required":["action"]}`)

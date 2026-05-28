@@ -15,7 +15,7 @@ import (
 
 type echoTool struct{}
 
-func (e *echoTool) Name() string        { return "test/echo" }
+func (e *echoTool) Name() string        { return "test_echo" }
 func (e *echoTool) Description() string { return "Echo tool" }
 func (e *echoTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`)
@@ -90,7 +90,7 @@ func TestHandleToolsList(t *testing.T) {
 
 func TestHandleToolsCall(t *testing.T) {
 	h := setupTestHandler()
-	body := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"test/echo","arguments":{"msg":"hello"}}}`
+	body := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"test_echo","arguments":{"msg":"hello"}}}`
 	req := httptest.NewRequest(http.MethodPost, "/rpc", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

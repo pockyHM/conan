@@ -44,7 +44,7 @@ type fakeExecutor struct {
 
 func (e *fakeExecutor) ExecuteSubagentTool(_ context.Context, call llm.ToolCall) (string, bool) {
 	e.calls = append(e.calls, call)
-	return "sys/cpu", true
+	return "sys_cpu", true
 }
 
 func TestRunnerLoopsThroughReadOnlyToolCalls(t *testing.T) {
@@ -91,8 +91,8 @@ func TestAllowedToolsUsesMetadataForReadOnlyFiltering(t *testing.T) {
 	tools := []llm.ToolDef{
 		{Name: "tool_search"},
 		{Name: "call_tool"},
-		{Name: "svc/status"},
-		{Name: "log/read"},
+		{Name: "svc_status"},
+		{Name: "log_read"},
 		{Name: "memory_search"},
 		{Name: "memory_read"},
 		{Name: "file_put"},
@@ -107,7 +107,7 @@ func TestAllowedToolsUsesMetadataForReadOnlyFiltering(t *testing.T) {
 		names[tool.Name] = true
 	}
 
-	for _, want := range []string{"tool_search", "call_tool", "svc/status", "log/read", "memory_search", "memory_read"} {
+	for _, want := range []string{"tool_search", "call_tool", "svc_status", "log_read", "memory_search", "memory_read"} {
 		if !names[want] {
 			t.Fatalf("allowed tools missing %s: %#v", want, allowed)
 		}

@@ -278,7 +278,7 @@ In `model add`, move through provider and model lists with Up/Down and press Ent
 ./bin/conan node add 10.0.0.12 --name web-1 --user root
 ```
 
-Useful variants:
+Useful add variants:
 
 ```bash
 ./bin/conan node add web-1.example.com --no-deploy
@@ -286,6 +286,16 @@ Useful variants:
 ./bin/conan node add web-1.example.com --update --rotate-token
 ./bin/conan node add web-1.example.com --agent-bin ./bin/conan-agent-linux-amd64
 ```
+
+Update `conan-agent` on existing nodes:
+
+```bash
+./bin/conan node update web-1.example.com --cluster prod
+./bin/conan node update --all --cluster prod
+./bin/conan node update --all-cluster
+```
+
+`node update` reads configured nodes and saved SSH credentials, uploads the local `conan-agent` binary, refreshes the remote config and systemd unit, and restarts `conan-agent`. Use `--agent-bin` to point at a local binary, or `--user`, `--password`, and `--ssh-port` to override SSH connection settings.
 
 Check inventory and connectivity:
 

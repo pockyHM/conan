@@ -21,7 +21,7 @@ const (
 	defaultWebFetchMaxBytes = int64(2 << 20)
 	defaultWebFetchMaxChars = 12000
 	defaultWebTimeout       = 10 * time.Second
-	defaultBraveEndpoint    = "https://api.search.brave.com/res/v1/web/search"
+	defaultBraveEndpoint    = "https://api.search.brave.com/res/v1/web_search"
 )
 
 type WebToolConfig struct {
@@ -45,7 +45,7 @@ type webSearchTool struct {
 	cfg WebToolConfig
 }
 
-func (w *webSearchTool) Name() string        { return "web/search" }
+func (w *webSearchTool) Name() string        { return "web_search" }
 func (w *webSearchTool) Description() string { return "Search the web and return structured results" }
 func (w *webSearchTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"max_results":{"type":"integer","description":"Maximum number of results, default 5"},"domains":{"type":"array","items":{"type":"string"},"description":"Restrict results to these domains"},"recency_days":{"type":"integer","description":"Prefer results from this many recent days"},"locale":{"type":"string","description":"Search locale or language hint"}},"required":["query"]}`)
@@ -161,7 +161,7 @@ type webFetchTool struct {
 	cfg WebToolConfig
 }
 
-func (w *webFetchTool) Name() string        { return "web/fetch" }
+func (w *webFetchTool) Name() string        { return "web_fetch" }
 func (w *webFetchTool) Description() string { return "Fetch a web page and return cleaned text" }
 func (w *webFetchTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"HTTP or HTTPS URL to fetch"},"max_chars":{"type":"integer","description":"Maximum characters to return"},"timeout_ms":{"type":"integer","description":"Request timeout in milliseconds"}},"required":["url"]}`)

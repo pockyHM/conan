@@ -15,7 +15,7 @@ func TestLocalReadAllowsFilesInsideRoot(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	result := Handle(RootedFS{Root: root}, "local/fs/read", json.RawMessage(`{"path":"notes.txt"}`))
+	result := Handle(RootedFS{Root: root}, "local_fs_read", json.RawMessage(`{"path":"notes.txt"}`))
 	if !result.Success {
 		t.Fatalf("read failed: %s", result.Output)
 	}
@@ -30,7 +30,7 @@ func TestLocalReadCapsOutputLength(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	result := Handle(RootedFS{Root: root}, "local/fs/read", json.RawMessage(`{"path":"large.txt","max_bytes":10}`))
+	result := Handle(RootedFS{Root: root}, "local_fs_read", json.RawMessage(`{"path":"large.txt","max_bytes":10}`))
 	if !result.Success {
 		t.Fatalf("read failed: %s", result.Output)
 	}
@@ -43,7 +43,7 @@ func TestLocalWritePatchAndDeleteRequirePathInsideRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.txt")
 
-	write := Handle(RootedFS{Root: root}, "local/fs/write", mustJSON(t, map[string]any{
+	write := Handle(RootedFS{Root: root}, "local_fs_write", mustJSON(t, map[string]any{
 		"path":    "dir/file.txt",
 		"content": "hello world",
 	}))
@@ -51,7 +51,7 @@ func TestLocalWritePatchAndDeleteRequirePathInsideRoot(t *testing.T) {
 		t.Fatalf("write failed: %s", write.Output)
 	}
 
-	patch := Handle(RootedFS{Root: root}, "local/fs/patch", mustJSON(t, map[string]any{
+	patch := Handle(RootedFS{Root: root}, "local_fs_patch", mustJSON(t, map[string]any{
 		"path":     "dir/file.txt",
 		"old_text": "world",
 		"new_text": "conan",
@@ -67,7 +67,7 @@ func TestLocalWritePatchAndDeleteRequirePathInsideRoot(t *testing.T) {
 		t.Fatalf("patched content = %q", data)
 	}
 
-	blocked := Handle(RootedFS{Root: root}, "local/fs/write", mustJSON(t, map[string]any{
+	blocked := Handle(RootedFS{Root: root}, "local_fs_write", mustJSON(t, map[string]any{
 		"path":    outside,
 		"content": "blocked",
 	}))
@@ -75,7 +75,7 @@ func TestLocalWritePatchAndDeleteRequirePathInsideRoot(t *testing.T) {
 		t.Fatalf("outside write result = %+v", blocked)
 	}
 
-	del := Handle(RootedFS{Root: root}, "local/fs/delete", json.RawMessage(`{"path":"dir/file.txt"}`))
+	del := Handle(RootedFS{Root: root}, "local_fs_delete", json.RawMessage(`{"path":"dir/file.txt"}`))
 	if !del.Success {
 		t.Fatalf("delete failed: %s", del.Output)
 	}
@@ -94,7 +94,7 @@ func TestLocalPatchLineRange(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	patch := Handle(RootedFS{Root: root}, "local/fs/patch", mustJSON(t, map[string]any{
+	patch := Handle(RootedFS{Root: root}, "local_fs_patch", mustJSON(t, map[string]any{
 		"path":       "dir/file.txt",
 		"start_line": 2,
 		"end_line":   3,
@@ -118,12 +118,12 @@ func TestLocalListAndStat(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	list := Handle(RootedFS{Root: root}, "local/fs/list", json.RawMessage(`{"path":"."}`))
+	list := Handle(RootedFS{Root: root}, "local_fs_list", json.RawMessage(`{"path":"."}`))
 	if !list.Success || !strings.Contains(list.Output, "a.txt") {
 		t.Fatalf("list = %+v", list)
 	}
 
-	stat := Handle(RootedFS{Root: root}, "local/fs/stat", json.RawMessage(`{"path":"a.txt"}`))
+	stat := Handle(RootedFS{Root: root}, "local_fs_stat", json.RawMessage(`{"path":"a.txt"}`))
 	if !stat.Success || !strings.Contains(stat.Output, "size: 1") {
 		t.Fatalf("stat = %+v", stat)
 	}
@@ -138,17 +138,17 @@ func TestLocalFilesystemRejectsBinaryAndImageFiles(t *testing.T) {
 		t.Fatalf("write binary: %v", err)
 	}
 
-	readImage := Handle(RootedFS{Root: root}, "local/fs/read", json.RawMessage(`{"path":"image.png"}`))
+	readImage := Handle(RootedFS{Root: root}, "local_fs_read", json.RawMessage(`{"path":"image.png"}`))
 	if readImage.Success || !strings.Contains(readImage.Output, "binary/image") {
 		t.Fatalf("read image result = %+v", readImage)
 	}
 
-	readBinary := Handle(RootedFS{Root: root}, "local/fs/read", json.RawMessage(`{"path":"binary.txt"}`))
+	readBinary := Handle(RootedFS{Root: root}, "local_fs_read", json.RawMessage(`{"path":"binary.txt"}`))
 	if readBinary.Success || !strings.Contains(readBinary.Output, "binary content") {
 		t.Fatalf("read binary result = %+v", readBinary)
 	}
 
-	writeImage := Handle(RootedFS{Root: root}, "local/fs/write", mustJSON(t, map[string]any{
+	writeImage := Handle(RootedFS{Root: root}, "local_fs_write", mustJSON(t, map[string]any{
 		"path":    "new.png",
 		"content": "text",
 	}))
@@ -156,7 +156,7 @@ func TestLocalFilesystemRejectsBinaryAndImageFiles(t *testing.T) {
 		t.Fatalf("write image result = %+v", writeImage)
 	}
 
-	writeBinary := Handle(RootedFS{Root: root}, "local/fs/write", mustJSON(t, map[string]any{
+	writeBinary := Handle(RootedFS{Root: root}, "local_fs_write", mustJSON(t, map[string]any{
 		"path":    "new.txt",
 		"content": "a\x00b",
 	}))
@@ -164,7 +164,7 @@ func TestLocalFilesystemRejectsBinaryAndImageFiles(t *testing.T) {
 		t.Fatalf("write binary result = %+v", writeBinary)
 	}
 
-	patchBinary := Handle(RootedFS{Root: root}, "local/fs/patch", mustJSON(t, map[string]any{
+	patchBinary := Handle(RootedFS{Root: root}, "local_fs_patch", mustJSON(t, map[string]any{
 		"path":     "binary.txt",
 		"old_text": "a",
 		"new_text": "c",
@@ -173,7 +173,7 @@ func TestLocalFilesystemRejectsBinaryAndImageFiles(t *testing.T) {
 		t.Fatalf("patch binary result = %+v", patchBinary)
 	}
 
-	deleteImage := Handle(RootedFS{Root: root}, "local/fs/delete", json.RawMessage(`{"path":"image.png"}`))
+	deleteImage := Handle(RootedFS{Root: root}, "local_fs_delete", json.RawMessage(`{"path":"image.png"}`))
 	if deleteImage.Success || !strings.Contains(deleteImage.Output, "binary/image") {
 		t.Fatalf("delete image result = %+v", deleteImage)
 	}

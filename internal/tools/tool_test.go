@@ -10,7 +10,7 @@ import (
 
 type dummyTool struct{}
 
-func (d *dummyTool) Name() string        { return "test/dummy" }
+func (d *dummyTool) Name() string        { return "test_dummy" }
 func (d *dummyTool) Description() string { return "A dummy tool" }
 func (d *dummyTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"msg":{"type":"string"}}}`)
@@ -24,12 +24,12 @@ func TestRegistryRegisterAndGet(t *testing.T) {
 	tool := &dummyTool{}
 	r.Register(tool)
 
-	got, ok := r.Get("test/dummy")
+	got, ok := r.Get("test_dummy")
 	if !ok {
 		t.Fatal("tool not found in registry")
 	}
-	if got.Name() != "test/dummy" {
-		t.Errorf("name = %q, want test/dummy", got.Name())
+	if got.Name() != "test_dummy" {
+		t.Errorf("name = %q, want test_dummy", got.Name())
 	}
 }
 
@@ -53,13 +53,25 @@ func TestRegistryGetNotFound(t *testing.T) {
 func TestRegistryDisabled(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&dummyTool{})
-	r.Disable("test/dummy")
-	_, ok := r.Get("test/dummy")
+	r.Disable("test_dummy")
+	_, ok := r.Get("test_dummy")
 	if ok {
 		t.Error("disabled tool should not be found")
 	}
 	list := r.List()
 	if len(list) != 0 {
 		t.Errorf("list length = %d, want 0 after disable", len(list))
+	}
+}
+
+func TestRegistryNormalizesLegacySlashNames(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&dummyTool{})
+	if _, ok := r.Get("test/dummy"); !ok {
+		t.Fatal("legacy slash lookup should find underscore tool")
+	}
+	r.Disable("test/dummy")
+	if _, ok := r.Get("test_dummy"); ok {
+		t.Fatal("legacy slash disable should disable underscore tool")
 	}
 }

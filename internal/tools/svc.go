@@ -9,10 +9,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// svc/list
+// svc_list
 type svcListTool struct{}
 
-func (s *svcListTool) Name() string        { return "svc/list" }
+func (s *svcListTool) Name() string        { return "svc_list" }
 func (s *svcListTool) Description() string { return "List systemd services" }
 func (s *svcListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"state":{"type":"string","description":"Filter by state: active, inactive, failed"}}}`)
@@ -29,10 +29,10 @@ func (s *svcListTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return runCommand(ctx, cmd)
 }
 
-// svc/status
+// svc_status
 type svcStatusTool struct{}
 
-func (s *svcStatusTool) Name() string        { return "svc/status" }
+func (s *svcStatusTool) Name() string        { return "svc_status" }
 func (s *svcStatusTool) Description() string { return "Get service status" }
 func (s *svcStatusTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Service name"}},"required":["name"]}`)
@@ -48,10 +48,10 @@ func (s *svcStatusTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	return runCommand(ctx, cmd)
 }
 
-// svc/start
+// svc_start
 type svcStartTool struct{}
 
-func (s *svcStartTool) Name() string        { return "svc/start" }
+func (s *svcStartTool) Name() string        { return "svc_start" }
 func (s *svcStartTool) Description() string { return "Start a service" }
 func (s *svcStartTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Service name"}},"required":["name"]}`)
@@ -67,10 +67,10 @@ func (s *svcStartTool) Execute(ctx context.Context, input json.RawMessage) (*mcp
 	return runCommand(ctx, cmd)
 }
 
-// svc/stop
+// svc_stop
 type svcStopTool struct{}
 
-func (s *svcStopTool) Name() string        { return "svc/stop" }
+func (s *svcStopTool) Name() string        { return "svc_stop" }
 func (s *svcStopTool) Description() string { return "Stop a service" }
 func (s *svcStopTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Service name"}},"required":["name"]}`)
@@ -86,10 +86,10 @@ func (s *svcStopTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return runCommand(ctx, cmd)
 }
 
-// svc/restart
+// svc_restart
 type svcRestartTool struct{}
 
-func (s *svcRestartTool) Name() string        { return "svc/restart" }
+func (s *svcRestartTool) Name() string        { return "svc_restart" }
 func (s *svcRestartTool) Description() string { return "Restart a service" }
 func (s *svcRestartTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Service name"}},"required":["name"]}`)

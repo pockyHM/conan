@@ -3,11 +3,11 @@ package security
 import "testing"
 
 func TestBuildRiskPromptContainsToolInfo(t *testing.T) {
-	prompt := BuildRiskPrompt("shell/run", `{"command":"rm -rf /var/log"}`)
+	prompt := BuildRiskPrompt("shell_run", `{"command":"rm -rf /var/log"}`)
 	if prompt == "" {
 		t.Fatal("prompt should not be empty")
 	}
-	for _, substr := range []string{"shell/run", "rm -rf", "risk_level"} {
+	for _, substr := range []string{"shell_run", "rm -rf", "risk_level"} {
 		if !contains(prompt, substr) {
 			t.Fatalf("prompt missing %q", substr)
 		}

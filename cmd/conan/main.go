@@ -20,9 +20,11 @@ import (
 	"github.com/pockyHM/conan/internal/mcp"
 	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/nodeadd"
+	"github.com/pockyHM/conan/internal/nodeupdate"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/skills"
 	"github.com/pockyHM/conan/internal/tui"
+	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -310,6 +312,98 @@ func newRootCommand() *cobra.Command {
 	nodeAddCmd.Flags().BoolVar(&nodeAddUpdate, "update", false, "Update an existing node")
 	nodeAddCmd.Flags().BoolVar(&nodeAddRotateToken, "rotate-token", false, "Rotate the node agent token while updating")
 	nodeCmd.AddCommand(nodeAddCmd)
+
+	var nodeUpdateAll bool
+	var nodeUpdateAllCluster bool
+	var nodeUpdateUser string
+	var nodeUpdatePassword string
+	var nodeUpdateSSHPort int
+	var nodeUpdateAgentBin string
+	nodeUpdateCmd := &cobra.Command{
+		Use:   "update [hostname-or-ip]",
+		Short: "Update conan-agent on existing nodes",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if nodeUpdateAllCluster {
+				if nodeUpdateAll {
+					return fmt.Errorf("--all and --all-cluster cannot be used together")
+				}
+				if len(args) != 0 {
+					return fmt.Errorf("--all-cluster does not accept a node argument")
+				}
+				return nil
+			}
+			if nodeUpdateAll {
+				if len(args) != 0 {
+					return fmt.Errorf("--all does not accept a node argument")
+				}
+				if strings.TrimSpace(clusterName) == "" {
+					return fmt.Errorf("--cluster is required when using --all")
+				}
+				return nil
+			}
+			if len(args) != 1 {
+				return fmt.Errorf("accepts 1 arg, received %d", len(args))
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loader := cfgloader.NewLoader(home)
+			global, err := loader.LoadGlobal()
+			if err != nil {
+				return err
+			}
+			service := nodeupdate.Service{
+				Credentials: credentials.NewStore(loader.Home()),
+				Prompter:    cliPrompter{in: cmd.InOrStdin(), out: cmd.OutOrStdout()},
+				Deployer:    deploy.NewNativeDeployer(),
+			}
+			clusterNames, selector, all, err := nodeUpdateTargets(loader, global, clusterName, args, nodeUpdateAll, nodeUpdateAllCluster)
+			if err != nil {
+				return err
+			}
+			updatedCount := 0
+			for _, selectedCluster := range clusterNames {
+				cluster, err := loader.LoadCluster(selectedCluster)
+				if err != nil {
+					return err
+				}
+				if nodeUpdateAllCluster && len(cluster.Nodes) == 0 {
+					continue
+				}
+				results, err := service.Update(cmd.Context(), nodeupdate.Request{
+					Home:             loader.Home(),
+					ClusterName:      selectedCluster,
+					Cluster:          cluster,
+					Selector:         selector,
+					All:              all,
+					Username:         nodeUpdateUser,
+					Password:         nodeUpdatePassword,
+					SSHPort:          nodeUpdateSSHPort,
+					AgentBinOverride: nodeUpdateAgentBin,
+					DeployConfig:     global.AgentDeploy,
+					KnownHostsPath:   filepath.Join(loader.Home(), "known_hosts"),
+				})
+				if err != nil {
+					return err
+				}
+				for _, result := range results {
+					fmt.Fprintf(cmd.OutOrStdout(), "node updated: %s/%s\n", result.ClusterName, result.NodeName)
+				}
+				updatedCount += len(results)
+			}
+			if updatedCount == 0 {
+				return fmt.Errorf("no nodes to update")
+			}
+			return nil
+		},
+	}
+	nodeUpdateCmd.Flags().BoolVar(&nodeUpdateAll, "all", false, "Update all nodes in the selected cluster")
+	nodeUpdateCmd.Flags().BoolVar(&nodeUpdateAllCluster, "all-cluster", false, "Update all nodes in all clusters")
+	nodeUpdateCmd.Flags().StringVarP(&nodeUpdateUser, "user", "u", "", "SSH username override")
+	nodeUpdateCmd.Flags().StringVarP(&nodeUpdatePassword, "password", "p", "", "SSH password override")
+	nodeUpdateCmd.Flags().IntVar(&nodeUpdateSSHPort, "ssh-port", 0, "SSH port override")
+	nodeUpdateCmd.Flags().StringVar(&nodeUpdateAgentBin, "agent-bin", "", "Local conan-agent binary path override")
+	nodeCmd.AddCommand(nodeUpdateCmd)
 
 	runTUI := func(cmd *cobra.Command, initialSessionID string) error {
 		loader := cfgloader.NewLoader(home)
@@ -661,6 +755,33 @@ func newRootCommand() *cobra.Command {
 
 	rootCmd.AddCommand(configCmd, clustersCmd, nodesCmd, pingCmd, toolsCmd, nodeCmd, resumeCmd, skillsCmd, newFilesCommand(&home, &clusterName), newModelCommand(modelCommandConfig{home: &home}))
 	return rootCmd
+}
+
+func nodeUpdateTargets(loader *cfgloader.Loader, global *configschema.GlobalConfig, clusterName string, args []string, all bool, allCluster bool) ([]string, string, bool, error) {
+	if allCluster {
+		clusters, err := loader.ListClusters()
+		if err != nil {
+			return nil, "", false, err
+		}
+		if len(clusters) == 0 {
+			return nil, "", false, fmt.Errorf("no clusters configured")
+		}
+		return clusters, "", true, nil
+	}
+
+	selectedCluster := strings.TrimSpace(clusterName)
+	if selectedCluster == "" && global != nil {
+		selectedCluster = global.DefaultCluster
+	}
+	if selectedCluster == "" {
+		selectedCluster = "default"
+	}
+
+	selector := ""
+	if !all && len(args) == 1 {
+		selector = args[0]
+	}
+	return []string{selectedCluster}, selector, all, nil
 }
 
 func forEachNode(ctx context.Context, cluster *cfgloader.Cluster, args []string, fn func(context.Context, cfgloader.Node) error) error {

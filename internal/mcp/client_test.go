@@ -34,12 +34,12 @@ func newTestServer(t *testing.T, requireAuth bool) *httptest.Server {
 		case "initialize":
 			writeRPC(t, w, req.ID, mcpproto.InitializeResult{ProtocolVersion: "2024-11-05", ServerInfo: mcpproto.ServerInfo{Name: "conan-agent", Version: "test"}})
 		case "tools/list":
-			writeRPC(t, w, req.ID, map[string]interface{}{"tools": []mcpproto.ToolDefinition{{Name: "shell/run", Description: "run", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
+			writeRPC(t, w, req.ID, map[string]interface{}{"tools": []mcpproto.ToolDefinition{{Name: "shell_run", Description: "run", InputSchema: json.RawMessage(`{"type":"object"}`)}}})
 		case "tools/call":
 			writeRPC(t, w, req.ID, mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("called")}})
-		case "bad/error":
+		case "bad_error":
 			_ = json.NewEncoder(w).Encode(mcpproto.NewErrorResponse(req.ID, -32000, "agent error"))
-		case "bad/error-with-data":
+		case "bad_error-with-data":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"jsonrpc": mcpproto.JSONRPCVersion,
 				"id":      req.ID,
@@ -96,7 +96,7 @@ func TestListTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools) != 1 || tools[0].Name != "shell/run" {
+	if len(tools) != 1 || tools[0].Name != "shell_run" {
 		t.Fatalf("tools = %#v", tools)
 	}
 }
@@ -105,7 +105,7 @@ func TestCallTool(t *testing.T) {
 	srv := newTestServer(t, false)
 	defer srv.Close()
 	client := NewClient(Config{BaseURL: srv.URL})
-	result, err := client.CallTool(t.Context(), "shell/run", json.RawMessage(`{"command":"echo hi"}`))
+	result, err := client.CallTool(t.Context(), "shell_run", json.RawMessage(`{"command":"echo hi"}`))
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestRPCError(t *testing.T) {
 	srv := newTestServer(t, false)
 	defer srv.Close()
 	client := NewClient(Config{BaseURL: srv.URL})
-	_, err := client.rpc(t.Context(), "bad/error", nil)
+	_, err := client.rpc(t.Context(), "bad_error", nil)
 	if err == nil || !strings.Contains(err.Error(), "agent error") {
 		t.Fatalf("err = %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRPCErrorPreservesJSONRPCErrorAndData(t *testing.T) {
 	defer srv.Close()
 	client := NewClient(Config{BaseURL: srv.URL})
 
-	_, err := client.rpc(t.Context(), "bad/error-with-data", nil)
+	_, err := client.rpc(t.Context(), "bad_error-with-data", nil)
 	if err == nil || !strings.Contains(err.Error(), "agent error with data") {
 		t.Fatalf("err = %v", err)
 	}

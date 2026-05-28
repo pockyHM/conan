@@ -19,7 +19,7 @@ type shellInput struct {
 
 type ShellTool struct{}
 
-func (s *ShellTool) Name() string        { return "shell/run" }
+func (s *ShellTool) Name() string        { return "shell_run" }
 func (s *ShellTool) Description() string { return "Execute a shell command with timeout" }
 func (s *ShellTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{

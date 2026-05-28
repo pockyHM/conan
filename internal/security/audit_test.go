@@ -16,7 +16,7 @@ func TestAuditWritesAllowWithToolInputAndNode(t *testing.T) {
 	defer logger.Close()
 
 	logger.Log(AuditEntry{
-		Tool:  "shell/run",
+		Tool:  "shell_run",
 		Input: `{"command":"uptime"}`,
 		Risk:  "ALLOW",
 		Nodes: []string{"node-01"},
@@ -27,7 +27,7 @@ func TestAuditWritesAllowWithToolInputAndNode(t *testing.T) {
 		t.Fatalf("read audit log: %v", err)
 	}
 	line := string(contents)
-	for _, want := range []string{"[ALLOW]", "shell/run", "node-01", `"{\"command\":\"uptime\"}"`, `"risk":"ALLOW"`} {
+	for _, want := range []string{"[ALLOW]", "shell_run", "node-01", `"{\"command\":\"uptime\"}"`, `"risk":"ALLOW"`} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("audit line missing %q: %s", want, line)
 		}
@@ -71,11 +71,11 @@ func TestAuditClosePreventsFurtherWrites(t *testing.T) {
 		t.Fatalf("NewAuditLogger: %v", err)
 	}
 
-	logger.Log(AuditEntry{Tool: "shell/run", Input: `{}`, Risk: "ALLOW"})
+	logger.Log(AuditEntry{Tool: "shell_run", Input: `{}`, Risk: "ALLOW"})
 	if err := logger.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	logger.Log(AuditEntry{Tool: "shell/run", Input: `{}`, Risk: "DENY"})
+	logger.Log(AuditEntry{Tool: "shell_run", Input: `{}`, Risk: "DENY"})
 
 	contents, err := os.ReadFile(path)
 	if err != nil {
@@ -95,7 +95,7 @@ func TestAuditDenyIncludesDeny(t *testing.T) {
 	defer logger.Close()
 
 	logger.Log(AuditEntry{
-		Tool:   "shell/run",
+		Tool:   "shell_run",
 		Input:  `{"command":"rm -rf /"}`,
 		Risk:   "DENY",
 		Reason: "destructive",
@@ -123,7 +123,7 @@ func TestAuditConfirmApprovedIncludesConfirmAndOutcome(t *testing.T) {
 	defer logger.Close()
 
 	logger.Log(AuditEntry{
-		Tool:    "svc/restart",
+		Tool:    "svc_restart",
 		Input:   `{"name":"nginx"}`,
 		Risk:    "CONFIRM",
 		Outcome: "approved",

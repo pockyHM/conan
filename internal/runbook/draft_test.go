@@ -23,17 +23,17 @@ cluster: prod
 
 ## 时间线
 
-- 2026-05-23T10:00:00Z [tool] svc/status active
+- 2026-05-23T10:00:00Z [tool] svc_status active
 
 ## 证据
 
-- 2026-05-23T10:00:00Z tool=svc/status success=true nginx active
+- 2026-05-23T10:00:00Z tool=svc_status success=true nginx active
 
 ## 根因假设
 
 ## 执行动作
 
-- 2026-05-23T10:05:00Z tool=svc/restart risk=confirm outcome=approved restart nginx
+- 2026-05-23T10:05:00Z tool=svc_restart risk=confirm outcome=approved restart nginx
 
 ## 验证结果
 

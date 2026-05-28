@@ -192,7 +192,7 @@ func TestFsStat(t *testing.T) {
 func TestNewFsToolsDoesNotIncludeTransferTools(t *testing.T) {
 	for _, tool := range NewFsTools() {
 		switch tool.Name() {
-		case "fs/download", "fs/upload":
+		case "fs_download", "fs_upload":
 			t.Fatalf("transfer tool %q should not be exposed as an MCP fs tool", tool.Name())
 		}
 	}

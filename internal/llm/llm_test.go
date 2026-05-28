@@ -54,9 +54,9 @@ func TestStreamEvents(t *testing.T) {
 }
 
 func TestToolDefAlias(t *testing.T) {
-	tool := ToolDef{Name: "shell/run", Description: "run", InputSchema: []byte(`{"type":"object"}`)}
+	tool := ToolDef{Name: "shell_run", Description: "run", InputSchema: []byte(`{"type":"object"}`)}
 	mcpTool := mcpproto.ToolDefinition(tool)
-	if mcpTool.Name != "shell/run" {
+	if mcpTool.Name != "shell_run" {
 		t.Fatalf("name = %q", mcpTool.Name)
 	}
 }

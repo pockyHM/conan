@@ -227,12 +227,43 @@ func TestOpenAIBuildBodyIncludesThinkingSetting(t *testing.T) {
 	}
 }
 
+func TestOpenAIBuildBodyNormalizesLegacySlashToolNames(t *testing.T) {
+	p := NewOpenAIProvider(OpenAIConfig{Model: "gpt-4.1"})
+	body, err := p.buildBody(&ChatRequest{
+		Messages: []models.Message{{
+			Role:       "assistant",
+			ToolCallID: "call_1",
+			ToolName:   "shell/run",
+			ToolInput:  `{"command":"uptime"}`,
+		}},
+		Tools: []ToolDef{{Name: "fs/read", Description: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}, false)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	tools := decoded["tools"].([]any)
+	tool := tools[0].(map[string]any)["function"].(map[string]any)
+	if tool["name"] != "fs_read" {
+		t.Fatalf("tool name = %q, want fs_read", tool["name"])
+	}
+	messages := decoded["messages"].([]any)
+	assistant := messages[0].(map[string]any)
+	toolCall := assistant["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if toolCall["name"] != "shell_run" {
+		t.Fatalf("tool call name = %q, want shell_run", toolCall["name"])
+	}
+}
+
 func TestOpenAIStreamToolCall(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
 		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"content":"Let me check."},"finish_reason":null}]}`)
-		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"shell/run","arguments":""}}]},"finish_reason":null}]}`)
+		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"shell_run","arguments":""}}]},"finish_reason":null}]}`)
 		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"df -h\"}"}}]},"finish_reason":null}]}`)
 		writeOpenAIChunk(w, flusher, `{"id":"chatcmpl-t","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
 		fmt.Fprintf(w, "data: [DONE]\n\n")
@@ -271,7 +302,7 @@ func TestOpenAIStreamToolCall(t *testing.T) {
 	if len(toolCalls) != 1 {
 		t.Fatalf("toolCalls = %d, want 1", len(toolCalls))
 	}
-	if toolCalls[0].ID != "call_abc" || toolCalls[0].Name != "shell/run" {
+	if toolCalls[0].ID != "call_abc" || toolCalls[0].Name != "shell_run" {
 		t.Fatalf("toolCall = %+v", toolCalls[0])
 	}
 }

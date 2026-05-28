@@ -115,7 +115,7 @@ func TestConversationToolCallRoundTrip(t *testing.T) {
 	c := New("prod", []string{"node-1"}, "claude-sonnet")
 	c.AddUser("check disk")
 	c.AddAssistant("I'll check disk usage.")
-	c.AddToolCall("toolu_abc", "shell/run", `{"command":"df -h"}`)
+	c.AddToolCall("toolu_abc", "shell_run", `{"command":"df -h"}`)
 	c.AddToolResult("toolu_abc", "Filesystem  Size  Used  Avail  Use%")
 
 	msgs := c.Messages()
@@ -130,7 +130,7 @@ func TestConversationToolCallRoundTrip(t *testing.T) {
 	if toolCallMsg.ToolCallID != "toolu_abc" {
 		t.Fatalf("tool call id = %q", toolCallMsg.ToolCallID)
 	}
-	if toolCallMsg.ToolName != "shell/run" {
+	if toolCallMsg.ToolName != "shell_run" {
 		t.Fatalf("tool name = %q", toolCallMsg.ToolName)
 	}
 	if toolCallMsg.ToolInput != `{"command":"df -h"}` {

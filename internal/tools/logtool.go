@@ -11,10 +11,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// log/read
+// log_read
 type logReadTool struct{}
 
-func (l *logReadTool) Name() string        { return "log/read" }
+func (l *logReadTool) Name() string        { return "log_read" }
 func (l *logReadTool) Description() string { return "Read log file with optional tail and filter" }
 func (l *logReadTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Log file path"},"tail":{"type":"integer","description":"Last N lines"},"filter":{"type":"string","description":"Filter pattern"}},"required":["path"]}`)
@@ -52,10 +52,10 @@ func (l *logReadTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(strings.Join(lines, "\n"))}}, nil
 }
 
-// log/stream
+// log_stream
 type logStreamTool struct{}
 
-func (l *logStreamTool) Name() string        { return "log/stream" }
+func (l *logStreamTool) Name() string        { return "log_stream" }
 func (l *logStreamTool) Description() string { return "Stream log file (SSE, real-time)" }
 func (l *logStreamTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Log file path"},"filter":{"type":"string","description":"Filter pattern"}},"required":["path"]}`)
@@ -70,10 +70,10 @@ func (l *logStreamTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	}, nil
 }
 
-// log/journalctl
+// log_journalctl
 type logJournalctlTool struct{}
 
-func (l *logJournalctlTool) Name() string        { return "log/journalctl" }
+func (l *logJournalctlTool) Name() string        { return "log_journalctl" }
 func (l *logJournalctlTool) Description() string { return "Query journalctl logs" }
 func (l *logJournalctlTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"unit":{"type":"string","description":"Systemd unit name"},"since":{"type":"string","description":"Time range (e.g. '1h ago')"},"tail":{"type":"integer","description":"Last N entries"}}}`)

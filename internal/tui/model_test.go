@@ -338,6 +338,54 @@ func TestConfigPageEditsStringAndSaves(t *testing.T) {
 	}
 }
 
+func TestConfigPageDefaultModelRebuildsProvider(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(`default_model: claude
+models:
+  - name: claude
+    type: anthropic
+    model: claude-sonnet-4-6
+    api_key: sk-ant
+  - name: gpt
+    type: openai
+    model: gpt-4.1
+    api_key: sk-oai
+`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	models := []configschema.ModelConfig{
+		{Name: "claude", Type: "anthropic", Model: "claude-sonnet-4-6", APIKey: "sk-ant"},
+		{Name: "gpt", Type: "openai", Model: "gpt-4.1", APIKey: "sk-oai"},
+	}
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ModelConfigs: models, ConfigHome: home, Provider: &fakeProvider{}})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandConfig})
+	for model.configScreen.SelectedKey() != "default_model" {
+		nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = nextModel.(Model)
+	}
+	nextModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	for range []rune("claude") {
+		nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		model = nextModel.(Model)
+	}
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gpt")})
+	model = nextModel.(Model)
+	nextModel, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+
+	if model.model != "gpt" {
+		t.Fatalf("model = %q, want gpt", model.model)
+	}
+	if _, ok := model.provider.(*llm.RetryProvider); !ok {
+		t.Fatalf("provider = %T, want *llm.RetryProvider", model.provider)
+	}
+	if !strings.Contains(model.View(), "Saved config.yaml") {
+		t.Fatalf("view missing saved status:\n%s", model.View())
+	}
+}
+
 func TestConfigPageTogglesBoolAndSaves(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("logging:\n  audit: false\n"), 0600); err != nil {
@@ -459,6 +507,8 @@ func TestSystemPromptPrefersSpecializedToolsBeforeExec(t *testing.T) {
 		"Use exec only as fallback",
 		"Do not use ad hoc scp, rsync, curl, or wget for file transfer",
 		"For resource-changing operations, first use read-only tools",
+		"Use local_fs_read, local_fs_list, and local_fs_stat",
+		"use local_fs_write, local_fs_patch, and local_fs_delete",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
@@ -966,7 +1016,7 @@ func TestSystemPromptExplainsMemoryPolicy(t *testing.T) {
 			t.Fatalf("system prompt missing %q:\n%s", want, prompt)
 		}
 	}
-	for _, legacy := range []string{"memory/save", "memory/search"} {
+	for _, legacy := range []string{"memory_save"} {
 		if strings.Contains(prompt, legacy) {
 			t.Fatalf("system prompt should not mention legacy tool name %q:\n%s", legacy, prompt)
 		}
@@ -1759,7 +1809,7 @@ func TestToolMessageRendersElapsedAfterOutput(t *testing.T) {
 	model.messages = []chatMsg{
 		{
 			role:       "tool",
-			toolName:   "shell/run",
+			toolName:   "shell_run",
 			toolOutput: "exit_code: 0\nstdout:\nok\n",
 			elapsed:    3200 * time.Millisecond,
 		},
@@ -2992,7 +3042,7 @@ func TestDebugLoggingRecordsLLMRequestAndStreamEvents(t *testing.T) {
 		Provider: &fakeProvider{},
 		Conv:     conv,
 		Tools: []llm.ToolDef{{
-			Name:        "log/read",
+			Name:        "log_read",
 			Description: "Read logs",
 			InputSchema: json.RawMessage(`{"type":"object"}`),
 		}},
@@ -3148,7 +3198,7 @@ func TestToolCallReturnsCommandThatContinuesStreamWaiting(t *testing.T) {
 	model.streamCtx = context.Background()
 
 	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "fs/read", Arguments: []byte(`{"path":"/tmp/a"}`),
+		ID: "tc1", Name: "fs_read", Arguments: []byte(`{"path":"/tmp/a"}`),
 	}})
 	model = next.(Model)
 	if cmd == nil {
@@ -3164,7 +3214,7 @@ func TestToolCallReturnsCommandThatContinuesStreamWaiting(t *testing.T) {
 	}
 
 	go func() {
-		ch <- llm.ToolCallEvent{ID: "tc2", Name: "fs/stat", Arguments: []byte(`{"path":"/tmp/b"}`)}
+		ch <- llm.ToolCallEvent{ID: "tc2", Name: "fs_stat", Arguments: []byte(`{"path":"/tmp/b"}`)}
 	}()
 	continuedMsg := execCmd(t, batch[1])
 	if _, ok := continuedMsg.(streamEventMsg); !ok {
@@ -3226,7 +3276,7 @@ func TestInternalToolSearchAndCallToolAreHiddenFromNormalChat(t *testing.T) {
 	next, _ = model.Update(multiToolResultMsg{
 		streamID: 1,
 		Call:     llm.ToolCall{ID: "search1", Name: metaToolToolSearch, Arguments: json.RawMessage(`{"query":"cpu process"}`)},
-		Results:  []nodeToolResult{{Node: "-", Output: `[{"name":"sys/processes"}]`, Success: true}},
+		Results:  []nodeToolResult{{Node: "-", Output: `[{"name":"sys_processes"}]`, Success: true}},
 	})
 	model = next.(Model)
 
@@ -3235,20 +3285,20 @@ func TestInternalToolSearchAndCallToolAreHiddenFromNormalChat(t *testing.T) {
 		Event: llm.ToolCallEvent{
 			ID:        "call1",
 			Name:      metaToolCallTool,
-			Arguments: json.RawMessage(`{"node":"node-01","tool":"sys/processes","arguments":{}}`),
+			Arguments: json.RawMessage(`{"node":"node-01","tool":"sys_processes","arguments":{}}`),
 		},
 	})
 	model = next.(Model)
 
 	next, _ = model.Update(multiToolResultMsg{
 		streamID: 1,
-		Call:     llm.ToolCall{ID: "call1", Name: metaToolCallTool, Arguments: json.RawMessage(`{"node":"node-01","tool":"sys/processes","arguments":{}}`)},
+		Call:     llm.ToolCall{ID: "call1", Name: metaToolCallTool, Arguments: json.RawMessage(`{"node":"node-01","tool":"sys_processes","arguments":{}}`)},
 		Results:  []nodeToolResult{{Node: "node-01", Output: "postgres 86%", Success: true}},
 	})
 	model = next.(Model)
 
 	view = model.View()
-	for _, leaked := range []string{"tool_search", "call_tool", "sys/processes", "postgres 86%"} {
+	for _, leaked := range []string{"tool_search", "call_tool", "sys_processes", "postgres 86%"} {
 		if strings.Contains(view, leaked) {
 			t.Fatalf("internal tool detail %q leaked into normal chat:\n%s", leaked, view)
 		}
@@ -3390,7 +3440,7 @@ func TestToolCallPreservesPrecedingAssistantText(t *testing.T) {
 	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.TextDeltaEvent{Delta: "Before the tool."}})
 	model = next.(Model)
 	next, _ = model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`),
 	}})
 	model = next.(Model)
 
@@ -3403,7 +3453,7 @@ func TestToolCallPreservesPrecedingAssistantText(t *testing.T) {
 	if model.messages[0].role != "assistant" || model.messages[0].content != "Before the tool." {
 		t.Fatalf("first message = %#v, want preserved assistant text", model.messages[0])
 	}
-	if model.messages[1].role != "tool" || model.messages[1].toolName != "shell/run" {
+	if model.messages[1].role != "tool" || model.messages[1].toolName != "shell_run" {
 		t.Fatalf("second message = %#v, want tool call placeholder", model.messages[1])
 	}
 	view := model.View()
@@ -3417,7 +3467,7 @@ func TestToolCallPreservesPrecedingAssistantText(t *testing.T) {
 	if msgs[0].Role != "assistant" || msgs[0].Content != "Before the tool." {
 		t.Fatalf("conversation first message = %#v, want preserved assistant text", msgs[0])
 	}
-	if msgs[1].ToolCallID != "tc1" || msgs[1].ToolName != "shell/run" {
+	if msgs[1].ToolCallID != "tc1" || msgs[1].ToolName != "shell_run" {
 		t.Fatalf("conversation second message = %#v, want tool call", msgs[1])
 	}
 }
@@ -3635,7 +3685,7 @@ func TestStreamErrorWithPartialBufferPreservesContent(t *testing.T) {
 func TestToolResultMessage(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
-	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"ls"}`)}
+	call := llm.ToolCall{ID: "c1", Name: "shell_run", Arguments: []byte(`{"command":"ls"}`)}
 	results := []nodeToolResult{
 		{Node: "node-01", Output: "file1\nfile2", Success: true},
 	}
@@ -3643,7 +3693,7 @@ func TestToolResultMessage(t *testing.T) {
 	model = next.(Model)
 
 	view := model.View()
-	if !strings.Contains(view, "shell/run") {
+	if !strings.Contains(view, "shell_run") {
 		t.Fatalf("view missing tool name:\n%s", view)
 	}
 }
@@ -3651,7 +3701,7 @@ func TestToolResultMessage(t *testing.T) {
 func TestLateRiskAssessmentAfterInterruptIsIgnored(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
-	model.messages = append(model.messages, chatMsg{role: "tool", toolName: "shell/run", toolInput: `{"command":"rm -rf /"}`})
+	model.messages = append(model.messages, chatMsg{role: "tool", toolName: "shell_run", toolInput: `{"command":"rm -rf /"}`})
 	model.streaming = true
 	model.status = "Thinking..."
 	model.streamID = 1
@@ -3662,7 +3712,7 @@ func TestLateRiskAssessmentAfterInterruptIsIgnored(t *testing.T) {
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	model = next.(Model)
 
-	call := llm.ToolCall{ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`)}
+	call := llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /"}`)}
 	next, cmd := model.Update(riskAssessmentMsg{
 		streamID:   1,
 		call:       call,
@@ -3712,7 +3762,7 @@ func TestCtrlCCancelsInFlightRiskAssessment(t *testing.T) {
 	model.streamCtx = ctx
 	model.streamCancel = cancel
 
-	cmd := model.assessToolRisk(1, llm.ToolCall{ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`)})
+	cmd := model.assessToolRisk(1, llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /"}`)})
 	cmdDone := make(chan tea.Msg, 1)
 	go func() { cmdDone <- execCmd(t, cmd) }()
 
@@ -3768,7 +3818,7 @@ func TestCtrlCCancelsInFlightToolDispatch(t *testing.T) {
 	model.streamCtx = ctx
 	model.streamCancel = cancel
 
-	cmd := model.dispatchTool(1, llm.ToolCall{ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`)})
+	cmd := model.dispatchTool(1, llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)})
 	cmdDone := make(chan tea.Msg, 1)
 	go func() { cmdDone <- execCmd(t, cmd) }()
 
@@ -3799,7 +3849,7 @@ func TestCtrlCCancelsInFlightToolDispatch(t *testing.T) {
 func TestLateToolResultAfterInterruptIsIgnored(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
-	model.messages = append(model.messages, chatMsg{role: "tool", toolName: "shell/run", toolInput: `{"command":"uptime"}`})
+	model.messages = append(model.messages, chatMsg{role: "tool", toolName: "shell_run", toolInput: `{"command":"uptime"}`})
 	model.streaming = true
 	model.status = "Thinking..."
 	model.streamID = 1
@@ -3810,7 +3860,7 @@ func TestLateToolResultAfterInterruptIsIgnored(t *testing.T) {
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	model = next.(Model)
 
-	call := llm.ToolCall{ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`)}
+	call := llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)}
 	next, cmd := model.Update(multiToolResultMsg{
 		streamID: 1,
 		Call:     call,
@@ -4443,7 +4493,7 @@ func TestMultiNodeDispatch(t *testing.T) {
 		Nodes:   nodes,
 	})
 
-	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`)}
+	call := llm.ToolCall{ID: "c1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)}
 	results := []nodeToolResult{
 		{Node: "node-01", Output: "load average: 0.52", Success: true},
 		{Node: "node-02", Output: "load average: 0.31", Success: true},
@@ -4453,7 +4503,7 @@ func TestMultiNodeDispatch(t *testing.T) {
 	model = next.(Model)
 
 	view := model.View()
-	if !strings.Contains(view, "shell/run on 2 node(s)") {
+	if !strings.Contains(view, "shell_run on 2 node(s)") {
 		t.Fatalf("view missing multi-node header:\n%s", view)
 	}
 	if !strings.Contains(view, "node-01") || !strings.Contains(view, "node-02") {
@@ -4463,13 +4513,13 @@ func TestMultiNodeDispatch(t *testing.T) {
 
 func TestToolOutputCollapsesAndTogglesLastToolWithCtrlO(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
-	firstCall := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"seq 1 6"}`)}
+	firstCall := llm.ToolCall{ID: "c1", Name: "shell_run", Arguments: []byte(`{"command":"seq 1 6"}`)}
 	firstOutput := "first 1\nfirst 2\nfirst 3\nfirst 4\nfirst 5\nfirst 6"
 
 	next, _ := model.Update(multiToolResultMsg{Call: firstCall, Results: []nodeToolResult{{Node: "node-01", Output: firstOutput, Success: true}}})
 	model = next.(Model)
 
-	secondCall := llm.ToolCall{ID: "c2", Name: "shell/run", Arguments: []byte(`{"command":"seq 1 6"}`)}
+	secondCall := llm.ToolCall{ID: "c2", Name: "shell_run", Arguments: []byte(`{"command":"seq 1 6"}`)}
 	secondOutput := "second 1\nsecond 2\nsecond 3\nsecond 4\nsecond 5\nsecond 6"
 	next, _ = model.Update(multiToolResultMsg{Call: secondCall, Results: []nodeToolResult{{Node: "node-01", Output: secondOutput, Success: true}}})
 	model = next.(Model)
@@ -4509,7 +4559,7 @@ func TestToolOutputToggleSkipsHiddenMemoryTools(t *testing.T) {
 		{
 			role:       "tool",
 			toolCallID: "tc1",
-			toolName:   "shell/run",
+			toolName:   "shell_run",
 			toolOutput: visibleOutput,
 			nodeResults: []nodeToolResult{{
 				Node:    "node-01",
@@ -4548,7 +4598,7 @@ func TestToolOutputToggleSkipsHiddenMemoryTools(t *testing.T) {
 
 func TestShellRunOutputShowsStatusWithoutStdoutStderrLabels(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
-	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"pwd"}`)}
+	call := llm.ToolCall{ID: "c1", Name: "shell_run", Arguments: []byte(`{"command":"pwd"}`)}
 	output := "exit_code: 0\nstdout:\n/home/app\nstderr:\n"
 
 	next, _ := model.Update(multiToolResultMsg{Call: call, Results: []nodeToolResult{{Node: "node-01", Output: output, Success: true}}})
@@ -4571,7 +4621,7 @@ func TestMultiNodeDispatchWithFailure(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
 
-	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"ls"}`)}
+	call := llm.ToolCall{ID: "c1", Name: "shell_run", Arguments: []byte(`{"command":"ls"}`)}
 	results := []nodeToolResult{
 		{Node: "node-01", Output: "file1\nfile2", Success: true},
 		{Node: "node-02", Output: "Connection timeout", Success: false},
@@ -4606,8 +4656,8 @@ func TestDispatchExecCallsShellRunTool(t *testing.T) {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			t.Fatalf("decode params: %v", err)
 		}
-		if params.Name != "shell/run" {
-			t.Fatalf("tool name = %q, want shell/run", params.Name)
+		if params.Name != "shell_run" {
+			t.Fatalf("tool name = %q, want shell_run", params.Name)
 		}
 		var args struct {
 			Command string `json:"command"`
@@ -4667,7 +4717,7 @@ func TestDispatchToolConnectionLostMarksOnlyFailedNodeOffline(t *testing.T) {
 			"node-02": connectionLostClient,
 		},
 	})
-	call := llm.ToolCall{ID: "c1", Name: "shell/run", Arguments: []byte(`{"command":"ls"}`)}
+	call := llm.ToolCall{ID: "c1", Name: "shell_run", Arguments: []byte(`{"command":"ls"}`)}
 
 	msg := execCmd(t, model.dispatchTool(0, call))
 	resultMsg, ok := msg.(multiToolResultMsg)
@@ -4832,7 +4882,7 @@ func TestRiskDenyFillsExistingToolPlaceholder(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /"}`),
 	}})
 	model = result.(Model)
 	if len(model.messages) != 1 || model.messages[0].toolOutput != "" {
@@ -4877,7 +4927,7 @@ func TestToolCallDeniedBySecurity(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /"}`),
 	}})
 	model = result.(Model)
 
@@ -4917,7 +4967,7 @@ func TestRiskAssessmentErrorFillsExistingToolPlaceholder(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /"}`),
 	}})
 	model = result.(Model)
 
@@ -4954,7 +5004,7 @@ func TestRiskAssessmentErrorRecordsConversationToolResult(t *testing.T) {
 	model.streamEnded = true
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"rm -rf /"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /"}`),
 	}})
 	model = result.(Model)
 
@@ -4986,8 +5036,8 @@ func TestMultipleToolCallsResumeOnlyAfterAllResults(t *testing.T) {
 	model.activeStreamID = 1
 
 	for _, call := range []llm.ToolCallEvent{
-		{ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`)},
-		{ID: "tc2", Name: "shell/run", Arguments: []byte(`{"command":"date"}`)},
+		{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)},
+		{ID: "tc2", Name: "shell_run", Arguments: []byte(`{"command":"date"}`)},
 	} {
 		result, _ := model.Update(streamEventMsg{streamID: 1, Event: call})
 		model = result.(Model)
@@ -4995,7 +5045,7 @@ func TestMultipleToolCallsResumeOnlyAfterAllResults(t *testing.T) {
 	result, _ := model.Update(streamDoneMsg{streamID: 1})
 	model = result.(Model)
 
-	result, cmd := model.Update(multiToolResultMsg{streamID: 1, Call: llm.ToolCall{ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"uptime"}`)}, Results: []nodeToolResult{{Node: "node-01", Output: "up", Success: true}}})
+	result, cmd := model.Update(multiToolResultMsg{streamID: 1, Call: llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)}, Results: []nodeToolResult{{Node: "node-01", Output: "up", Success: true}}})
 	model = result.(Model)
 	if cmd != nil {
 		t.Fatal("first tool result resumed stream before second result")
@@ -5004,7 +5054,7 @@ func TestMultipleToolCallsResumeOnlyAfterAllResults(t *testing.T) {
 		t.Fatalf("ChatStream calls = %d, want none before all tool results", provider.calls)
 	}
 
-	result, cmd = model.Update(multiToolResultMsg{streamID: 1, Call: llm.ToolCall{ID: "tc2", Name: "shell/run", Arguments: []byte(`{"command":"date"}`)}, Results: []nodeToolResult{{Node: "node-01", Output: "today", Success: true}}})
+	result, cmd = model.Update(multiToolResultMsg{streamID: 1, Call: llm.ToolCall{ID: "tc2", Name: "shell_run", Arguments: []byte(`{"command":"date"}`)}, Results: []nodeToolResult{{Node: "node-01", Output: "today", Success: true}}})
 	model = result.(Model)
 	if cmd == nil {
 		t.Fatal("second tool result should resume stream")
@@ -5019,11 +5069,11 @@ func TestIdenticalToolCallsFillPlaceholderByID(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
 	args := []byte(`{"command":"uptime"}`)
 	model.messages = []chatMsg{
-		{role: "tool", toolCallID: "tc1", toolName: "shell/run", toolInput: string(args)},
-		{role: "tool", toolCallID: "tc2", toolName: "shell/run", toolInput: string(args)},
+		{role: "tool", toolCallID: "tc1", toolName: "shell_run", toolInput: string(args)},
+		{role: "tool", toolCallID: "tc2", toolName: "shell_run", toolInput: string(args)},
 	}
 
-	model.fillToolPlaceholder(llm.ToolCall{ID: "tc1", Name: "shell/run", Arguments: args}, "first", nil)
+	model.fillToolPlaceholder(llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: args}, "first", nil)
 
 	if model.messages[0].toolOutput != "first" {
 		t.Fatalf("first output = %q, want first", model.messages[0].toolOutput)
@@ -5142,12 +5192,12 @@ func TestIncidentRecordsUserToolRiskAndAssistantEvents(t *testing.T) {
 	model = updated.(Model)
 	model.recordAssistantEvidence("api recovered")
 	updated, _ = model.Update(riskAssessmentMsg{
-		call:       llm.ToolCall{ID: "risk-1", Name: "svc/restart", Arguments: json.RawMessage(`{"service":"nginx"}`)},
+		call:       llm.ToolCall{ID: "risk-1", Name: "svc_restart", Arguments: json.RawMessage(`{"service":"nginx"}`)},
 		assessment: security.RiskAssessment{Level: security.RiskConfirm, Reason: "restart service"},
 	})
 	model = updated.(Model)
 	updated, _ = model.Update(multiToolResultMsg{
-		Call:    llm.ToolCall{ID: "tool-1", Name: "svc/status", Arguments: json.RawMessage(`{"service":"nginx"}`)},
+		Call:    llm.ToolCall{ID: "tool-1", Name: "svc_status", Arguments: json.RawMessage(`{"service":"nginx"}`)},
 		Results: []nodeToolResult{{Node: "web-1", Output: "active", Success: true}},
 	})
 	model = updated.(Model)
@@ -5185,11 +5235,11 @@ cluster: prod
 
 ## 证据
 
-- 2026-05-23T10:00:00Z tool=svc/status success=true nginx active
+- 2026-05-23T10:00:00Z tool=svc_status success=true nginx active
 
 ## 执行动作
 
-- 2026-05-23T10:05:00Z tool=svc/restart risk=confirm outcome=approved restart nginx
+- 2026-05-23T10:05:00Z tool=svc_restart risk=confirm outcome=approved restart nginx
 
 ## 验证结果
 
@@ -5305,7 +5355,7 @@ func TestToolCallNeedsConfirmation(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
 	}})
 	model = result.(Model)
 
@@ -5333,7 +5383,7 @@ func TestToolCallNeedsConfirmation(t *testing.T) {
 	if !strings.Contains(view, "Restarts service") {
 		t.Fatalf("confirm mode should show risk reason:\n%s", view)
 	}
-	if !strings.Contains(view, "shell/run") {
+	if !strings.Contains(view, "shell_run") {
 		t.Fatalf("confirm mode should keep the tool placeholder visible:\n%s", view)
 	}
 	if !strings.Contains(view, "Command") || !strings.Contains(view, "systemctl restart nginx") {
@@ -5370,7 +5420,7 @@ func TestConfirmationSummaryShowsFileTransferImpact(t *testing.T) {
 func TestConfirmationSummaryShowsCallToolInnerImpact(t *testing.T) {
 	call := llm.ToolCall{
 		Name:      metaToolCallTool,
-		Arguments: json.RawMessage(`{"node":"web-1","tool":"svc/restart","arguments":{"service":"nginx"}}`),
+		Arguments: json.RawMessage(`{"node":"web-1","tool":"svc_restart","arguments":{"service":"nginx"}}`),
 	}
 
 	lines := confirmationSummary(call, []string{"web-1"})
@@ -5378,7 +5428,7 @@ func TestConfirmationSummaryShowsCallToolInnerImpact(t *testing.T) {
 
 	for _, want := range []string{
 		"Tool: call_tool",
-		"Inner tool: svc/restart",
+		"Inner tool: svc_restart",
 		"Node: web-1",
 		"service: nginx",
 	} {
@@ -5452,7 +5502,7 @@ func TestConfirmEnterOnAllowDispatchesTool(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
 	}})
 	model = result.(Model)
 
@@ -5501,7 +5551,7 @@ func TestConfirmNoFillsExistingToolPlaceholder(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
 	}})
 	model = result.(Model)
 	if len(model.messages) != 1 || model.messages[0].toolOutput != "" {
@@ -5617,7 +5667,7 @@ func TestConfirmAllowAndAddWritesLocalFileAllowlist(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "local/fs/write", Arguments: []byte(`{"path":"README.md","content":"new content"}`),
+		ID: "tc1", Name: "local_fs_write", Arguments: []byte(`{"path":"README.md","content":"new content"}`),
 	}})
 	model = result.(Model)
 	msg := execCmd(t, cmd)
@@ -5646,7 +5696,7 @@ func TestConfirmAllowAndAddWritesLocalFileAllowlist(t *testing.T) {
 		t.Fatalf("config missing local file allowlist:\n%s", data)
 	}
 
-	assessment, err := reviewer.Review(context.Background(), "local/fs/write", `{"path":"README.md","content":"again"}`, nil)
+	assessment, err := reviewer.Review(context.Background(), "local_fs_write", `{"path":"README.md","content":"again"}`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5673,7 +5723,7 @@ func TestConfirmEscCancelsTool(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
 	}})
 	model = result.(Model)
 	msg := execCmd(t, cmd)
@@ -5710,7 +5760,7 @@ func TestConfirmNoCancelsTool(t *testing.T) {
 	model.activeStreamID = 1
 
 	result, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
-		ID: "tc1", Name: "shell/run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
+		ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"systemctl restart nginx"}`),
 	}})
 	model = result.(Model)
 

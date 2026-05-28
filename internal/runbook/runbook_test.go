@@ -23,8 +23,8 @@ created_at: 2026-05-23T10:00:00Z
 
 ## 步骤
 
-1. [read] 使用 ` + "`svc/status`" + ` 检查 nginx 状态。
-2. [confirm] 使用 ` + "`svc/restart`" + ` 重启 nginx。
+1. [read] 使用 ` + "`svc_status`" + ` 检查 nginx 状态。
+2. [confirm] 使用 ` + "`svc_restart`" + ` 重启 nginx。
 `
 
 	rb, err := ParseMarkdown(md)
@@ -53,14 +53,14 @@ func TestRenderMarkdownRunbook(t *testing.T) {
 		Tags:           []string{"nginx", "502"},
 		CreatedAt:      time.Date(2026, 5, 23, 10, 0, 0, 0, time.UTC),
 		Scenario:       "网关返回 502。",
-		Steps:          []Step{{Kind: StepRead, Text: "使用 `svc/status` 检查 nginx 状态。"}},
+		Steps:          []Step{{Kind: StepRead, Text: "使用 `svc_status` 检查 nginx 状态。"}},
 		Verification:   "请求恢复。",
 		Risks:          "重启可能影响连接。",
 	}
 
 	md := RenderMarkdown(rb)
 
-	for _, want := range []string{"title: Nginx 502 快速诊断", "source_incident: incident-abc123", "## 适用场景", "1. [read] 使用 `svc/status`", "## 验证", "请求恢复"} {
+	for _, want := range []string{"title: Nginx 502 快速诊断", "source_incident: incident-abc123", "## 适用场景", "1. [read] 使用 `svc_status`", "## 验证", "请求恢复"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("render missing %q:\n%s", want, md)
 		}

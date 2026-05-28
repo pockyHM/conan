@@ -6,7 +6,7 @@ import (
 )
 
 func TestJSONRPCRequestUnmarshal(t *testing.T) {
-	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell/run","arguments":{"command":"echo hi"}}}`
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"shell_run","arguments":{"command":"echo hi"}}}`
 	var req JSONRPCRequest
 	if err := json.Unmarshal([]byte(raw), &req); err != nil {
 		t.Fatalf("unmarshal: %v", err)

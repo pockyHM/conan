@@ -12,35 +12,35 @@ func TestRegisterAllToolsOnlyExposesShellAndReadOnlyTools(t *testing.T) {
 	registerAllTools(registry, configschema.DefaultAgentConfig())
 
 	allowed := map[string]bool{
-		"shell/run":      true,
-		"fs/read":        true,
-		"fs/list":        true,
-		"fs/stat":        true,
-		"sys/cpu":        true,
-		"sys/mem":        true,
-		"sys/disk":       true,
-		"sys/net":        true,
-		"sys/processes":  true,
-		"svc/list":       true,
-		"svc/status":     true,
-		"log/read":       true,
-		"log/stream":     true,
-		"log/journalctl": true,
-		"net/ping":       true,
-		"net/traceroute": true,
-		"net/portcheck":  true,
-		"web/fetch":      true,
-		"k8s/pods":       true,
-		"k8s/logs":       true,
-		"k8s/events":     true,
-		"k8s/describe":   true,
-		"pkg/list":       true,
-		"pkg/search":     true,
-		"cron/list":      true,
-		"cron/show":      true,
-		"docker/ps":      true,
-		"docker/images":  true,
-		"docker/logs":    true,
+		"shell_run":      true,
+		"fs_read":        true,
+		"fs_list":        true,
+		"fs_stat":        true,
+		"sys_cpu":        true,
+		"sys_mem":        true,
+		"sys_disk":       true,
+		"sys_net":        true,
+		"sys_processes":  true,
+		"svc_list":       true,
+		"svc_status":     true,
+		"log_read":       true,
+		"log_stream":     true,
+		"log_journalctl": true,
+		"net_ping":       true,
+		"net_traceroute": true,
+		"net_portcheck":  true,
+		"web_fetch":      true,
+		"k8s_pods":       true,
+		"k8s_logs":       true,
+		"k8s_events":     true,
+		"k8s_describe":   true,
+		"pkg_list":       true,
+		"pkg_search":     true,
+		"cron_list":      true,
+		"cron_show":      true,
+		"docker_ps":      true,
+		"docker_images":  true,
+		"docker_logs":    true,
 	}
 
 	for _, tool := range registry.List() {
@@ -56,24 +56,24 @@ func TestRegisterAllToolsOnlyExposesShellAndReadOnlyTools(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		"fs/write",
-		"fs/edit",
-		"fs/download",
-		"fs/upload",
-		"svc/start",
-		"svc/stop",
-		"svc/restart",
-		"k8s/apply",
-		"k8s/delete",
-		"pkg/install",
-		"pkg/update",
-		"cron/add",
-		"cron/remove",
-		"net/curl",
-		"web/search",
-		"docker/exec",
-		"docker/run",
-		"docker/compose",
+		"fs_write",
+		"fs_edit",
+		"fs_download",
+		"fs_upload",
+		"svc_start",
+		"svc_stop",
+		"svc_restart",
+		"k8s_apply",
+		"k8s_delete",
+		"pkg_install",
+		"pkg_update",
+		"cron_add",
+		"cron_remove",
+		"net_curl",
+		"web_search",
+		"docker_exec",
+		"docker_run",
+		"docker_compose",
 	} {
 		if _, ok := registry.Get(name); ok {
 			t.Fatalf("mutating tool %q should not be registered", name)
@@ -90,10 +90,10 @@ func TestRegisterAllToolsExposesWebSearchWhenConfigured(t *testing.T) {
 		},
 	})
 
-	if _, ok := registry.Get("web/search"); !ok {
-		t.Fatal("web/search should be registered when search provider and API key are configured")
+	if _, ok := registry.Get("web_search"); !ok {
+		t.Fatal("web_search should be registered when search provider and API key are configured")
 	}
-	if _, ok := registry.Get("web/fetch"); !ok {
-		t.Fatal("web/fetch should be registered")
+	if _, ok := registry.Get("web_fetch"); !ok {
+		t.Fatal("web_fetch should be registered")
 	}
 }

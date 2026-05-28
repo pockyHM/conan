@@ -38,7 +38,7 @@ func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
 	}
 	client := cfg.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultHTTPClient()
 	}
 	return &OpenAIProvider{
 		apiKey:              cfg.APIKey,
@@ -369,7 +369,7 @@ func messagesToOpenAI(msgs []models.Message) []json.RawMessage {
 						"id":   msgs[i].ToolCallID,
 						"type": "function",
 						"function": map[string]any{
-							"name":      msgs[i].ToolName,
+							"name":      normalizeOpenAIToolName(msgs[i].ToolName),
 							"arguments": msgs[i].ToolInput,
 						},
 					})
@@ -406,13 +406,17 @@ func toolsToOpenAI(tools []ToolDef) []any {
 		result[i] = map[string]any{
 			"type": "function",
 			"function": map[string]any{
-				"name":        t.Name,
+				"name":        normalizeOpenAIToolName(t.Name),
 				"description": t.Description,
 				"parameters":  t.InputSchema,
 			},
 		}
 	}
 	return result
+}
+
+func normalizeOpenAIToolName(name string) string {
+	return strings.ReplaceAll(strings.TrimSpace(name), "/", "_")
 }
 
 func openaiStopReason(reason string) string {

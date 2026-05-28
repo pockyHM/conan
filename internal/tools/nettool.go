@@ -12,10 +12,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// net/ping
+// net_ping
 type netPingTool struct{}
 
-func (n *netPingTool) Name() string        { return "net/ping" }
+func (n *netPingTool) Name() string        { return "net_ping" }
 func (n *netPingTool) Description() string { return "Ping a host" }
 func (n *netPingTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"host":{"type":"string","description":"Host to ping"},"count":{"type":"integer","description":"Number of pings (default 3)"}},"required":["host"]}`)
@@ -35,10 +35,10 @@ func (n *netPingTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return runCommand(ctx, cmd)
 }
 
-// net/traceroute
+// net_traceroute
 type netTracerouteTool struct{}
 
-func (n *netTracerouteTool) Name() string        { return "net/traceroute" }
+func (n *netTracerouteTool) Name() string        { return "net_traceroute" }
 func (n *netTracerouteTool) Description() string { return "Traceroute to host" }
 func (n *netTracerouteTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"host":{"type":"string","description":"Target host"}},"required":["host"]}`)
@@ -54,10 +54,10 @@ func (n *netTracerouteTool) Execute(ctx context.Context, input json.RawMessage) 
 	return runCommand(ctx, cmd)
 }
 
-// net/portcheck
+// net_portcheck
 type netPortcheckTool struct{}
 
-func (n *netPortcheckTool) Name() string        { return "net/portcheck" }
+func (n *netPortcheckTool) Name() string        { return "net_portcheck" }
 func (n *netPortcheckTool) Description() string { return "Check if a port is open" }
 func (n *netPortcheckTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"host":{"type":"string","description":"Host address"},"port":{"type":"integer","description":"Port number"}},"required":["host","port"]}`)
@@ -83,10 +83,10 @@ func (n *netPortcheckTool) Execute(ctx context.Context, input json.RawMessage) (
 	}, nil
 }
 
-// net/curl
+// net_curl
 type netCurlTool struct{}
 
-func (n *netCurlTool) Name() string        { return "net/curl" }
+func (n *netCurlTool) Name() string        { return "net_curl" }
 func (n *netCurlTool) Description() string { return "Make HTTP request" }
 func (n *netCurlTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL to request"},"method":{"type":"string","description":"HTTP method (default GET)"},"headers":{"type":"object","description":"Request headers"},"body":{"type":"string","description":"Request body"}},"required":["url"]}`)

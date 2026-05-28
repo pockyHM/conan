@@ -11,10 +11,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// sys/cpu
+// sys_cpu
 type sysCPUTool struct{}
 
-func (s *sysCPUTool) Name() string        { return "sys/cpu" }
+func (s *sysCPUTool) Name() string        { return "sys_cpu" }
 func (s *sysCPUTool) Description() string { return "Get CPU usage and load average" }
 func (s *sysCPUTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
@@ -34,10 +34,10 @@ func getLoadAvg() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// sys/mem
+// sys_mem
 type sysMemTool struct{}
 
-func (s *sysMemTool) Name() string        { return "sys/mem" }
+func (s *sysMemTool) Name() string        { return "sys_mem" }
 func (s *sysMemTool) Description() string { return "Get memory usage" }
 func (s *sysMemTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
@@ -56,10 +56,10 @@ func (s *sysMemTool) Execute(ctx context.Context, input json.RawMessage) (*mcppr
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(string(out))}}, nil
 }
 
-// sys/disk
+// sys_disk
 type sysDiskTool struct{}
 
-func (s *sysDiskTool) Name() string        { return "sys/disk" }
+func (s *sysDiskTool) Name() string        { return "sys_disk" }
 func (s *sysDiskTool) Description() string { return "Get disk usage" }
 func (s *sysDiskTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
@@ -73,10 +73,10 @@ func (s *sysDiskTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(string(out))}}, nil
 }
 
-// sys/net
+// sys_net
 type sysNetTool struct{}
 
-func (s *sysNetTool) Name() string        { return "sys/net" }
+func (s *sysNetTool) Name() string        { return "sys_net" }
 func (s *sysNetTool) Description() string { return "Get network interface stats" }
 func (s *sysNetTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
@@ -90,10 +90,10 @@ func (s *sysNetTool) Execute(ctx context.Context, input json.RawMessage) (*mcppr
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(string(out))}}, nil
 }
 
-// sys/processes
+// sys_processes
 type sysProcessesTool struct{}
 
-func (s *sysProcessesTool) Name() string        { return "sys/processes" }
+func (s *sysProcessesTool) Name() string        { return "sys_processes" }
 func (s *sysProcessesTool) Description() string { return "Get process list" }
 func (s *sysProcessesTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"sort":{"type":"string","description":"Sort by: cpu, mem, pid"},"limit":{"type":"integer","description":"Max processes to return"}}}`)

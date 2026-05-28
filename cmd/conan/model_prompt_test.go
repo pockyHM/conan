@@ -34,9 +34,9 @@ func TestModelAddManualFlow(t *testing.T) {
 	home := t.TempDir()
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"1",                // Anthropic
-		"claude-main",      // config name
-		"sk-ant-test",      // API key (no env set, so askSecret reads directly)
+		"1",                 // Anthropic
+		"claude-main",       // config name
+		"sk-ant-test",       // API key (no env set, so askSecret reads directly)
 		"claude-sonnet-4-6", // model
 	}, "\n")
 	var out bytes.Buffer
@@ -72,9 +72,9 @@ func TestModelAddAutoName(t *testing.T) {
 	home := t.TempDir()
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"1",                // Anthropic
-		"",                 // accept auto name "anthropic"
-		"sk-ant-test",      // API key
+		"1",                 // Anthropic
+		"",                  // accept auto name "anthropic"
+		"sk-ant-test",       // API key
 		"claude-sonnet-4-6", // model
 	}, "\n")
 	var out bytes.Buffer
@@ -97,10 +97,10 @@ func TestModelAddDiscoveredModels(t *testing.T) {
 	home := t.TempDir()
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"7",           // Qwen (supports list)
-		"qwen-prod",   // config name
+		"7",            // Qwen (supports list)
+		"qwen-prod",    // config name
 		"sk-qwen-test", // API key
-		"1",           // select first discovered model
+		"1",            // select first discovered model
 	}, "\n")
 	var out bytes.Buffer
 
@@ -220,7 +220,7 @@ func TestModelAddDiscoveryFallsBackToManual(t *testing.T) {
 
 	loader := cfgloader.NewLoader(home)
 	input := strings.Join([]string{
-		"6",            // Qwen
+		"6", // Qwen
 		"qwen-fallback",
 		"sk-test",
 		"qwen-custom", // manual model name after discovery failure
@@ -254,9 +254,9 @@ func TestModelAddConnectionTestRetry(t *testing.T) {
 
 	input := strings.Join([]string{
 		// First attempt
-		"1",                // Anthropic
-		"claude-main",      // config name
-		"sk-ant-bad",       // API key (will fail test)
+		"1",                 // Anthropic
+		"claude-main",       // config name
+		"sk-ant-bad",        // API key (will fail test)
 		"claude-sonnet-4-6", // model
 		// Connection test fails → modify
 		"y",
@@ -292,9 +292,9 @@ func TestModelAddConnectionTestSaveAnyway(t *testing.T) {
 	tester := &failingTester{failCount: 100} // always fails
 
 	input := strings.Join([]string{
-		"1",                // Anthropic
-		"claude-main",      // config name
-		"sk-ant-test",      // API key
+		"1",                 // Anthropic
+		"claude-main",       // config name
+		"sk-ant-test",       // API key
 		"claude-sonnet-4-6", // model
 		// Connection test fails
 		"n", // don't modify, save anyway

@@ -8,10 +8,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// pkg/list
+// pkg_list
 type pkgListTool struct{}
 
-func (p *pkgListTool) Name() string        { return "pkg/list" }
+func (p *pkgListTool) Name() string        { return "pkg_list" }
 func (p *pkgListTool) Description() string { return "List installed packages" }
 func (p *pkgListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Filter by package name"}}}`)
@@ -28,10 +28,10 @@ func (p *pkgListTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return runCommand(ctx, cmd)
 }
 
-// pkg/install
+// pkg_install
 type pkgInstallTool struct{}
 
-func (p *pkgInstallTool) Name() string        { return "pkg/install" }
+func (p *pkgInstallTool) Name() string        { return "pkg_install" }
 func (p *pkgInstallTool) Description() string { return "Install package" }
 func (p *pkgInstallTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Package name"},"update_cache":{"type":"boolean","description":"Update package cache first"}},"required":["name"]}`)
@@ -53,10 +53,10 @@ func (p *pkgInstallTool) Execute(ctx context.Context, input json.RawMessage) (*m
 	return runCommand(ctx, cmd)
 }
 
-// pkg/update
+// pkg_update
 type pkgUpdateTool struct{}
 
-func (p *pkgUpdateTool) Name() string        { return "pkg/update" }
+func (p *pkgUpdateTool) Name() string        { return "pkg_update" }
 func (p *pkgUpdateTool) Description() string { return "Update package" }
 func (p *pkgUpdateTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Package name (empty = update all)"}}}`)
@@ -75,10 +75,10 @@ func (p *pkgUpdateTool) Execute(ctx context.Context, input json.RawMessage) (*mc
 	return runCommand(ctx, cmd)
 }
 
-// pkg/search
+// pkg_search
 type pkgSearchTool struct{}
 
-func (p *pkgSearchTool) Name() string        { return "pkg/search" }
+func (p *pkgSearchTool) Name() string        { return "pkg_search" }
 func (p *pkgSearchTool) Description() string { return "Search packages" }
 func (p *pkgSearchTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}`)

@@ -528,7 +528,7 @@ func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
 		toolListRequests++
 		_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(req.ID, map[string]interface{}{
 			"tools": []mcpproto.ToolDefinition{
-				{Name: "sys/uptime", Description: "uptime", InputSchema: json.RawMessage(`{"type":"object"}`)},
+				{Name: "sys_uptime", Description: "uptime", InputSchema: json.RawMessage(`{"type":"object"}`)},
 			},
 		}))
 	}))
@@ -604,8 +604,8 @@ func TestNodeAddResultFetchesToolsBeforeResume(t *testing.T) {
 
 	next, resumeCmd := model.Update(fetched)
 	model = next.(Model)
-	if tools, ok := model.toolCache.Get("web-1"); !ok || len(tools) != 1 || tools[0].Name != "sys/uptime" {
-		t.Fatalf("cached tools = %#v ok=%v, want sys/uptime before resume", tools, ok)
+	if tools, ok := model.toolCache.Get("web-1"); !ok || len(tools) != 1 || tools[0].Name != "sys_uptime" {
+		t.Fatalf("cached tools = %#v ok=%v, want sys_uptime before resume", tools, ok)
 	}
 	if provider.req != nil {
 		t.Fatal("provider was called before processing fetched tools")

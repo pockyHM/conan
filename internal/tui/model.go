@@ -1493,9 +1493,7 @@ func (m Model) saveConfigScreenValue(value string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) applyGlobalConfigRuntime(global configschema.GlobalConfig) Model {
-	if strings.TrimSpace(global.DefaultModel) != "" {
-		m.model = strings.TrimSpace(global.DefaultModel)
-	}
+	m.modelConfigs = append([]configschema.ModelConfig(nil), global.Models...)
 	if strings.TrimSpace(global.DefaultCluster) != "" {
 		m.cluster = strings.TrimSpace(global.DefaultCluster)
 	}
@@ -1504,6 +1502,9 @@ func (m Model) applyGlobalConfigRuntime(global configschema.GlobalConfig) Model 
 	}
 	m.subagents = normalizeSubagentConfig(global.Subagents)
 	m.vision = normalizeVisionConfig(global.Vision)
+	if strings.TrimSpace(global.DefaultModel) != "" {
+		m, _ = m.switchModel(global.DefaultModel)
+	}
 	return m
 }
 
@@ -1790,7 +1791,7 @@ func (m Model) pendingToolCommand() string {
 }
 
 func isShellCommandTool(toolName string) bool {
-	return toolName == "shell/run" || toolName == metaToolExec
+	return toolName == "shell_run" || toolName == metaToolExec
 }
 
 func requiresExplicitConfirmation(toolName string) bool {
@@ -3346,7 +3347,7 @@ func (m Model) dispatchExec(streamID uint64, call llm.ToolCall) tea.Cmd {
 		if len(targets) == 0 {
 			return multiToolResultMsg{streamID: streamID, Call: call, Results: []nodeToolResult{{Node: "-", Output: "No nodes selected or node not found. Use /nodes to select target nodes.", Success: false}}}
 		}
-		return m.fanOutCallTool(streamID, call, targets, clients, "shell/run", func() json.RawMessage {
+		return m.fanOutCallTool(streamID, call, targets, clients, "shell_run", func() json.RawMessage {
 			b, _ := json.Marshal(map[string]string{"command": args.Command})
 			return b
 		}, parentCtx)
@@ -3992,7 +3993,7 @@ func (m Model) buildSystemPromptWithMemory() string {
 		"- After tool_search, use call_tool with a discovered specialized tool when it fits; follow its schema exactly.",
 		"- Use exec only as fallback when no suitable specialized tool exists, specialized output is insufficient, the user asked for shell, or shell risk review is intentional.",
 		"- For resource-changing operations, first use read-only tools when useful, then execute through a reviewed path. Do not bypass confirmations.",
-		"- Use local/fs/read, list, and stat for local inspection; use local/fs/write, patch, and delete for local changes with confirmation unless allowlisted.",
+		"- Use local_fs_read, local_fs_list, and local_fs_stat for local inspection; use local_fs_write, local_fs_patch, and local_fs_delete for local changes with confirmation unless allowlisted.",
 		"- If no specialized tool is relevant, say so before using or suggesting shell fallback.",
 	}, "\n"))
 	if m.subagents.Enabled {

@@ -30,7 +30,7 @@ func TestReviewerWhitelistBypass(t *testing.T) {
 		NodeWhitelists: map[string][]string{"node-01": {"cat /etc/hosts", "ls", "kubectl get"}},
 		Provider:       &stubProvider{},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat /etc/hosts"}`, []string{"node-01"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"cat /etc/hosts"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestReviewerWhitelistRequiresExactCommand(t *testing.T) {
 			response: `{"risk_level":"confirm","reason":"not exact"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat test.sh | bash"}`, []string{"node-01"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"cat test.sh | bash"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestReviewerBlacklistOverridesNodeWhitelist(t *testing.T) {
 			response: `{"risk_level":"confirm","reason":"pipe to bash"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"cat test.sh | bash"}`, []string{"node-01"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"cat test.sh | bash"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestReviewerWhitelistRequiresEveryTargetNode(t *testing.T) {
 			response: `{"risk_level":"confirm","reason":"node missing allowlist entry"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`, []string{"node-01", "node-02"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"uptime"}`, []string{"node-01", "node-02"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,20 +121,20 @@ func TestReviewerAlwaysAllowReadOnlyTools(t *testing.T) {
 		name  string
 		input string
 	}{
-		{"fs/read", `{"path":"/etc/hosts"}`},
-		{"fs/list", `{"path":"/var/log"}`},
-		{"fs/stat", `{"path":"/tmp/file"}`},
-		{"sys/cpu", `{}`},
-		{"sys/mem", `{}`},
-		{"sys/disk", `{}`},
-		{"svc/status", `{"name":"nginx"}`},
-		{"svc/list", `{}`},
-		{"log/read", `{"path":"/var/log/syslog"}`},
-		{"net/ping", `{"host":"10.0.1.1"}`},
-		{"docker/ps", `{}`},
-		{"docker/images", `{}`},
-		{"k8s/pods", `{}`},
-		{"k8s/logs", `{"pod":"nginx"}`},
+		{"fs_read", `{"path":"/etc/hosts"}`},
+		{"fs_list", `{"path":"/var/log"}`},
+		{"fs_stat", `{"path":"/tmp/file"}`},
+		{"sys_cpu", `{}`},
+		{"sys_mem", `{}`},
+		{"sys_disk", `{}`},
+		{"svc_status", `{"name":"nginx"}`},
+		{"svc_list", `{}`},
+		{"log_read", `{"path":"/var/log/syslog"}`},
+		{"net_ping", `{"host":"10.0.1.1"}`},
+		{"docker_ps", `{}`},
+		{"docker_images", `{}`},
+		{"k8s_pods", `{}`},
+		{"k8s_logs", `{"pod":"nginx"}`},
 	}
 	for _, tc := range readOnlyTools {
 		result, err := r.Review(context.Background(), tc.name, tc.input, nil)
@@ -150,7 +150,7 @@ func TestReviewerAlwaysAllowReadOnlyTools(t *testing.T) {
 func TestReviewerLocalFileReadAllowedAndWriteRequiresConfirm(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{})
 
-	read, err := r.Review(context.Background(), "local/fs/read", `{"path":"README.md"}`, nil)
+	read, err := r.Review(context.Background(), "local_fs_read", `{"path":"README.md"}`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestReviewerLocalFileReadAllowedAndWriteRequiresConfirm(t *testing.T) {
 		t.Fatalf("local read should be allowed, got %#v", read)
 	}
 
-	write, err := r.Review(context.Background(), "local/fs/write", `{"path":"README.md","content":"x"}`, nil)
+	write, err := r.Review(context.Background(), "local_fs_write", `{"path":"README.md","content":"x"}`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestReviewerLocalFileReadAllowedAndWriteRequiresConfirm(t *testing.T) {
 func TestReviewerAllowsWhitelistedLocalFileMutation(t *testing.T) {
 	r := NewReviewer(ReviewerConfig{LocalFileWhitelist: []string{"README.md"}})
 
-	result, err := r.Review(context.Background(), "local/fs/patch", `{"path":"README.md","old_text":"a","new_text":"b"}`, nil)
+	result, err := r.Review(context.Background(), "local_fs_patch", `{"path":"README.md","old_text":"a","new_text":"b"}`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestReviewerAllowsWhitelistedLocalFileMutation(t *testing.T) {
 	}
 
 	r.AddLocalFileWhitelist("docs/spec.md")
-	result, err = r.Review(context.Background(), "local/fs/delete", `{"path":"docs/spec.md"}`, nil)
+	result, err = r.Review(context.Background(), "local_fs_delete", `{"path":"docs/spec.md"}`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestReviewerModelAssessment(t *testing.T) {
 			response: `{"risk_level":"confirm","reason":"Restarts service causing downtime","suggestion":"Use rolling restart"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"systemctl restart nginx"}`, []string{"node-01"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"systemctl restart nginx"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestReviewerModelDeny(t *testing.T) {
 			response: `{"risk_level":"deny","reason":"Destructive operation"}`,
 		},
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"rm -rf /"}`, []string{"node-01"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"rm -rf /"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,11 +227,11 @@ func TestReviewerSessionCache(t *testing.T) {
 			response: `{"risk_level":"allow","reason":"ok"}`,
 		},
 	})
-	result1, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`, []string{"node-01"})
+	result1, err := r.Review(context.Background(), "shell_run", `{"command":"uptime"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result2, err := r.Review(context.Background(), "shell/run", `{"command":"uptime"}`, []string{"node-01"})
+	result2, err := r.Review(context.Background(), "shell_run", `{"command":"uptime"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestReviewerNoProviderDefaultsToConfirm(t *testing.T) {
 		NodeWhitelists: map[string][]string{"node-01": {"cat"}},
 		Provider:       nil,
 	})
-	result, err := r.Review(context.Background(), "shell/run", `{"command":"systemctl restart nginx"}`, []string{"node-01"})
+	result, err := r.Review(context.Background(), "shell_run", `{"command":"systemctl restart nginx"}`, []string{"node-01"})
 	if err != nil {
 		t.Fatal(err)
 	}

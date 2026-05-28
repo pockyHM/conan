@@ -13,10 +13,10 @@ import (
 	"github.com/pockyHM/conan/pkg/mcpproto"
 )
 
-// fs/read
+// fs_read
 type fsReadTool struct{}
 
-func (f *fsReadTool) Name() string { return "fs/read" }
+func (f *fsReadTool) Name() string { return "fs_read" }
 func (f *fsReadTool) Description() string {
 	return "Read text file contents. Binary and image files are refused. Output is capped at 64KiB unless a smaller max_bytes is provided."
 }
@@ -55,10 +55,10 @@ func (f *fsReadTool) Execute(ctx context.Context, input json.RawMessage) (*mcppr
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(out)}}, nil
 }
 
-// fs/write
+// fs_write
 type fsWriteTool struct{}
 
-func (f *fsWriteTool) Name() string { return "fs/write" }
+func (f *fsWriteTool) Name() string { return "fs_write" }
 func (f *fsWriteTool) Description() string {
 	return "Write text content to a file. Binary and image paths/content are refused."
 }
@@ -98,10 +98,10 @@ func (f *fsWriteTool) Execute(ctx context.Context, input json.RawMessage) (*mcpp
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("written successfully")}}, nil
 }
 
-// fs/edit
+// fs_edit
 type fsEditTool struct{}
 
-func (f *fsEditTool) Name() string { return "fs/edit" }
+func (f *fsEditTool) Name() string { return "fs_edit" }
 func (f *fsEditTool) Description() string {
 	return "Edit a text file. Use old_text/new_text for exact replacement, or start_line/end_line/content for 1-based inclusive line range replacement. Binary and image files are refused."
 }
@@ -161,10 +161,10 @@ func (f *fsEditTool) Execute(ctx context.Context, input json.RawMessage) (*mcppr
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("edited successfully")}}, nil
 }
 
-// fs/list
+// fs_list
 type fsListTool struct{}
 
-func (f *fsListTool) Name() string        { return "fs/list" }
+func (f *fsListTool) Name() string        { return "fs_list" }
 func (f *fsListTool) Description() string { return "List directory contents" }
 func (f *fsListTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Directory path"},"recursive":{"type":"boolean","description":"List recursively"}},"required":["path"]}`)
@@ -198,10 +198,10 @@ func (f *fsListTool) Execute(ctx context.Context, input json.RawMessage) (*mcppr
 	return &mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent(strings.Join(entries, "\n"))}}, nil
 }
 
-// fs/stat
+// fs_stat
 type fsStatTool struct{}
 
-func (f *fsStatTool) Name() string        { return "fs/stat" }
+func (f *fsStatTool) Name() string        { return "fs_stat" }
 func (f *fsStatTool) Description() string { return "Get file/directory metadata" }
 func (f *fsStatTool) InputSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path"}},"required":["path"]}`)

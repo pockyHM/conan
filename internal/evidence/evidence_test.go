@@ -14,14 +14,14 @@ func TestRecorderAppendsAndSortsEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec.Append(Event{Source: SourceTool, Timestamp: time.Date(2026, 5, 23, 10, 2, 0, 0, time.UTC), ToolName: "svc/status", Summary: "service ok"})
+	rec.Append(Event{Source: SourceTool, Timestamp: time.Date(2026, 5, 23, 10, 2, 0, 0, time.UTC), ToolName: "svc_status", Summary: "service ok"})
 	rec.Append(Event{Source: SourceUser, Timestamp: time.Date(2026, 5, 23, 10, 1, 0, 0, time.UTC), Summary: "check api"})
 	events := rec.Events()
 
 	if len(events) != 2 {
 		t.Fatalf("events = %d, want 2", len(events))
 	}
-	if events[0].Source != SourceUser || events[1].ToolName != "svc/status" {
+	if events[0].Source != SourceUser || events[1].ToolName != "svc_status" {
 		t.Fatalf("events not sorted: %#v", events)
 	}
 	if events[0].IncidentID != incident.ID {

@@ -28,13 +28,13 @@ func TestToolResultIsError(t *testing.T) {
 }
 
 func TestToolCallParamsUnmarshal(t *testing.T) {
-	raw := `{"name":"shell/run","arguments":{"command":"ls"}}`
+	raw := `{"name":"shell_run","arguments":{"command":"ls"}}`
 	var params ToolCallParams
 	if err := json.Unmarshal([]byte(raw), &params); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if params.Name != "shell/run" {
-		t.Errorf("name = %q, want shell/run", params.Name)
+	if params.Name != "shell_run" {
+		t.Errorf("name = %q, want shell_run", params.Name)
 	}
 }
 

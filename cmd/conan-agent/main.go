@@ -71,22 +71,22 @@ func loadConfig(path string) (*configschema.AgentConfig, error) {
 
 func registerAllTools(r *tools.Registry, cfg *configschema.AgentConfig) {
 	r.Register(&tools.ShellTool{})
-	registerToolsByName(r, tools.NewFsTools(), "fs/read", "fs/list", "fs/stat")
+	registerToolsByName(r, tools.NewFsTools(), "fs_read", "fs_list", "fs_stat")
 	for _, t := range tools.NewSysTools() {
 		r.Register(t)
 	}
-	registerToolsByName(r, tools.NewSvcTools(), "svc/list", "svc/status")
+	registerToolsByName(r, tools.NewSvcTools(), "svc_list", "svc_status")
 	for _, t := range tools.NewLogTools() {
 		r.Register(t)
 	}
-	registerToolsByName(r, tools.NewNetTools(), "net/ping", "net/traceroute", "net/portcheck")
+	registerToolsByName(r, tools.NewNetTools(), "net_ping", "net_traceroute", "net_portcheck")
 	for _, t := range tools.NewWebTools(webToolConfig(cfg.Web)) {
 		r.Register(t)
 	}
-	registerToolsByName(r, tools.NewK8sTools(), "k8s/pods", "k8s/logs", "k8s/events", "k8s/describe")
-	registerToolsByName(r, tools.NewPkgTools(), "pkg/list", "pkg/search")
-	registerToolsByName(r, tools.NewCronTools(), "cron/list", "cron/show")
-	registerToolsByName(r, tools.NewDockerTools(), "docker/ps", "docker/images", "docker/logs")
+	registerToolsByName(r, tools.NewK8sTools(), "k8s_pods", "k8s_logs", "k8s_events", "k8s_describe")
+	registerToolsByName(r, tools.NewPkgTools(), "pkg_list", "pkg_search")
+	registerToolsByName(r, tools.NewCronTools(), "cron_list", "cron_show")
+	registerToolsByName(r, tools.NewDockerTools(), "docker_ps", "docker_images", "docker_logs")
 }
 
 func registerToolsByName(r *tools.Registry, candidates []tools.Tool, names ...string) {
