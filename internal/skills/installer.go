@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -51,6 +52,7 @@ type InstallRequest struct {
 	Source  RepoSource
 	Scope   string
 	Cluster string
+	Names   []string
 }
 
 type RemoveRequest struct {
@@ -144,6 +146,13 @@ func (i Installer) Install(ctx context.Context, req InstallRequest) ([]Skill, er
 	if len(skills) == 0 {
 		return nil, fmt.Errorf("no valid skills found under %s", skillRoot)
 	}
+	skills, err = filterSkillsByName(skills, req.Names)
+	if err != nil {
+		return nil, err
+	}
+	if len(skills) == 0 {
+		return nil, fmt.Errorf("no skills selected")
+	}
 
 	if err := replaceDir(cacheAbs, tmpCheckout); err != nil {
 		return nil, err
@@ -187,6 +196,50 @@ func (i Installer) Install(ctx context.Context, req InstallRequest) ([]Skill, er
 	}
 	if err := SaveRegistry(regPath, reg); err != nil {
 		return nil, err
+	}
+	return skills, nil
+}
+
+func (i Installer) Discover(ctx context.Context, source RepoSource) ([]Skill, error) {
+	if source.HostPath == "" || source.CloneURL == "" {
+		return nil, fmt.Errorf("source is required")
+	}
+	hostPath, err := validateGitHubHostPath(source.HostPath)
+	if err != nil {
+		return nil, err
+	}
+	if source.CloneURL != "https://"+hostPath+".git" {
+		return nil, fmt.Errorf("invalid clone URL %q for %s", source.CloneURL, hostPath)
+	}
+	skillRoot, err := cleanRelativePath(source.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	fetcher := i.Fetcher
+	if fetcher == nil {
+		fetcher = GitFetcher{}
+	}
+
+	tmpRoot := filepath.Join(i.Home, "skills", "tmp")
+	if err := os.MkdirAll(tmpRoot, 0755); err != nil {
+		return nil, err
+	}
+	tmpCheckout, err := os.MkdirTemp(tmpRoot, "discover-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpCheckout)
+
+	if err := fetcher.Fetch(ctx, source, tmpCheckout); err != nil {
+		return nil, err
+	}
+	skills, err := discoverSkills(tmpCheckout, skillRoot, i.MaxSkillFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(skills) == 0 {
+		return nil, fmt.Errorf("no valid skills found under %s", skillRoot)
 	}
 	return skills, nil
 }
@@ -317,6 +370,39 @@ func upsertEntry(entries []RegistryEntry, next RegistryEntry) []RegistryEntry {
 		}
 	}
 	return append(entries, next)
+}
+
+func filterSkillsByName(discovered []Skill, names []string) ([]Skill, error) {
+	if len(names) == 0 {
+		return discovered, nil
+	}
+	wanted := make(map[string]bool, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		wanted[name] = true
+	}
+	if len(wanted) == 0 {
+		return nil, fmt.Errorf("no skills selected")
+	}
+	var result []Skill
+	for _, skill := range discovered {
+		if wanted[skill.Name] {
+			result = append(result, skill)
+			delete(wanted, skill.Name)
+		}
+	}
+	if len(wanted) > 0 {
+		var missing []string
+		for name := range wanted {
+			missing = append(missing, name)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("selected skill(s) not found: %s", strings.Join(missing, ", "))
+	}
+	return result, nil
 }
 
 func sanitizeRef(ref string) string {

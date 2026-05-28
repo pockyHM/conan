@@ -36,12 +36,20 @@ var runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Mode
 }
 
 func teaProgramOptions(in io.Reader, out io.Writer) []tea.ProgramOption {
-	return []tea.ProgramOption{
+	options := []tea.ProgramOption{
 		tea.WithInput(in),
 		tea.WithOutput(out),
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	}
+	if tuiMouseEnabled() {
+		options = append(options, tea.WithMouseCellMotion())
+	}
+	return options
+}
+
+func tuiMouseEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("CONAN_TUI_MOUSE")))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 type conversationSaver interface {
@@ -550,7 +558,9 @@ func newRootCommand() *cobra.Command {
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not open memory store: %v\n", err)
 		}
-		memory.EnsureMemoryDir(filepath.Join(loader.Home(), "memory", "memory"))
+		if err := memory.EnsureMemoryDir(filepath.Join(loader.Home(), "memory", "memory")); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not initialize memory directory: %v\n", err)
+		}
 
 		conv := conversation.New(selectedCluster, nil, modelName)
 		model := tui.NewModel(tui.ModelConfig{
@@ -573,6 +583,7 @@ func newRootCommand() *cobra.Command {
 			ConfigHome:         loader.Home(),
 			IncidentDir:        filepath.Join(loader.Home(), "memory", "memory", "incidents"),
 			MemoryStore:        memStore,
+			Memory:             global.Memory,
 			Subagents:          global.Subagents,
 			LocalWorkspaceRoot: workspaceRoot,
 			Skills:             visibleSkills,

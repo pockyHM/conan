@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +205,32 @@ func TestMemorySearchIncludesMarkdownResults(t *testing.T) {
 	}
 }
 
+func TestMemoryReadCapsLargeMarkdownOutput(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(memoryRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "MEMORY.md"), []byte(strings.Repeat("x", memoryToolReadLimitBytes+1024)), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	read := HandleTool(store, "conv1", "memory_read", json.RawMessage(`{"path":"MEMORY.md"}`))
+	if !read.Success {
+		t.Fatalf("read failed: %s", read.Output)
+	}
+	if !strings.Contains(read.Output, "[truncated]") {
+		t.Fatalf("large memory read should be truncated")
+	}
+	if len(read.Output) > memoryToolReadLimitBytes+len("\n[truncated]") {
+		t.Fatalf("large memory read output len = %d, want bounded", len(read.Output))
+	}
+}
+
 func TestMemorySearchAndReadRunbookMarkdown(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -304,6 +331,55 @@ func TestMemorySearchEnforcesCombinedLimit(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(result.Output), "\n")
 	if len(lines) > 2 {
 		t.Fatalf("search returned %d lines, want at most 2:\n%s", len(lines), result.Output)
+	}
+}
+
+func TestMemorySearchRejectsEmptyQuery(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	result := HandleTool(store, "conv1", "memory_search", json.RawMessage(`{"query":"   ","limit":5}`))
+	if result.Success {
+		t.Fatalf("empty memory_search query should fail: %s", result.Output)
+	}
+}
+
+func TestMemorySearchCapsExcessiveLimit(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for i := 0; i < maxMemorySearchLimit+5; i++ {
+		args, _ := json.Marshal(map[string]string{
+			"category": "event",
+			"title":    fmt.Sprintf("Limit cap %02d", i),
+			"content":  "bounded-search-query",
+		})
+		result := HandleTool(store, "conv1", "memory_save", args)
+		if !result.Success {
+			t.Fatalf("save failed: %s", result.Output)
+		}
+	}
+
+	result := HandleTool(store, "conv1", "memory_search", json.RawMessage(`{"query":"bounded-search-query","limit":999}`))
+	if !result.Success {
+		t.Fatalf("search failed: %s", result.Output)
+	}
+	lines := strings.Split(strings.TrimSpace(result.Output), "\n")
+	if len(lines) != maxMemorySearchLimit {
+		t.Fatalf("search returned %d lines, want cap %d:\n%s", len(lines), maxMemorySearchLimit, result.Output)
+	}
+}
+
+func TestHandleToolFailsWhenStoreUnavailable(t *testing.T) {
+	result := HandleTool(nil, "", "memory_search", json.RawMessage(`{"query":"nginx"}`))
+	if result.Success || !strings.Contains(result.Output, "not available") {
+		t.Fatalf("nil memory store result = %#v, want unavailable failure", result)
 	}
 }
 

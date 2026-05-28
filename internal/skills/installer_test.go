@@ -104,6 +104,66 @@ func TestInstallDiscoversSkillsAndWritesGlobalRegistry(t *testing.T) {
 	}
 }
 
+func TestDiscoverSkillsDoesNotWriteRegistry(t *testing.T) {
+	home := t.TempDir()
+	fixture := t.TempDir()
+	writeSkill(t, fixture, "skills", "one", "first")
+	writeSkill(t, fixture, "skills", "two", "second")
+	installer := Installer{Home: home, Fetcher: fixtureFetcher{src: fixture}, MaxSkillFileBytes: 6000}
+	src, err := NormalizeGitHubSource("org/repo", "main", "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	discovered, err := installer.Discover(context.Background(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(discovered) != 2 {
+		t.Fatalf("discovered = %#v, want 2 skills", discovered)
+	}
+	reg, err := LoadRegistry(GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.Skills) != 0 {
+		t.Fatalf("registry = %#v, want unchanged", reg)
+	}
+}
+
+func TestInstallSelectedSkillsOnlyWritesSelectedRegistryEntries(t *testing.T) {
+	home := t.TempDir()
+	fixture := t.TempDir()
+	writeSkill(t, fixture, "skills", "one", "first")
+	writeSkill(t, fixture, "skills", "two", "second")
+	installer := Installer{Home: home, Fetcher: fixtureFetcher{src: fixture}, MaxSkillFileBytes: 6000}
+	src, err := NormalizeGitHubSource("org/repo", "main", "skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	installed, err := installer.Install(context.Background(), InstallRequest{
+		Source: src,
+		Scope:  ScopeGlobal,
+		Names:  []string{"two"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(installed) != 1 || installed[0].Name != "two" {
+		t.Fatalf("installed = %#v, want only two", installed)
+	}
+	reg, err := LoadRegistry(GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.Skills) != 1 || reg.Skills[0].Name != "two" {
+		t.Fatalf("registry = %#v, want only two", reg)
+	}
+}
+
 func TestInstallRejectsMaliciousHostPathBeforeSideEffects(t *testing.T) {
 	home := t.TempDir()
 	outside := filepath.Join(home, "outside")

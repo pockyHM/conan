@@ -114,14 +114,63 @@ func (p *stubVisionProvider) DescribeImages(_ context.Context, req *llm.VisionRe
 }
 
 type stubMemoryExtractor struct {
-	candidates []memory.MemoryCandidate
-	err        error
-	inputs     []MemoryExtractionInput
+	candidates  []memory.MemoryCandidate
+	err         error
+	inputs      []MemoryExtractionInput
+	deadlines   []time.Time
+	hasDeadline []bool
 }
 
-func (s *stubMemoryExtractor) ExtractMemory(_ context.Context, input MemoryExtractionInput) ([]memory.MemoryCandidate, error) {
+func (s *stubMemoryExtractor) ExtractMemory(ctx context.Context, input MemoryExtractionInput) ([]memory.MemoryCandidate, error) {
 	s.inputs = append(s.inputs, input)
+	deadline, ok := ctx.Deadline()
+	s.deadlines = append(s.deadlines, deadline)
+	s.hasDeadline = append(s.hasDeadline, ok)
 	return s.candidates, s.err
+}
+
+type tuiFixtureFetcher struct {
+	src string
+}
+
+func (f tuiFixtureFetcher) Fetch(_ context.Context, _ skills.RepoSource, dest string) error {
+	return copyDirForTUITest(f.src, dest)
+}
+
+func copyDirForTUITest(src string, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0644)
+	})
+}
+
+func writeTUISkill(t *testing.T, root string, name string, description string, body string) {
+	t.Helper()
+	path := filepath.Join(root, "skills", name, "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n%s", name, description, body)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestInitialModelView(t *testing.T) {
@@ -719,6 +768,9 @@ func TestSlashSkillsListsVisibleSkills(t *testing.T) {
 	if strings.Contains(model.status, "Diagnose Kubernetes failures.") {
 		t.Fatalf("status should be concise, got %q", model.status)
 	}
+	if model.mode != modeSkillsManage {
+		t.Fatalf("/skills mode = %v, want skills management", model.mode)
+	}
 }
 
 func TestSlashSkillInjectsSkillForNextRequest(t *testing.T) {
@@ -849,6 +901,208 @@ func TestSlashSkillsRemoveUpdatesVisibleSkills(t *testing.T) {
 	}
 }
 
+func TestSlashSkillsManagerRemovesSelectedSkill(t *testing.T) {
+	home := t.TempDir()
+	reg := skills.Registry{Skills: []skills.RegistryEntry{{
+		Name: "k8s-debug", Description: "Diagnose Kubernetes failures.", Source: "github.com/acme/ops", Ref: "main", Path: "skills/k8s-debug", CachePath: "skills/repos/github.com/acme/ops/main/skills/k8s-debug",
+	}}}
+	if err := skills.SaveRegistry(skills.GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:      "prod",
+		ConfigHome:   home,
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxVisibleSkills: 50, MaxSkillChars: 6000, IndexTokenBudget: 800},
+	})
+
+	model.input = "/skills"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("/skills returned command %#v, want immediate management view", cmd)
+	}
+	if model.mode != modeSkillsManage || !strings.Contains(model.View(), "k8s-debug") {
+		t.Fatalf("skills manager not opened correctly; mode=%v view=%s", model.mode, model.View())
+	}
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("first uninstall key should only ask for confirmation, got cmd %#v", cmd)
+	}
+	if model.pendingSkillRemove.entry.Name != "k8s-debug" || !strings.Contains(model.status, "Confirm uninstall") {
+		t.Fatalf("pending remove=%#v status=%q, want confirmation", model.pendingSkillRemove, model.status)
+	}
+	got, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 1 {
+		t.Fatalf("registry changed before confirmation: %#v", got)
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("confirmed uninstall should return management command")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	got, err = skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 0 {
+		t.Fatalf("registry = %#v, want empty", got)
+	}
+	if len(model.skills) != 0 || !strings.Contains(model.status, "Removed skill") {
+		t.Fatalf("status=%q skills=%#v, want removed and refreshed", model.status, model.skills)
+	}
+	if model.mode != modeSkillsManage {
+		t.Fatalf("mode = %v, want to stay in skills manager after uninstall", model.mode)
+	}
+	if len(model.skillsManager.entries) != 0 {
+		t.Fatalf("skills manager entries = %#v, want removed skill gone", model.skillsManager.entries)
+	}
+}
+
+func TestSlashSkillsManagerUninstallConfirmationCanCancel(t *testing.T) {
+	home := t.TempDir()
+	reg := skills.Registry{Skills: []skills.RegistryEntry{{
+		Name: "k8s-debug", Description: "Diagnose Kubernetes failures.", Source: "github.com/acme/ops", Ref: "main", Path: "skills/k8s-debug", CachePath: "skills/repos/github.com/acme/ops/main/skills/k8s-debug",
+	}}}
+	if err := skills.SaveRegistry(skills.GlobalRegistryPath(home), reg); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:      "prod",
+		ConfigHome:   home,
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxVisibleSkills: 50, MaxSkillChars: 6000, IndexTokenBudget: 800},
+	})
+	model.input = "/skills"
+	next, _ := model.submit()
+	model = next.(Model)
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("uninstall prompt returned cmd %#v", cmd)
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("cancel returned cmd %#v", cmd)
+	}
+
+	got, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skills) != 1 {
+		t.Fatalf("registry = %#v, want skill preserved after cancel", got)
+	}
+	if model.mode != modeSkillsManage || model.pendingSkillRemove.entry.Name != "" {
+		t.Fatalf("mode=%v pending=%#v, want manager with no pending remove", model.mode, model.pendingSkillRemove)
+	}
+}
+
+func TestSlashSkillsNameInjectsSkillForNextRequest(t *testing.T) {
+	provider := &captureStreamProvider{}
+	model := NewModel(ModelConfig{
+		Cluster:  "prod",
+		Provider: provider,
+		Conv:     conversation.New("prod", nil, "test"),
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+			Body:        "Skills namespace shortcut body.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true, MaxSkillChars: 6000},
+	})
+
+	model.input = "/skills k8s-debug pods failing"
+	_, cmd := model.submit()
+	if cmd == nil {
+		t.Fatal("/skills <name> should start a model request")
+	}
+	execMaybeBatch(t, cmd)
+
+	if provider.req == nil {
+		t.Fatal("provider request was not captured")
+	}
+	var combined strings.Builder
+	for _, msg := range provider.req.Messages {
+		combined.WriteString(msg.Content)
+		combined.WriteString("\n")
+	}
+	if got := combined.String(); !strings.Contains(got, "Skills namespace shortcut body.") || !strings.Contains(got, "pods failing") {
+		t.Fatalf("request messages missing /skills shortcut content:\n%s", got)
+	}
+}
+
+func TestSlashSkillsInstallOpensSelectionAndInstallsCheckedSkills(t *testing.T) {
+	home := t.TempDir()
+	fixture := t.TempDir()
+	writeTUISkill(t, fixture, "one", "first skill", "first body")
+	writeTUISkill(t, fixture, "two", "second skill", "second body")
+	model := NewModel(ModelConfig{
+		Cluster:       "prod",
+		ConfigHome:    home,
+		SkillsFetcher: tuiFixtureFetcher{src: fixture},
+		SkillsConfig:  configschema.SkillsConfig{Enabled: true, MaxVisibleSkills: 50, MaxSkillChars: 6000, IndexTokenBudget: 800},
+	})
+
+	model.input = "/skills install org/repo --global"
+	next, cmd := model.submit()
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("/skills install should discover skills before installing")
+	}
+	msg := execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	if model.mode != modeSkillInstallSelect {
+		t.Fatalf("mode = %v, want install selection", model.mode)
+	}
+	if got := model.skillInstall.SelectedNames(); strings.Join(got, ",") != "one,two" {
+		t.Fatalf("default selected names = %#v, want all skills selected", got)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	if got := model.skillInstall.SelectedNames(); strings.Join(got, ",") != "one" {
+		t.Fatalf("selected names after toggle = %#v, want only one", got)
+	}
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("confirming install selection should return install command")
+	}
+	msg = execCmd(t, cmd)
+	next, _ = model.Update(msg)
+	model = next.(Model)
+
+	reg, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.Skills) != 1 || reg.Skills[0].Name != "one" {
+		t.Fatalf("registry = %#v, want only selected skill one", reg)
+	}
+	if len(model.skills) != 1 || model.skills[0].Name != "one" {
+		t.Fatalf("visible skills = %#v, want selected skill one", model.skills)
+	}
+	if !strings.Contains(model.status, "Installed 1") {
+		t.Fatalf("status = %q, want installed count", model.status)
+	}
+}
+
 func TestSkillShortcutInjectsSkillForNextRequest(t *testing.T) {
 	provider := &captureStreamProvider{}
 	model := NewModel(ModelConfig{
@@ -882,6 +1136,48 @@ func TestSkillShortcutInjectsSkillForNextRequest(t *testing.T) {
 	}
 	if got := combined.String(); !strings.Contains(got, "Shortcut skill body.") || !strings.Contains(got, "pods failing") {
 		t.Fatalf("request messages missing shortcut skill content:\n%s", got)
+	}
+}
+
+func TestSlashAutocompleteIncludesVisibleSkills(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+			Scope:       skills.ScopeCluster,
+			Cluster:     "prod",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: true},
+	})
+
+	model = typeRunes(t, model, "/k8")
+
+	if !model.ac.visible {
+		t.Fatal("autocomplete should be visible for skill shortcut prefix")
+	}
+	if got := model.ac.completion(); got != "/k8s-debug " {
+		t.Fatalf("completion = %q, want /k8s-debug", got)
+	}
+	if view := model.ac.View(80); !strings.Contains(view, "/k8s-debug") || !strings.Contains(view, "Diagnose Kubernetes failures.") {
+		t.Fatalf("autocomplete view missing skill:\n%s", view)
+	}
+}
+
+func TestSlashAutocompleteDoesNotIncludeSkillsWhenDisabled(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster: "prod",
+		Skills: []skills.Skill{{
+			Name:        "k8s-debug",
+			Description: "Diagnose Kubernetes failures.",
+		}},
+		SkillsConfig: configschema.SkillsConfig{Enabled: false},
+	})
+
+	model = typeRunes(t, model, "/k8")
+
+	if model.ac.View(80) != "" {
+		t.Fatalf("disabled skill should not be in autocomplete:\n%s", model.ac.View(80))
 	}
 }
 
@@ -1136,6 +1432,47 @@ func TestSystemPromptBoundsMarkdownAndSQLiteMemory(t *testing.T) {
 	}
 }
 
+func TestSystemPromptUsesConfiguredMemoryBudgets(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	memoryRoot := filepath.Join(store.Dir(), "memory")
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "rules"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(memoryRoot, "clusters"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "rules", "ops.md"), []byte(strings.Repeat("rules-prefix ", 40)+"RULES_TAIL"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memoryRoot, "clusters", "production.md"), []byte(strings.Repeat("cluster-prefix ", 40)+"CLUSTER_TAIL"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := NewModel(ModelConfig{
+		Cluster:     "production",
+		Model:       "claude-sonnet",
+		MemoryStore: store,
+		Memory: configschema.MemoryConfig{
+			RulesTokenBudget:     80,
+			KnowledgeTokenBudget: 90,
+		},
+	})
+
+	prompt := model.buildSystemPromptWithMemory()
+
+	for _, tail := range []string{"RULES_TAIL", "CLUSTER_TAIL"} {
+		if strings.Contains(prompt, tail) {
+			t.Fatalf("system prompt ignored configured memory budget and included %q:\n%s", tail, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "[truncated]") {
+		t.Fatalf("system prompt should mark budgeted memory as truncated:\n%s", prompt)
+	}
+}
+
 func TestSystemPromptSkipsSQLiteMemoryDuplicatedInMarkdown(t *testing.T) {
 	store, err := memory.Open(t.TempDir())
 	if err != nil {
@@ -1359,6 +1696,31 @@ func TestPostTurnExtractionWritesIncidentNote(t *testing.T) {
 		if !strings.Contains(note, want) {
 			t.Fatalf("incident note missing %q:\n%s", want, note)
 		}
+	}
+}
+
+func TestPostTurnExtractionUsesBoundedContext(t *testing.T) {
+	store, err := memory.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	extractor := &stubMemoryExtractor{}
+	model := NewModel(ModelConfig{
+		Cluster:         "production",
+		Model:           "claude-sonnet",
+		MemoryStore:     store,
+		MemoryExtractor: extractor,
+	})
+
+	model.runMemoryExtraction("api oom", "Root cause was cache pressure.")
+
+	if len(extractor.hasDeadline) != 1 || !extractor.hasDeadline[0] {
+		t.Fatalf("memory extractor context deadline missing: %#v", extractor.hasDeadline)
+	}
+	remaining := time.Until(extractor.deadlines[0])
+	if remaining <= 0 || remaining > memoryExtractionTimeout {
+		t.Fatalf("memory extractor deadline remaining = %v, want within %v", remaining, memoryExtractionTimeout)
 	}
 }
 
@@ -2153,7 +2515,13 @@ func TestCompactCommandReplacesContextWithSummaryTailAndArchivesFullHistory(t *t
 	if cmd == nil {
 		t.Fatal("compact command should return a command")
 	}
-	msg := execCmd(t, cmd)
+	if !model.compacting {
+		t.Fatal("compact should show progress while running")
+	}
+	if !strings.Contains(model.status, "Compacting context") {
+		t.Fatalf("compact status = %q, want progress", model.status)
+	}
+	msg := compactResultFromCmd(t, cmd)
 	nextModel, _ := model.Update(msg)
 	model = nextModel.(Model)
 
@@ -2182,6 +2550,13 @@ func TestCompactCommandReplacesContextWithSummaryTailAndArchivesFullHistory(t *t
 	if !strings.Contains(msgText, "new assistant reply") {
 		t.Fatalf("compacted context should keep recent tail: %s", msgText)
 	}
+	view := model.View()
+	if strings.Contains(view, "Previous conversation compacted") || strings.Contains(view, "deployment design is approved") {
+		t.Fatalf("view should not display compacted context:\n%s", view)
+	}
+	if !strings.Contains(view, "Compact complete") {
+		t.Fatalf("view missing compact completion:\n%s", view)
+	}
 
 	archives, err := filepath.Glob(filepath.Join(store.Dir(), "archives", conv.ID(), "compact-*.json"))
 	if err != nil {
@@ -2208,6 +2583,123 @@ func TestCompactCommandReplacesContextWithSummaryTailAndArchivesFullHistory(t *t
 	}
 	if !strings.Contains(rec.Messages, "Previous conversation compacted") {
 		t.Fatalf("saved resumable conversation missing summary: %s", rec.Messages)
+	}
+}
+
+func TestContextLimitLookupIsCaseInsensitiveAndUsesConfiguredModelID(t *testing.T) {
+	if limit, ok := lookupModelContextLimit("GPT-4O"); !ok || limit != 128000 {
+		t.Fatalf("lookupModelContextLimit(GPT-4O) = %d, %v; want 128000, true", limit, ok)
+	}
+	if limit, ok := lookupModelContextLimit("GPT-5.5"); !ok || limit != 1050000 {
+		t.Fatalf("lookupModelContextLimit(GPT-5.5) = %d, %v; want 1050000, true", limit, ok)
+	}
+
+	model := NewModel(ModelConfig{
+		Model: "alias",
+		ModelConfigs: []configschema.ModelConfig{
+			{Name: "alias", Model: "gPt-4O"},
+		},
+	})
+	meter := model.currentContextMeter()
+	if !meter.Known || meter.Limit != 128000 {
+		t.Fatalf("currentContextMeter() = %+v, want known 128000", meter)
+	}
+}
+
+func TestContextMeterRendersKnownAndUnknownLimits(t *testing.T) {
+	known := renderContextMeter(contextMeter{Used: 1200, Limit: 128000, Known: true}, uiLanguageEnglish, 80)
+	if !strings.Contains(known, "Context 1,200/128,000") {
+		t.Fatalf("known meter missing context counts:\n%s", known)
+	}
+	if !strings.Contains(known, "(0%)") {
+		t.Fatalf("known meter missing percent:\n%s", known)
+	}
+	if !strings.Contains(known, "[") {
+		t.Fatalf("known meter missing progress bar:\n%s", known)
+	}
+
+	unknown := renderContextMeter(contextMeter{Used: 1200, Known: false}, uiLanguageEnglish, 80)
+	if !strings.Contains(unknown, "Context 1,200/unknown context limit") {
+		t.Fatalf("unknown meter missing label:\n%s", unknown)
+	}
+}
+
+func TestViewRendersFooterMetaBelowInputBox(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "gpt-4o", Conv: conversation.New("test", nil, "gpt-4o")})
+	model.width = 80
+	model.input = "hello"
+
+	view := model.View()
+	contextIndex := strings.LastIndex(view, "Context ")
+	modelIndex := strings.LastIndex(view, "gpt-4o")
+	clusterIndex := strings.LastIndex(view, "test")
+	borderIndex := strings.LastIndex(view, "╯")
+	if contextIndex < 0 {
+		t.Fatalf("view missing context meter:\n%s", view)
+	}
+	if modelIndex < 0 || clusterIndex < 0 || !strings.Contains(view, " · ") {
+		t.Fatalf("view missing cluster/model footer meta:\n%s", view)
+	}
+	if strings.Contains(view, "Cluster test") || strings.Contains(view, "Model gpt-4o") {
+		t.Fatalf("footer meta should not render Cluster/Model labels:\n%s", view)
+	}
+	if borderIndex < 0 || contextIndex < borderIndex || modelIndex < borderIndex || clusterIndex < borderIndex {
+		t.Fatalf("footer meta should render after input box border:\n%s", view)
+	}
+}
+
+func TestSubmitAutoCompactsAtKnownContextThresholdThenStartsStream(t *testing.T) {
+	conv := conversation.New("test", nil, "gpt-4o")
+	large := strings.Repeat("a", 120000)
+	conv.AddUser(large)
+	conv.AddAssistant(large)
+	conv.AddUser(large)
+	conv.AddAssistant(large)
+	conv.AddUser(large)
+
+	provider := &compactCaptureProvider{content: "compressed history"}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "gpt-4o", Provider: provider, Conv: conv})
+
+	next, cmd := model.submitMessage("new request", nil)
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("submit should start auto compact command")
+	}
+	if !model.compacting || !model.autoCompactResume {
+		t.Fatalf("model compacting=%v autoCompactResume=%v, want true true", model.compacting, model.autoCompactResume)
+	}
+
+	result := compactResultFromCmd(t, cmd)
+	nextModel, streamCmd := model.Update(result)
+	model = nextModel.(Model)
+	if streamCmd == nil {
+		t.Fatal("auto compact result should start stream")
+	}
+	if !model.streaming {
+		t.Fatal("model should be streaming after auto compact")
+	}
+	msgs := model.conv.Messages()
+	if len(msgs) == 0 || !strings.Contains(msgs[0].Content, "compressed history") {
+		t.Fatalf("conversation was not compacted before streaming: %#v", msgs)
+	}
+}
+
+func TestContextLimitErrorTriggersAutoCompactForUnknownModel(t *testing.T) {
+	conv := conversation.New("test", nil, "custom-model")
+	for i := 0; i < compactTailMessages+1; i++ {
+		conv.AddUser(fmt.Sprintf("message %d", i))
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "custom-model", Provider: &compactCaptureProvider{}, Conv: conv})
+	model.streaming = true
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(streamReadyMsg{streamID: 1, err: errors.New("maximum context length exceeded")})
+	model = next.(Model)
+	if cmd == nil {
+		t.Fatal("context limit error should start auto compact")
+	}
+	if !model.compacting || !model.autoCompactResume {
+		t.Fatalf("model compacting=%v autoCompactResume=%v, want true true", model.compacting, model.autoCompactResume)
 	}
 }
 
@@ -4760,6 +5252,26 @@ func execMaybeBatch(t *testing.T, cmd tea.Cmd) {
 	for _, c := range batch {
 		execCmd(t, c)
 	}
+}
+
+func compactResultFromCmd(t *testing.T, cmd tea.Cmd) compactResultMsg {
+	t.Helper()
+	msg := execCmd(t, cmd)
+	if result, ok := msg.(compactResultMsg); ok {
+		return result
+	}
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("compact command returned %T, want compactResultMsg or tea.BatchMsg", msg)
+	}
+	for _, c := range batch {
+		next := execCmd(t, c)
+		if result, ok := next.(compactResultMsg); ok {
+			return result
+		}
+	}
+	t.Fatal("compact batch did not produce compactResultMsg")
+	return compactResultMsg{}
 }
 
 func writeTestFile(t *testing.T, path string, content string) {

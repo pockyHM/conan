@@ -55,6 +55,16 @@ var (
 
 	headerSepStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
+
+	footerModelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("14")).
+				Bold(true)
+
+	footerClusterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220"))
+
+	footerMetaSepStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
 )
 
 var mdRenderer *glamour.TermRenderer
@@ -111,6 +121,44 @@ func renderThinkingMeta(elapsed time.Duration, lang uiLanguage) string {
 	return label + "  " + lang.tr("Esc to interrupt", "Esc 中断")
 }
 
+func renderCompactProgress(frame int, startedAt time.Time, lang uiLanguage) string {
+	icon := "◦"
+	if len(thinkingFrames) > 0 {
+		icon = thinkingFrames[frame%len(thinkingFrames)]
+	}
+	percent := 12 + frame*6
+	if percent > 92 {
+		percent = 92
+	}
+	stage := lang.tr("Summarizing context", "正在总结上下文")
+	switch {
+	case frame < 2:
+		stage = lang.tr("Preparing messages", "正在准备消息")
+	case frame >= 8:
+		stage = lang.tr("Writing compacted state", "正在写入压缩状态")
+	}
+	bar := renderProgressBar(percent, 18)
+	elapsed := formatElapsed(time.Since(startedAt).Round(100 * time.Millisecond))
+	if elapsed == "" {
+		return fmt.Sprintf("%s %s %s %d%% · %s", icon, lang.tr("Compacting context", "正在压缩上下文"), bar, percent, stage)
+	}
+	return fmt.Sprintf("%s %s %s %d%% · %s · %s", icon, lang.tr("Compacting context", "正在压缩上下文"), bar, percent, stage, elapsed)
+}
+
+func renderProgressBar(percent int, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := percent * width / 100
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
+}
+
 func renderStreamingMsg(content string) string {
 	return renderMarkdown(content) + "▌"
 }
@@ -147,7 +195,57 @@ func renderInputBox(input string, width int, lang uiLanguage) string {
 	if width > 0 {
 		style = style.Width(max(width-2, 1))
 	}
-	return style.Render(inputPromptStyle.Render("❯ ") + compactInputForDisplay(input, lang) + "█")
+	content := inputPromptStyle.Render("❯ ") + compactInputForDisplay(input, lang) + "█"
+	return style.Render(content)
+}
+
+func renderContextMeter(meter contextMeter, lang uiLanguage, width int) string {
+	return renderFooterMeta("", meter, lang, width)
+}
+
+func renderModelClusterMeta(model string, cluster string) string {
+	model = strings.TrimSpace(model)
+	cluster = strings.TrimSpace(cluster)
+	switch {
+	case model == "" && cluster == "":
+		return ""
+	case model == "":
+		return footerClusterStyle.Render(cluster)
+	case cluster == "":
+		return footerModelStyle.Render(model)
+	default:
+		return footerModelStyle.Render(model) + footerMetaSepStyle.Render(" · ") + footerClusterStyle.Render(cluster)
+	}
+}
+
+func renderFooterMeta(left string, meter contextMeter, lang uiLanguage, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	label := lang.tr("Context", "上下文")
+	var right string
+	if meter.Known && meter.Limit > 0 {
+		percent := contextMeterPercent(meter)
+		right = fmt.Sprintf("%s %s/%s (%d%%) %s", label, formatContextCount(meter.Used), formatContextCount(meter.Limit), percent, renderProgressBar(percent, 10))
+	} else {
+		right = fmt.Sprintf("%s %s/unknown context limit", label, formatContextCount(meter.Used))
+	}
+	left = strings.TrimSpace(left)
+	if left == "" {
+		return lipgloss.PlaceHorizontal(width, lipgloss.Right, truncateDisplay(right, width))
+	}
+	left = truncateDisplay(left, width)
+	right = truncateDisplay(right, width)
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 2 {
+		leftWidth := max(width-lipgloss.Width(right)-2, 0)
+		left = truncateDisplay(left, leftWidth)
+		gap = width - lipgloss.Width(left) - lipgloss.Width(right)
+	}
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func compactInputForDisplay(input string, lang uiLanguage) string {

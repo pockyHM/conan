@@ -68,10 +68,12 @@ type ModelConfig struct {
 	Skills             []skills.Skill
 	SkillsConfig       configschema.SkillsConfig
 	SkillWarnings      []string
+	SkillsFetcher      skills.RepoFetcher
 	IncidentDir        string
 
 	MemoryStore     *memory.Store
 	MemoryExtractor MemoryExtractor
+	Memory          configschema.MemoryConfig
 	Subagents       configschema.SubagentConfig
 }
 
@@ -111,6 +113,8 @@ const (
 	modeLangSelect
 	modeModelSelect
 	modeConfig
+	modeSkillsManage
+	modeSkillInstallSelect
 )
 
 type pingResultMsg struct {
@@ -136,8 +140,10 @@ type nodeAddFormResultMsg struct {
 
 const toolOutputPreviewLines = 4
 const streamEventTimeout = 60 * time.Second
+const compactTickInterval = 250 * time.Millisecond
 const markdownPromptMemoryLimit = 3700
 const sqlitePromptMemoryContentLimit = 900
+const memoryExtractionTimeout = 20 * time.Second
 const maxResumedVisibleMessages = 20
 
 type Model struct {
@@ -167,29 +173,36 @@ type Model struct {
 	modelSelector modelSelector
 	prevSelected  map[string]bool
 
-	reviewer           *security.Reviewer
-	auditLog           *security.AuditLogger
-	configHome         string
-	localWorkspaceRoot string
-	nodeAddRunner      nodeAddRunner
-	skills             []skills.Skill
-	skillsConfig       configschema.SkillsConfig
-	skillWarnings      []string
-	incidentDir        string
-	incidentRecorder   *evidence.Recorder
-	pendingToolCall    *llm.ToolCall
-	pendingRisk        *security.RiskAssessment
-	confirmChoice      int // 0=Allow, 1=Deny
-	nodePrompt         nodePromptState
-	nodeAddForm        nodeAddForm
+	reviewer            *security.Reviewer
+	auditLog            *security.AuditLogger
+	configHome          string
+	localWorkspaceRoot  string
+	nodeAddRunner       nodeAddRunner
+	skills              []skills.Skill
+	skillsConfig        configschema.SkillsConfig
+	skillWarnings       []string
+	skillsFetcher       skills.RepoFetcher
+	skillsManager       skillsManager
+	skillInstall        skillInstallSelector
+	pendingSkillInstall pendingSkillInstall
+	pendingSkillRemove  pendingSkillRemove
+	incidentDir         string
+	incidentRecorder    *evidence.Recorder
+	pendingToolCall     *llm.ToolCall
+	pendingRisk         *security.RiskAssessment
+	confirmChoice       int // 0=Allow, 1=Deny
+	nodePrompt          nodePromptState
+	nodeAddForm         nodeAddForm
 
-	memStore        *memory.Store
-	memoryExtractor MemoryExtractor
-	subagents       configschema.SubagentConfig
-	subagentResults []subagent.Result
-	sessionList     sessionList
-	configScreen    configScreen
-	ac              autocomplete
+	memStore                   *memory.Store
+	memoryExtractor            MemoryExtractor
+	memoryRulesPromptLimit     int
+	memoryKnowledgePromptLimit int
+	subagents                  configschema.SubagentConfig
+	subagentResults            []subagent.Result
+	sessionList                sessionList
+	configScreen               configScreen
+	ac                         autocomplete
 
 	input              string
 	pendingImages      []imageAttachment
@@ -215,6 +228,12 @@ type Model struct {
 	streamEnded        bool
 	streamEventSeq     int
 	thinkingFrame      int
+	compacting         bool
+	compactID          uint64
+	compactFrame       int
+	compactStartedAt   time.Time
+	autoCompactResume  bool
+	autoCompactRetried bool
 
 	width  int
 	height int
@@ -233,46 +252,60 @@ func NewModel(cfg ModelConfig) Model {
 	if cfg.Model == "" {
 		cfg.Model = "default"
 	}
+	memoryPrompt := normalizeMemoryPromptConfig(cfg.Memory)
 	language := normalizeUILanguage(cfg.UILanguage)
 	selectedNodes := make(map[string]bool)
 	for _, node := range cfg.Nodes {
 		selectedNodes[node.Name] = true
 	}
 	return Model{
-		cluster:            cfg.Cluster,
-		clusterExplicit:    clusterExplicit,
-		model:              cfg.Model,
-		modelConfigs:       append([]configschema.ModelConfig(nil), cfg.ModelConfigs...),
-		uiLanguage:         language,
-		initialSessionID:   cfg.InitialSessionID,
-		cliVersion:         cfg.Version,
-		provider:           cfg.Provider,
-		visionProvider:     cfg.VisionProvider,
-		visionError:        cfg.VisionError,
-		vision:             normalizeVisionConfig(cfg.Vision),
-		conv:               cfg.Conv,
-		clients:            cfg.Clients,
-		tools:              cfg.Tools,
-		nodes:              cfg.Nodes,
-		selectedNodes:      selectedNodes,
-		status:             language.tr("Ready", "就绪"),
-		reviewer:           cfg.Reviewer,
-		auditLog:           cfg.AuditLogger,
-		configHome:         cfg.ConfigHome,
-		localWorkspaceRoot: cfg.LocalWorkspaceRoot,
-		nodeAddRunner:      cfg.NodeAddRunner,
-		skills:             cfg.Skills,
-		skillsConfig:       normalizeSkillsConfig(cfg.SkillsConfig),
-		skillWarnings:      append([]string(nil), cfg.SkillWarnings...),
-		incidentDir:        cfg.IncidentDir,
-		incidentRecorder:   evidence.NewRecorder(cfg.Cluster, selectedNodeNamesFromMap(selectedNodes), time.Now),
-		memStore:           cfg.MemoryStore,
-		memoryExtractor:    cfg.MemoryExtractor,
-		subagents:          normalizeSubagentConfig(cfg.Subagents),
-		toolCache:          newToolCache(),
-		ac:                 newAutocompleteWithLanguage(language),
-		inputHistoryIndex:  -1,
+		cluster:                    cfg.Cluster,
+		clusterExplicit:            clusterExplicit,
+		model:                      cfg.Model,
+		modelConfigs:               append([]configschema.ModelConfig(nil), cfg.ModelConfigs...),
+		uiLanguage:                 language,
+		initialSessionID:           cfg.InitialSessionID,
+		cliVersion:                 cfg.Version,
+		provider:                   cfg.Provider,
+		visionProvider:             cfg.VisionProvider,
+		visionError:                cfg.VisionError,
+		vision:                     normalizeVisionConfig(cfg.Vision),
+		conv:                       cfg.Conv,
+		clients:                    cfg.Clients,
+		tools:                      cfg.Tools,
+		nodes:                      cfg.Nodes,
+		selectedNodes:              selectedNodes,
+		status:                     language.tr("Ready", "就绪"),
+		reviewer:                   cfg.Reviewer,
+		auditLog:                   cfg.AuditLogger,
+		configHome:                 cfg.ConfigHome,
+		localWorkspaceRoot:         cfg.LocalWorkspaceRoot,
+		nodeAddRunner:              cfg.NodeAddRunner,
+		skills:                     cfg.Skills,
+		skillsConfig:               normalizeSkillsConfig(cfg.SkillsConfig),
+		skillWarnings:              append([]string(nil), cfg.SkillWarnings...),
+		skillsFetcher:              cfg.SkillsFetcher,
+		incidentDir:                cfg.IncidentDir,
+		incidentRecorder:           evidence.NewRecorder(cfg.Cluster, selectedNodeNamesFromMap(selectedNodes), time.Now),
+		memStore:                   cfg.MemoryStore,
+		memoryExtractor:            cfg.MemoryExtractor,
+		memoryRulesPromptLimit:     memoryPrompt.RulesTokenBudget,
+		memoryKnowledgePromptLimit: memoryPrompt.KnowledgeTokenBudget,
+		subagents:                  normalizeSubagentConfig(cfg.Subagents),
+		toolCache:                  newToolCache(),
+		ac:                         newAutocompleteWithLanguage(language),
+		inputHistoryIndex:          -1,
 	}
+}
+
+func normalizeMemoryPromptConfig(cfg configschema.MemoryConfig) configschema.MemoryConfig {
+	if cfg.RulesTokenBudget <= 0 {
+		cfg.RulesTokenBudget = markdownPromptMemoryLimit
+	}
+	if cfg.KnowledgeTokenBudget <= 0 {
+		cfg.KnowledgeTokenBudget = markdownPromptMemoryLimit + sqlitePromptMemoryContentLimit
+	}
+	return cfg
 }
 
 func normalizeSkillsConfig(cfg configschema.SkillsConfig) configschema.SkillsConfig {
@@ -455,7 +488,12 @@ type compactResultMsg struct {
 	messages    []models.Message
 	oldCount    int
 	keptCount   int
+	compactID   uint64
 	err         error
+}
+
+type compactTickMsg struct {
+	compactID uint64
 }
 
 type versionCheckMsg struct {
@@ -627,6 +665,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.finishStream(false)
+			if isContextLimitError(msg.err) {
+				return m.handleContextLimitAutoCompact(msg.err)
+			}
 			m.status = m.uiLanguage.tr("Error: ", "错误: ") + msg.err.Error()
 			return m, nil
 		}
@@ -719,6 +760,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.uiLanguage.tr("Stream error: ", "流错误: ") + e.Err.Error()
 			}
 			m.finishStream(false)
+			if isContextLimitError(e.Err) {
+				return m.handleContextLimitAutoCompact(e.Err)
+			}
 			m.updateViewportContent()
 			return m, nil
 		}
@@ -757,6 +801,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 		return m, m.scheduleThinkingTick(msg.streamID)
 
+	case compactTickMsg:
+		if !m.compacting || msg.compactID != m.compactID {
+			return m, nil
+		}
+		m.compactFrame++
+		m.status = renderCompactProgress(m.compactFrame, m.compactStartedAt, m.uiLanguage)
+		return m, m.scheduleCompactTick(msg.compactID)
+
 	case multiToolResultMsg:
 		if msg.streamID != 0 && !m.isActiveStream(msg.streamID) {
 			return m, nil
@@ -790,7 +842,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.skills = msg.skills
 		m.skillWarnings = msg.warnings
 		m.status = msg.status
+		if msg.keepSkillsOpen {
+			entries, err := loadSkillManageEntries(m.configHome, m.cluster)
+			if err != nil {
+				m.mode = modeChat
+				m.status = err.Error()
+				return m, nil
+			}
+			entries = mergeVisibleSkillEntries(entries, m.skills)
+			m.mode = modeSkillsManage
+			m.skillsManager = m.skillsManager.WithEntries(entries)
+			m.pendingSkillRemove = pendingSkillRemove{}
+			m.updateViewportContent()
+			return m, nil
+		}
+		m.mode = modeChat
+		m.skillsManager = skillsManager{}
+		m.skillInstall = skillInstallSelector{}
+		m.pendingSkillInstall = pendingSkillInstall{}
+		m.pendingSkillRemove = pendingSkillRemove{}
 		m.updateViewportContent()
+		return m, nil
+
+	case skillInstallPreviewMsg:
+		if msg.err != nil {
+			m.mode = modeChat
+			m.status = msg.err.Error()
+			return m, nil
+		}
+		m.mode = modeSkillInstallSelect
+		m.pendingSkillInstall = pendingSkillInstall{source: msg.source, scope: msg.scope, cluster: msg.cluster}
+		m.skillInstall = newSkillInstallSelector(msg.source.Input, msg.discovered, m.uiLanguage)
+		m.status = fmt.Sprintf(m.uiLanguage.tr("Select skills to install (%d found)", "选择要安装的技能（找到 %d 个）"), len(msg.discovered))
 		return m, nil
 
 	case nodeAddResultMsg:
@@ -843,6 +926,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case compactResultMsg:
+		if msg.compactID != 0 && msg.compactID != m.compactID {
+			return m, nil
+		}
+		resumeAfterCompact := m.autoCompactResume
+		m.autoCompactResume = false
+		m.compacting = false
 		if msg.err != nil {
 			m.status = m.uiLanguage.tr("Compact failed: ", "压缩失败: ") + msg.err.Error()
 			return m, nil
@@ -854,12 +943,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.conv.ReplaceMessages(msg.messages)
 		}
-		m.messages = chatMessagesFromModels(msg.messages)
+		if resumeAfterCompact {
+			m.status = m.uiLanguage.tr("Context compacted; thinking...", "上下文已压缩，正在思考...")
+			m.updateViewportContent()
+			return m.startStream()
+		}
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: fmt.Sprintf(m.uiLanguage.tr("Compacted %d message(s) into a structured summary and kept %d recent message(s).", "已将 %d 条消息压缩为结构化摘要，并保留 %d 条最近消息。"), msg.oldCount, msg.keptCount),
+			content: fmt.Sprintf(m.uiLanguage.tr("Compact complete. Compacted %d message(s) and kept %d recent message(s).", "压缩完成。已压缩 %d 条消息，并保留 %d 条最近消息。"), msg.oldCount, msg.keptCount),
 		})
-		m.status = fmt.Sprintf(m.uiLanguage.tr("Compacted %d message(s)", "已压缩 %d 条消息"), msg.oldCount)
+		m.status = fmt.Sprintf(m.uiLanguage.tr("Compact complete: %d message(s)", "压缩完成: %d 条消息"), msg.oldCount)
 		m.updateViewportContent()
 		return m, nil
 
@@ -885,6 +978,12 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeConfig {
 		return m.handleConfigKey(key)
+	}
+	if m.mode == modeSkillsManage {
+		return m.handleSkillsManageKey(key)
+	}
+	if m.mode == modeSkillInstallSelect {
+		return m.handleSkillInstallSelectKey(key)
 	}
 	if m.mode == modeSession {
 		return m.handleSessionSelectKey(key)
@@ -1079,7 +1178,33 @@ func (m Model) updateAutocomplete() autocomplete {
 	if root == "" {
 		root = "."
 	}
-	return m.ac.updateWithRoot(m.input, root)
+	return m.ac.withCommands(m.autocompleteCommands()).updateWithRoot(m.input, root)
+}
+
+func (m Model) autocompleteCommands() []commandInfo {
+	commands := append([]commandInfo(nil), commandRegistry...)
+	if !m.skillsAvailable() {
+		return commands
+	}
+	existing := make(map[string]bool, len(commands))
+	for _, cmd := range commands {
+		existing[cmd.Name] = true
+	}
+	for _, skill := range m.skills {
+		name := strings.TrimSpace(skill.Name)
+		if name == "" || existing[name] {
+			continue
+		}
+		commands = append(commands, commandInfo{
+			Name:        name,
+			Description: "Skill: " + skill.Description,
+			ArgHint:     "[arguments]",
+			Skill:       true,
+			Category:    commandCategorySkill,
+		})
+		existing[name] = true
+	}
+	return commands
 }
 
 func (m Model) handleNodePromptKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1382,6 +1507,75 @@ func (m Model) handleModelSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) handleSkillsManageKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		if m.pendingSkillRemove.entry.Name != "" {
+			m.pendingSkillRemove = pendingSkillRemove{}
+			m.status = m.uiLanguage.tr("Skill uninstall cancelled", "已取消卸载技能")
+			return m, nil
+		}
+		m.mode = modeChat
+		m.status = m.uiLanguage.tr("Skills management closed", "已关闭技能管理")
+		return m, nil
+	case tea.KeyEnter:
+		if m.pendingSkillRemove.entry.Name == "" {
+			break
+		}
+		entry := m.pendingSkillRemove.entry
+		scope := entry.Scope
+		cluster := entry.Cluster
+		m.status = m.uiLanguage.tr("Removing skill...", "正在移除技能...")
+		return m, m.runSkillsManagementKeepOpen(func(installer skills.Installer) (string, error) {
+			removed, err := installer.Remove(skills.RemoveRequest{Name: entry.Name, Scope: scope, Cluster: cluster})
+			if err != nil {
+				return "", err
+			}
+			if !removed {
+				return "", fmt.Errorf("skill not found: %s", entry.Name)
+			}
+			return m.uiLanguage.tr("Removed skill: ", "已移除技能: ") + entry.Name, nil
+		})
+	case tea.KeyRunes:
+		if len(key.Runes) == 1 && (key.Runes[0] == 'd' || key.Runes[0] == 'D') {
+			entry, ok := m.skillsManager.Selected()
+			if !ok {
+				m.status = m.uiLanguage.tr("No skill selected", "未选择技能")
+				return m, nil
+			}
+			m.pendingSkillRemove = pendingSkillRemove{entry: entry}
+			m.status = fmt.Sprintf(m.uiLanguage.tr("Confirm uninstall %s: Enter confirm, Esc cancel", "确认卸载 %s: Enter 确认，Esc 取消"), entry.Name)
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.skillsManager, cmd = m.skillsManager.Update(key)
+	return m, cmd
+}
+
+func (m Model) handleSkillInstallSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		names := m.skillInstall.SelectedNames()
+		if len(names) == 0 {
+			m.status = m.uiLanguage.tr("Select at least one skill", "至少选择一个技能")
+			return m, nil
+		}
+		m.status = m.uiLanguage.tr("Installing selected skills...", "正在安装选中的技能...")
+		return m, m.installSelectedSkills(names)
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeChat
+		m.skillInstall = skillInstallSelector{}
+		m.pendingSkillInstall = pendingSkillInstall{}
+		m.status = m.uiLanguage.tr("Skill install cancelled", "已取消技能安装")
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.skillInstall, cmd = m.skillInstall.Update(key)
+		return m, cmd
+	}
+}
+
 func (m Model) handleConfigKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.configScreen.editMode {
 	case configEditText:
@@ -1599,6 +1793,12 @@ func (m Model) View() string {
 	if m.mode == modeConfig {
 		return header + "\n\n" + m.configScreen.View(m.width, m.uiLanguage) + "\n\n" + statusView
 	}
+	if m.mode == modeSkillsManage {
+		return header + "\n\n" + m.skillsManager.View(m.width) + "\n\n" + statusView
+	}
+	if m.mode == modeSkillInstallSelect {
+		return header + "\n\n" + m.skillInstall.View(m.width) + "\n\n" + statusView
+	}
 	if m.mode == modeSession {
 		return header + "\n\n" + m.sessionList.View(m.width) + "\n\n" + statusView
 	}
@@ -1612,7 +1812,12 @@ func (m Model) View() string {
 	}
 
 	acView := m.ac.View(m.width)
+	meter := m.currentContextMeter()
 	footer := statusView + "\n" + renderInputBox(m.inputWithImageChips(), m.width, m.uiLanguage)
+	leftMeta := renderModelClusterMeta(m.model, m.cluster)
+	if meterLine := renderFooterMeta(leftMeta, meter, m.uiLanguage, max(m.width-2, 1)); meterLine != "" {
+		footer += "\n" + meterLine
+	}
 	if m.mode == modeConfirm {
 		footer = m.renderConfirmFooter()
 	} else if m.mode == modeNodePrompt {
@@ -2169,10 +2374,16 @@ func (m Model) startSubmittedMessage(visibleInput string, llmInput string, think
 	}
 	m.maybeAutoSaveUserMemory(visibleInput)
 	m.pendingImages = nil
-	m.streaming = true
 	m.streamBuf = ""
 	m.streamReasoningBuf = ""
 	m.streamThinking = thinking
+	m.autoCompactRetried = false
+	if m.shouldAutoCompactNow() {
+		m.autoCompactRetried = true
+		m.status = m.uiLanguage.tr("Context near limit; compacting...", "上下文接近上限，正在压缩...")
+		return m.compactConversationForAuto("")
+	}
+	m.streaming = true
 	m.status = m.uiLanguage.tr("Thinking...", "思考中...")
 	return m.startStream()
 }
@@ -2389,6 +2600,14 @@ func (m Model) startManualSubagent(arg string) (Model, tea.Cmd) {
 }
 
 func (m Model) compactConversation(focus string) (Model, tea.Cmd) {
+	return m.compactConversationWithResume(focus, false)
+}
+
+func (m Model) compactConversationForAuto(focus string) (Model, tea.Cmd) {
+	return m.compactConversationWithResume(focus, true)
+}
+
+func (m Model) compactConversationWithResume(focus string, resume bool) (Model, tea.Cmd) {
 	if m.streaming {
 		m.status = m.uiLanguage.tr("Cannot compact while streaming", "流式回复中无法压缩")
 		return m, nil
@@ -2401,22 +2620,28 @@ func (m Model) compactConversation(focus string) (Model, tea.Cmd) {
 		m.status = m.uiLanguage.tr("Nothing to compact", "没有可压缩的上下文")
 		return m, nil
 	}
-	m.status = m.uiLanguage.tr("Compacting conversation...", "正在压缩会话...")
+	m.compactID++
+	m.compacting = true
+	m.autoCompactResume = resume
+	m.compactFrame = 0
+	m.compactStartedAt = time.Now()
+	compactID := m.compactID
+	m.status = renderCompactProgress(m.compactFrame, m.compactStartedAt, m.uiLanguage)
 	oldMessages := m.conv.Messages()
 	convID := m.conv.ID()
 	provider := m.provider
-	return m, func() tea.Msg {
+	compactCmd := func() tea.Msg {
 		resp, err := provider.Chat(context.Background(), &llm.ChatRequest{
 			SystemPrompt: compactSystemPrompt(focus),
 			Messages:     oldMessages,
 			MaxTokens:    2200,
 		})
 		if err != nil {
-			return compactResultMsg{err: err}
+			return compactResultMsg{compactID: compactID, err: err}
 		}
 		summary := strings.TrimSpace(resp.Message.Content)
 		if summary == "" {
-			return compactResultMsg{err: fmt.Errorf("empty compact summary")}
+			return compactResultMsg{compactID: compactID, err: fmt.Errorf("empty compact summary")}
 		}
 		messages := buildCompactedMessages(convID, summary, oldMessages)
 		return compactResultMsg{
@@ -2424,8 +2649,21 @@ func (m Model) compactConversation(focus string) (Model, tea.Cmd) {
 			messages:    messages,
 			oldCount:    len(oldMessages),
 			keptCount:   len(messages) - 1,
+			compactID:   compactID,
 		}
 	}
+	return m, tea.Batch(compactCmd, m.scheduleCompactTick(compactID))
+}
+
+func (m Model) handleContextLimitAutoCompact(err error) (Model, tea.Cmd) {
+	if !m.canAutoCompactForContextLimit() {
+		m.status = m.uiLanguage.tr("Context limit reached: ", "已达到上下文限制: ") + err.Error()
+		m.updateViewportContent()
+		return m, nil
+	}
+	m.autoCompactRetried = true
+	m.status = m.uiLanguage.tr("Context limit reached; compacting...", "已达到上下文限制，正在压缩...")
+	return m.compactConversationForAuto("")
 }
 
 func parseSubagentCommand(arg string) (subagent.Role, string) {
@@ -2877,6 +3115,12 @@ func (m Model) availableToolDefs() []llm.ToolDef {
 func (m Model) scheduleThinkingTick(streamID uint64) tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return thinkingTickMsg{streamID: streamID}
+	})
+}
+
+func (m Model) scheduleCompactTick(compactID uint64) tea.Cmd {
+	return tea.Tick(compactTickInterval, func(time.Time) tea.Msg {
+		return compactTickMsg{compactID: compactID}
 	})
 }
 
@@ -4026,22 +4270,35 @@ func (m Model) buildSystemPromptWithMemory() string {
 		if err == nil && !rc.Empty() {
 			rules := rc.Format()
 			injectedMarkdown = append(injectedMarkdown, rules)
-			parts = append(parts, "\n[Behavioral Rules]\n"+limitPromptSnippet(rules, markdownPromptMemoryLimit))
+			parts = append(parts, "\n[Behavioral Rules]\n"+limitPromptSnippet(rules, m.memoryRulesPromptLimit))
 		}
+		knowledgeRemaining := m.memoryKnowledgePromptLimit
 		clusterMemory, err := memory.NewMarkdownStore(memoryRoot).Read(filepath.ToSlash(filepath.Join("clusters", sanitizeMemoryFileName(m.cluster)+".md")))
-		if err == nil && strings.TrimSpace(clusterMemory) != "" {
+		if err == nil && strings.TrimSpace(clusterMemory) != "" && knowledgeRemaining > 0 {
 			injectedMarkdown = append(injectedMarkdown, clusterMemory)
-			parts = append(parts, "\n[Cluster Memory]\n"+limitPromptSnippet(clusterMemory, markdownPromptMemoryLimit))
+			snippet := limitPromptSnippet(clusterMemory, minInt(markdownPromptMemoryLimit, knowledgeRemaining))
+			parts = append(parts, "\n[Cluster Memory]\n"+snippet)
+			knowledgeRemaining -= promptRuneLen(snippet)
 		}
 		results, err := m.memStore.ListMemories("", 5)
-		if err == nil && len(results) > 0 {
+		if err == nil && len(results) > 0 && knowledgeRemaining > 0 {
 			var memLines []string
 			markdownText := strings.Join(injectedMarkdown, "\n")
 			for _, r := range results {
 				if memoryEntryDuplicatedInMarkdown(r, markdownText) {
 					continue
 				}
-				memLines = append(memLines, fmt.Sprintf("- [%s] %s: %s", r.Category, r.Title, limitPromptSnippet(r.Content, sqlitePromptMemoryContentLimit)))
+				if knowledgeRemaining <= 0 {
+					break
+				}
+				prefix := fmt.Sprintf("- [%s] %s: ", r.Category, r.Title)
+				contentLimit := minInt(sqlitePromptMemoryContentLimit, knowledgeRemaining-promptRuneLen(prefix))
+				if contentLimit <= 0 {
+					break
+				}
+				line := prefix + limitPromptSnippet(r.Content, contentLimit)
+				memLines = append(memLines, line)
+				knowledgeRemaining -= promptRuneLen(line) + 1
 			}
 			if len(memLines) > 0 {
 				parts = append(parts, "\n[Memory Context]\n"+strings.Join(memLines, "\n"))
@@ -4050,6 +4307,17 @@ func (m Model) buildSystemPromptWithMemory() string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+func promptRuneLen(text string) int {
+	return len([]rune(text))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func limitPromptSnippet(text string, limit int) string {
@@ -4118,7 +4386,9 @@ func (m Model) runMemoryExtraction(userText, assistantText string) {
 	if assistantText == "" {
 		return
 	}
-	candidates, err := m.memoryExtractor.ExtractMemory(context.Background(), MemoryExtractionInput{
+	ctx, cancel := context.WithTimeout(context.Background(), memoryExtractionTimeout)
+	defer cancel()
+	candidates, err := m.memoryExtractor.ExtractMemory(ctx, MemoryExtractionInput{
 		Cluster:   m.cluster,
 		Model:     m.model,
 		User:      userText,

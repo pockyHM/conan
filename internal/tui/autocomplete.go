@@ -15,25 +15,38 @@ type commandInfo struct {
 	Name        string
 	Description string
 	ArgHint     string
+	Skill       bool
+	Category    commandCategory
 }
 
+type commandCategory int
+
+const (
+	commandCategoryBuiltin commandCategory = iota
+	commandCategorySystem
+	commandCategorySkill
+)
+
 var commandRegistry = []commandInfo{
-	{Name: "help", Description: "Show help information"},
-	{Name: "clear", Description: "Clear conversation"},
-	{Name: "compact", Description: "Compact conversation context", ArgHint: "[focus]"},
-	{Name: "exit", Description: "Exit Conan"},
-	{Name: "cluster", Description: "Switch/display cluster", ArgHint: "[name]"},
-	{Name: "config", Description: "Open global configuration"},
-	{Name: "skills", Description: "List and manage skills", ArgHint: "[install|remove|update]"},
-	{Name: "skill", Description: "Use a skill", ArgHint: "<name> [arguments]"},
-	{Name: "lang", Description: "Change UI language"},
-	{Name: "model", Description: "Switch/display model", ArgHint: "[name]"},
-	{Name: "nodes", Description: "Open node selector"},
-	{Name: "memory", Description: "View memory summary"},
-	{Name: "resume", Description: "Resume session", ArgHint: "[id]"},
-	{Name: "thinking", Description: "Send one message with thinking enabled", ArgHint: "<message>"},
-	{Name: "agent", Description: "Run a local subagent", ArgHint: "<role> <task>"},
-	{Name: "subagents", Description: "Manage local subagents", ArgHint: "[on|off|limit]"},
+	{Name: "help", Description: "Show help information", Category: commandCategoryBuiltin},
+	{Name: "clear", Description: "Clear conversation", Category: commandCategoryBuiltin},
+	{Name: "compact", Description: "Compact conversation context", ArgHint: "[focus]", Category: commandCategoryBuiltin},
+	{Name: "exit", Description: "Exit Conan", Category: commandCategoryBuiltin},
+	{Name: "cluster", Description: "Switch/display cluster", ArgHint: "[name]", Category: commandCategoryBuiltin},
+	{Name: "config", Description: "Open global configuration", Category: commandCategoryBuiltin},
+	{Name: "skills", Description: "Manage skills or invoke a skill", ArgHint: "[install|remove|update|<skill>]", Category: commandCategoryBuiltin},
+	{Name: "skill", Description: "Use a skill", ArgHint: "<name> [arguments]", Category: commandCategoryBuiltin},
+	{Name: "lang", Description: "Change UI language", Category: commandCategoryBuiltin},
+	{Name: "model", Description: "Switch/display model", ArgHint: "[name]", Category: commandCategoryBuiltin},
+	{Name: "resume", Description: "Resume session", ArgHint: "[id]", Category: commandCategoryBuiltin},
+	{Name: "thinking", Description: "Send one message with thinking enabled", ArgHint: "<message>", Category: commandCategoryBuiltin},
+	{Name: "node", Description: "Enable node management tools", ArgHint: "[off]", Category: commandCategorySystem},
+	{Name: "nodes", Description: "Open node selector", Category: commandCategorySystem},
+	{Name: "memory", Description: "View memory summary", Category: commandCategorySystem},
+	{Name: "agent", Description: "Run a local subagent", ArgHint: "<role> <task>", Category: commandCategorySystem},
+	{Name: "subagents", Description: "Manage local subagents", ArgHint: "[on|off|limit]", Category: commandCategorySystem},
+	{Name: "incident", Description: "Manage incident notes", ArgHint: "<start|status|note|export|close>", Category: commandCategorySystem},
+	{Name: "runbook", Description: "Draft, preview, or run runbooks", ArgHint: "<draft|preview|run>", Category: commandCategorySystem},
 }
 
 type autocomplete struct {
@@ -43,6 +56,7 @@ type autocomplete struct {
 	mode        autocompleteMode
 	lang        uiLanguage
 	input       string
+	commands    []commandInfo
 	tokenStart  int
 	fileMatches []fileCompletion
 }
@@ -64,7 +78,19 @@ func newAutocomplete() autocomplete {
 }
 
 func newAutocompleteWithLanguage(lang uiLanguage) autocomplete {
-	return autocomplete{lang: lang}
+	return autocomplete{lang: lang, commands: commandRegistry}
+}
+
+func (a autocomplete) withCommands(commands []commandInfo) autocomplete {
+	if len(commands) == 0 {
+		a.commands = commandRegistry
+		return a
+	}
+	a.commands = append([]commandInfo(nil), commands...)
+	if a.selected >= len(a.filtered()) {
+		a.selected = 0
+	}
+	return a
 }
 
 func (a autocomplete) update(input string) autocomplete {
@@ -194,16 +220,25 @@ func (a autocomplete) filtered() []commandInfo {
 	if a.mode == autocompleteFiles {
 		return nil
 	}
+	commands := a.commands
+	if len(commands) == 0 {
+		commands = commandRegistry
+	}
 	if a.prefix == "" {
-		return commandRegistry
+		return commands
 	}
 	var result []commandInfo
-	for _, cmd := range commandRegistry {
+	for _, cmd := range commands {
 		if strings.HasPrefix(cmd.Name, a.prefix) {
 			result = append(result, cmd)
 		}
 	}
 	sort.SliceStable(result, func(i, j int) bool {
+		left := result[i].normalizedCategory()
+		right := result[j].normalizedCategory()
+		if left != right {
+			return left < right
+		}
 		if result[i].Name == a.prefix {
 			return true
 		}
@@ -213,6 +248,16 @@ func (a autocomplete) filtered() []commandInfo {
 		return false
 	})
 	return result
+}
+
+func (c commandInfo) normalizedCategory() commandCategory {
+	if c.Skill || c.Category == commandCategorySkill {
+		return commandCategorySkill
+	}
+	if c.Category == commandCategorySystem {
+		return commandCategorySystem
+	}
+	return commandCategoryBuiltin
 }
 
 func (a autocomplete) moveUp() autocomplete {
@@ -262,34 +307,97 @@ func (a autocomplete) View(width int) string {
 		if len(filtered) == 0 {
 			return ""
 		}
-		lines = a.commandLines(filtered)
+		lines = a.commandLines(filtered, autocompleteContentWidth(width))
 	}
 	panel := strings.Join(lines, "\n")
 	style := strings.TrimSpace(panelStyle(width).Render(panel))
 	return style
 }
 
-func (a autocomplete) commandLines(filtered []commandInfo) []string {
-	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+func autocompleteContentWidth(width int) int {
+	if width <= 0 {
+		return 0
+	}
+	contentWidth := width - 6
+	if contentWidth < 1 {
+		return 1
+	}
+	return contentWidth
+}
+
+func (a autocomplete) commandLines(filtered []commandInfo, contentWidth int) []string {
 	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 
-	var lines []string
+	lines := []string{a.commandLegendLine(contentWidth)}
 	for i, cmd := range filtered {
 		cursor := "  "
-		nameStyle := normalStyle
+		nameStyle := commandCategoryStyle(cmd.normalizedCategory(), false)
 		if i == a.selected {
 			cursor = "▸ "
-			nameStyle = selectedStyle
+			nameStyle = commandCategoryStyle(cmd.normalizedCategory(), true)
 		}
 		hint := ""
 		if cmd.ArgHint != "" {
 			hint = " " + cmd.ArgHint
 		}
-		line := fmt.Sprintf("%s%s  %s", cursor, nameStyle.Render("/"+cmd.Name+hint), descStyle.Render(a.lang.commandDescription(cmd.Name)))
+		description := a.lang.commandDescription(cmd.Name)
+		if description == "" {
+			description = cmd.Description
+		}
+		nameText, descText := autocompleteLineParts("/"+cmd.Name+hint, description, contentWidth)
+		line := fmt.Sprintf("%s%s", cursor, nameStyle.Render(nameText))
+		if descText != "" {
+			line += "  " + descStyle.Render(descText)
+		}
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func (a autocomplete) commandLegendLine(contentWidth int) string {
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	legend := descStyle.Render(a.lang.tr("Legend:", "图例:")) + " " +
+		commandCategoryStyle(commandCategoryBuiltin, false).Render(a.lang.tr("Built-in", "内置")) + "  " +
+		commandCategoryStyle(commandCategorySystem, false).Render(a.lang.tr("System", "系统")) + "  " +
+		commandCategoryStyle(commandCategorySkill, false).Render(a.lang.tr("Skill", "技能"))
+	return truncateDisplay(legend, contentWidth)
+}
+
+func commandCategoryStyle(category commandCategory, selected bool) lipgloss.Style {
+	color := lipgloss.Color("252")
+	switch category {
+	case commandCategoryBuiltin:
+		color = lipgloss.Color("14")
+	case commandCategorySystem:
+		color = lipgloss.Color("220")
+	case commandCategorySkill:
+		color = lipgloss.Color("82")
+	}
+	style := lipgloss.NewStyle().Foreground(color)
+	if selected {
+		style = style.Bold(true)
+	}
+	return style
+}
+
+func autocompleteLineParts(name string, description string, contentWidth int) (string, string) {
+	if contentWidth <= 0 {
+		return name, description
+	}
+	available := contentWidth - 2
+	if available <= 0 {
+		return "", ""
+	}
+	nameBudget := available
+	if description != "" && available > 24 {
+		nameBudget = min(42, available)
+	}
+	name = truncateDisplay(name, nameBudget)
+	descBudget := available - lipgloss.Width(name) - 2
+	if descBudget <= 0 || description == "" {
+		return name, ""
+	}
+	return name, truncateDisplay(description, descBudget)
 }
 
 func (a autocomplete) fileLines() []string {

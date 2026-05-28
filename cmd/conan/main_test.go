@@ -380,7 +380,26 @@ func TestRootCommandUsesConfiguredStreams(t *testing.T) {
 	}
 }
 
-func TestTUIProgramOptionsEnableMouseCellMotion(t *testing.T) {
+func TestTUIProgramOptionsDisableMouseByDefaultForTextSelection(t *testing.T) {
+	input := strings.NewReader("")
+	var output bytes.Buffer
+	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
+
+	startupOptions := reflect.ValueOf(program).Elem().FieldByName("startupOptions").Int()
+	const (
+		withMouseCellMotion = int64(1 << 1)
+		withMouseAllMotion  = int64(1 << 2)
+	)
+	if startupOptions&withMouseCellMotion != 0 {
+		t.Fatal("tui should not capture mouse by default so terminal text selection works")
+	}
+	if startupOptions&withMouseAllMotion != 0 {
+		t.Fatal("tui should not enable full mouse motion")
+	}
+}
+
+func TestTUIProgramOptionsCanOptInToMouseCellMotion(t *testing.T) {
+	t.Setenv("CONAN_TUI_MOUSE", "1")
 	input := strings.NewReader("")
 	var output bytes.Buffer
 	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
@@ -391,7 +410,7 @@ func TestTUIProgramOptionsEnableMouseCellMotion(t *testing.T) {
 		withMouseAllMotion  = int64(1 << 2)
 	)
 	if startupOptions&withMouseCellMotion == 0 {
-		t.Fatal("tui should enable mouse cell motion so wheel events are captured")
+		t.Fatal("tui should enable mouse cell motion when CONAN_TUI_MOUSE=1")
 	}
 	if startupOptions&withMouseAllMotion != 0 {
 		t.Fatal("tui should not enable full mouse motion")

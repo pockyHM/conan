@@ -15,6 +15,12 @@ type ToolResult struct {
 	Success bool
 }
 
+const (
+	defaultMemorySearchLimit = 5
+	maxMemorySearchLimit     = 20
+	memoryToolReadLimitBytes = 64 * 1024
+)
+
 func ToolDefs() []map[string]interface{} {
 	return []map[string]interface{}{
 		{
@@ -97,6 +103,9 @@ func normalizeMemoryToolName(name string) string {
 }
 
 func HandleTool(store *Store, convID string, name string, args json.RawMessage) ToolResult {
+	if store == nil {
+		return ToolResult{Output: "memory store not available", Success: false}
+	}
 	switch normalizeMemoryToolName(name) {
 	case "memory_save":
 		return handleMemorySave(store, convID, args)
@@ -257,11 +266,12 @@ func handleMemorySearch(store *Store, args json.RawMessage) ToolResult {
 	if err := json.Unmarshal(args, &a); err != nil {
 		return ToolResult{Output: "invalid args: " + err.Error(), Success: false}
 	}
-	limit := a.Limit
-	if limit <= 0 {
-		limit = 5
+	query := strings.TrimSpace(a.Query)
+	if query == "" {
+		return ToolResult{Output: "search failed: query is required", Success: false}
 	}
-	results, err := store.SearchMemories(a.Query, limit)
+	limit := boundedMemorySearchLimit(a.Limit)
+	results, err := store.SearchMemories(query, limit)
 	if err != nil {
 		return ToolResult{Output: "search failed: " + err.Error(), Success: false}
 	}
@@ -273,13 +283,23 @@ func handleMemorySearch(store *Store, args json.RawMessage) ToolResult {
 		lines = append(lines, fmt.Sprintf("- [%s] %s: %s", r.ID, r.Title, truncate(r.Content, 100)))
 	}
 	if len(lines) < limit {
-		markdownResults := searchMarkdownMemory(filepath.Join(store.Dir(), "memory"), a.Query, limit-len(lines))
+		markdownResults := searchMarkdownMemory(filepath.Join(store.Dir(), "memory"), query, limit-len(lines))
 		lines = append(lines, markdownResults...)
 	}
 	if len(lines) == 0 {
-		return ToolResult{Output: "No memories found for: " + a.Query, Success: true}
+		return ToolResult{Output: "No memories found for: " + query, Success: true}
 	}
 	return ToolResult{Output: strings.Join(lines, "\n"), Success: true}
+}
+
+func boundedMemorySearchLimit(limit int) int {
+	if limit <= 0 {
+		return defaultMemorySearchLimit
+	}
+	if limit > maxMemorySearchLimit {
+		return maxMemorySearchLimit
+	}
+	return limit
 }
 
 func handleMemoryRead(store *Store, args json.RawMessage) ToolResult {
@@ -287,11 +307,22 @@ func handleMemoryRead(store *Store, args json.RawMessage) ToolResult {
 	if err := json.Unmarshal(args, &a); err != nil {
 		return ToolResult{Output: "invalid args: " + err.Error(), Success: false}
 	}
-	out, err := NewMarkdownStore(filepath.Join(store.Dir(), "memory")).Read(a.Path)
+	out, err := readLimitedMemoryMarkdown(NewMarkdownStore(filepath.Join(store.Dir(), "memory")), a.Path, memoryToolReadLimitBytes)
 	if err != nil {
 		return ToolResult{Output: "read failed: " + err.Error(), Success: false}
 	}
 	return ToolResult{Output: out, Success: true}
+}
+
+func readLimitedMemoryMarkdown(store *MarkdownStore, path string, limitBytes int64) (string, error) {
+	out, err := store.ReadLimited(path, limitBytes+1)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(out)) <= limitBytes {
+		return out, nil
+	}
+	return strings.TrimRight(strings.ToValidUTF8(out[:limitBytes], ""), "\n") + "\n[truncated]", nil
 }
 
 func handleMemoryPatch(store *Store, args json.RawMessage) ToolResult {

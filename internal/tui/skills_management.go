@@ -12,10 +12,29 @@ import (
 )
 
 type skillManagementResultMsg struct {
-	status   string
-	skills   []skills.Skill
-	warnings []string
-	err      error
+	status         string
+	skills         []skills.Skill
+	warnings       []string
+	err            error
+	keepSkillsOpen bool
+}
+
+type skillInstallPreviewMsg struct {
+	source     skills.RepoSource
+	scope      string
+	cluster    string
+	discovered []skills.Skill
+	err        error
+}
+
+type pendingSkillInstall struct {
+	source  skills.RepoSource
+	scope   string
+	cluster string
+}
+
+type pendingSkillRemove struct {
+	entry skillManageEntry
 }
 
 type skillsCommandOptions struct {
@@ -77,14 +96,7 @@ func (m Model) skillsCommandScope(opts skillsCommandOptions) (string, string) {
 func (m Model) applySkillsCommand(arg string) (Model, tea.Cmd) {
 	fields := strings.Fields(arg)
 	if len(fields) == 0 {
-		summary := m.visibleSkillsSummary()
-		m.messages = append(m.messages, chatMsg{role: "assistant", content: summary})
-		if m.skillsAvailable() {
-			m.status = fmt.Sprintf(m.uiLanguage.tr("%d skills available", "%d 个可用技能"), len(m.skills))
-		} else {
-			m.status = summary
-		}
-		return m, nil
+		return m.openSkillsManager()
 	}
 	switch fields[0] {
 	case "install":
@@ -103,14 +115,8 @@ func (m Model) applySkillsCommand(arg string) (Model, tea.Cmd) {
 			m.status = err.Error()
 			return m, nil
 		}
-		m.status = m.uiLanguage.tr("Installing skills...", "正在安装技能...")
-		return m, m.runSkillsManagement(func(installer skills.Installer) (string, error) {
-			installed, err := installer.Install(context.Background(), skills.InstallRequest{Source: source, Scope: scope, Cluster: cluster})
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf(m.uiLanguage.tr("Installed %d skill(s)", "已安装 %d 个技能"), len(installed)), nil
-		})
+		m.status = m.uiLanguage.tr("Discovering skills...", "正在发现技能...")
+		return m, m.previewSkillInstall(source, scope, cluster)
 	case "remove":
 		if len(fields) < 2 {
 			m.status = m.uiLanguage.tr("Usage: /skills remove <name> [--global|--cluster name]", "用法: /skills remove <名称> [--global|--cluster 名称]")
@@ -155,8 +161,95 @@ func (m Model) applySkillsCommand(arg string) (Model, tea.Cmd) {
 			return fmt.Sprintf(m.uiLanguage.tr("Updated %d skill(s)", "已更新 %d 个技能"), len(updated)), nil
 		})
 	default:
-		m.status = m.uiLanguage.tr("Usage: /skills [install|remove|update]", "用法: /skills [install|remove|update]")
+		name, rest := splitSkillInvocationArg(arg)
+		if skill, found := m.findSkill(name); found {
+			visible := strings.TrimSpace("/skills " + name + " " + rest)
+			return m.submitSkillMessage(visible, skill, rest)
+		}
+		m.status = m.uiLanguage.tr("Usage: /skills [install|remove|update|<skill>]", "用法: /skills [install|remove|update|<技能>]")
 		return m, nil
+	}
+}
+
+func (m Model) openSkillsManager() (Model, tea.Cmd) {
+	entries, err := loadSkillManageEntries(m.configHome, m.cluster)
+	if err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	entries = mergeVisibleSkillEntries(entries, m.skills)
+	m.mode = modeSkillsManage
+	m.skillsManager = newSkillsManager(entries, m.uiLanguage)
+	if len(entries) == 0 {
+		m.status = m.uiLanguage.tr("No skills installed", "没有已安装技能")
+	} else {
+		m.status = fmt.Sprintf(m.uiLanguage.tr("%d skill(s) installed", "已安装 %d 个技能"), len(entries))
+	}
+	return m, nil
+}
+
+func loadSkillManageEntries(home string, cluster string) ([]skillManageEntry, error) {
+	if strings.TrimSpace(home) == "" {
+		home = cfgloader.DefaultHome()
+	}
+	globalReg, err := skills.LoadRegistry(skills.GlobalRegistryPath(home))
+	if err != nil {
+		return nil, err
+	}
+	var entries []skillManageEntry
+	for _, entry := range globalReg.Skills {
+		entries = append(entries, skillManageEntry{
+			Name:        entry.Name,
+			Description: entry.Description,
+			Scope:       skills.ScopeGlobal,
+		})
+	}
+	if strings.TrimSpace(cluster) != "" {
+		clusterReg, err := skills.LoadRegistry(skills.ClusterRegistryPath(home, cluster))
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range clusterReg.Skills {
+			entries = append(entries, skillManageEntry{
+				Name:        entry.Name,
+				Description: entry.Description,
+				Scope:       skills.ScopeCluster,
+				Cluster:     cluster,
+			})
+		}
+	}
+	return entries, nil
+}
+
+func mergeVisibleSkillEntries(entries []skillManageEntry, visible []skills.Skill) []skillManageEntry {
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		key := entry.Scope + ":" + entry.Cluster + ":" + entry.Name
+		seen[key] = true
+	}
+	for _, skill := range visible {
+		key := skill.Scope + ":" + skill.Cluster + ":" + skill.Name
+		if seen[key] {
+			continue
+		}
+		entries = append(entries, skillManageEntry{
+			Name:        skill.Name,
+			Description: skill.Description,
+			Scope:       skill.Scope,
+			Cluster:     skill.Cluster,
+		})
+	}
+	return entries
+}
+
+func (m Model) previewSkillInstall(source skills.RepoSource, scope string, cluster string) tea.Cmd {
+	configHome := m.configHome
+	fetcher := m.skillsFetcher
+	return func() tea.Msg {
+		loader := cfgloader.NewLoader(configHome)
+		installer := skills.Installer{Home: loader.Home(), Fetcher: fetcher, MaxSkillFileBytes: 256 * 1024}
+		discovered, err := installer.Discover(context.Background(), source)
+		return skillInstallPreviewMsg{source: source, scope: scope, cluster: cluster, discovered: discovered, err: err}
 	}
 }
 
@@ -164,9 +257,10 @@ func (m Model) runSkillsManagement(fn func(skills.Installer) (string, error)) te
 	configHome := m.configHome
 	cluster := m.cluster
 	cfg := m.skillsConfig
+	fetcher := m.skillsFetcher
 	return func() tea.Msg {
 		loader := cfgloader.NewLoader(configHome)
-		installer := skills.Installer{Home: loader.Home(), MaxSkillFileBytes: 256 * 1024}
+		installer := skills.Installer{Home: loader.Home(), Fetcher: fetcher, MaxSkillFileBytes: 256 * 1024}
 		status, err := fn(installer)
 		if err != nil {
 			return skillManagementResultMsg{err: err}
@@ -176,6 +270,19 @@ func (m Model) runSkillsManagement(fn func(skills.Installer) (string, error)) te
 			return skillManagementResultMsg{err: err}
 		}
 		return skillManagementResultMsg{status: status, skills: visible, warnings: warnings}
+	}
+}
+
+func (m Model) runSkillsManagementKeepOpen(fn func(skills.Installer) (string, error)) tea.Cmd {
+	base := m.runSkillsManagement(fn)
+	return func() tea.Msg {
+		msg := base()
+		result, ok := msg.(skillManagementResultMsg)
+		if !ok {
+			return msg
+		}
+		result.keepSkillsOpen = true
+		return result
 	}
 }
 
@@ -195,5 +302,26 @@ func resolveVisibleSkillsForTUI(home string, cluster string, cfg configschema.Sk
 		MaxSkillFileBytes: 256 * 1024,
 		MaxVisibleSkills:  cfg.MaxVisibleSkills,
 		IndexCharBudget:   cfg.IndexTokenBudget,
+	})
+}
+
+func (m Model) installSelectedSkills(names []string) tea.Cmd {
+	pending := m.pendingSkillInstall
+	if len(names) == 0 {
+		return func() tea.Msg {
+			return skillManagementResultMsg{err: fmt.Errorf("no skills selected")}
+		}
+	}
+	return m.runSkillsManagement(func(installer skills.Installer) (string, error) {
+		installed, err := installer.Install(context.Background(), skills.InstallRequest{
+			Source:  pending.source,
+			Scope:   pending.scope,
+			Cluster: pending.cluster,
+			Names:   names,
+		})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf(m.uiLanguage.tr("Installed %d skill(s)", "已安装 %d 个技能"), len(installed)), nil
 	})
 }
