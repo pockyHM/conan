@@ -96,7 +96,7 @@ func (a Applier) Apply(ctx context.Context, req Request) (ApplyResult, error) {
 	}
 	for _, command := range commands {
 		if _, err := runner.Run(ctx, command); err != nil {
-			return ApplyResult{}, fmt.Errorf("agent update command failed: %w", err)
+			return ApplyResult{}, fmt.Errorf("agent update command failed: %s", sanitizeCommandError(err.Error(), req))
 		}
 	}
 
@@ -105,6 +105,28 @@ func (a Applier) Apply(ctx context.Context, req Request) (ApplyResult, error) {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func sanitizeCommandError(message string, req Request) string {
+	sanitized := message
+	if req.Config != "" {
+		sanitized = strings.ReplaceAll(sanitized, req.Config, "[redacted config]")
+	}
+	for _, line := range strings.Split(req.Config, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(key) != "token" {
+			continue
+		}
+		token := strings.TrimSpace(value)
+		if token != "" {
+			sanitized = strings.ReplaceAll(sanitized, token, "[redacted token]")
+		}
+	}
+	sanitized = strings.TrimSpace(sanitized)
+	if sanitized == "" {
+		return "redacted command error"
+	}
+	return sanitized
 }
 
 func writeTempFile(dir, pattern string, data []byte, mode os.FileMode) (string, error) {

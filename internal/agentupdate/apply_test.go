@@ -146,7 +146,7 @@ func TestApplierReturnsCommandFailureWithoutSecrets(t *testing.T) {
 	_, err := Applier{
 		Arch:    func() string { return "amd64" },
 		TempDir: t.TempDir(),
-		Runner:  &fakeRunner{err: errors.New("systemctl failed")},
+		Runner:  &fakeRunner{err: errors.New("systemctl failed: token: secret-token; raw secret-token")},
 	}.Apply(context.Background(), Request{
 		Binary:           encode("override-binary"),
 		Config:           "listen: 0.0.0.0:9280\ntoken: secret-token\n",
@@ -159,7 +159,10 @@ func TestApplierReturnsCommandFailureWithoutSecrets(t *testing.T) {
 	if err == nil {
 		t.Fatalf("err = nil, want command failure")
 	}
-	if strings.Contains(err.Error(), "secret-token") {
+	if !strings.Contains(err.Error(), "agent update command failed") {
+		t.Fatalf("err = %v, want command failure context", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "token: secret-token") {
 		t.Fatalf("err leaks secret: %v", err)
 	}
 }
