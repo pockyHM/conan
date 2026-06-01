@@ -5912,6 +5912,9 @@ func TestAskChoiceToolCallEntersChoiceMode(t *testing.T) {
 	model.streaming = true
 	model.streamID = 1
 	model.activeStreamID = 1
+	ch := make(chan llm.ChatEvent)
+	model.streamCh = ch
+	model.streamCtx = context.Background()
 
 	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
 		ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{
@@ -5926,8 +5929,16 @@ func TestAskChoiceToolCallEntersChoiceMode(t *testing.T) {
 	}})
 	model = next.(Model)
 
-	if cmd != nil {
-		t.Fatalf("ask_choice should pause for user input without command, got %T", execCmd(t, cmd))
+	if cmd == nil {
+		t.Fatal("ask_choice should keep stream reader active while waiting for user input")
+	}
+	msg := execCmd(t, cmd)
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("ask_choice command returned %T, want tea.BatchMsg", msg)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("batch has %d commands, want stream wait and stream timeout", len(batch))
 	}
 	if model.mode != modeChoice {
 		t.Fatalf("mode = %v, want modeChoice", model.mode)
@@ -5942,6 +5953,54 @@ func TestAskChoiceToolCallEntersChoiceMode(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].ToolCallID != "choice-1" || msgs[0].ToolName != metaToolAskChoice {
 		t.Fatalf("conversation messages = %#v, want recorded ask_choice tool call", msgs)
 	}
+
+	go func() {
+		ch <- llm.StopEvent{Reason: llm.StopToolUse}
+	}()
+	continuedMsg := execCmd(t, batch[0])
+	if _, ok := continuedMsg.(streamEventMsg); !ok {
+		t.Fatalf("continued wait command returned %T, want streamEventMsg", continuedMsg)
+	}
+	if model.mode != modeChoice {
+		t.Fatalf("mode after executing wait command = %v, want modeChoice", model.mode)
+	}
+}
+
+func TestAskChoiceStopToolUseKeepsChoiceModeAndStatus(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamCh = make(chan llm.ChatEvent)
+	model.streamCtx = context.Background()
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{
+			"question":"Pick a path",
+			"options":[
+				{"label":"Continue","value":"continue"},
+				{"label":"Revise","value":"revise"}
+			]
+		}`),
+	}})
+	model = next.(Model)
+	choiceStatus := model.status
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopToolUse}})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatal("StopToolUse should wait for ask_choice result before continuing")
+	}
+	if model.mode != modeChoice {
+		t.Fatalf("mode = %v, want modeChoice", model.mode)
+	}
+	if !model.streamEnded {
+		t.Fatal("StopToolUse should mark stream ended")
+	}
+	if model.status != choiceStatus || !strings.Contains(model.status, "Use ↑↓ to choose") {
+		t.Fatalf("status = %q, want choice guidance %q", model.status, choiceStatus)
+	}
 }
 
 func TestAskChoiceInvalidArgumentsReturnToolResult(t *testing.T) {
@@ -5950,8 +6009,6 @@ func TestAskChoiceInvalidArgumentsReturnToolResult(t *testing.T) {
 	model.streaming = true
 	model.streamID = 1
 	model.activeStreamID = 1
-	model.streamEnded = true
-	model.streamToolExpected = 1
 
 	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
 		ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{"question":"Pick","options":[]}`),
@@ -5964,17 +6021,69 @@ func TestAskChoiceInvalidArgumentsReturnToolResult(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("invalid ask_choice arguments should return a tool result command")
 	}
-	msg := execCmd(t, cmd)
-	result, ok := msg.(multiToolResultMsg)
-	if !ok {
-		t.Fatalf("cmd returned %T, want multiToolResultMsg", msg)
-	}
+	result := askChoiceResultFromCmd(t, cmd)
 	if len(result.Results) != 1 || result.Results[0].Success {
 		t.Fatalf("results = %#v, want one failed result", result.Results)
 	}
 	if !strings.Contains(result.Results[0].Output, "at least 2 options") {
 		t.Fatalf("output = %q, want validation error", result.Results[0].Output)
 	}
+}
+
+func TestAskChoiceInvalidArgumentsDoNotWriteAuditExecution(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	auditLog, err := security.NewAuditLogger(auditPath)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	defer auditLog.Close()
+
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", AuditLogger: auditLog})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{"question":"Pick","options":[]}`),
+	}})
+	model = next.(Model)
+
+	result := askChoiceResultFromCmd(t, cmd)
+	next, _ = model.Update(result)
+	model = next.(Model)
+	if model.mode == modeChoice {
+		t.Fatal("invalid ask_choice arguments should not open choice mode")
+	}
+	if err := auditLog.Close(); err != nil {
+		t.Fatalf("close audit log: %v", err)
+	}
+	contents, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if strings.Contains(string(contents), metaToolAskChoice) || strings.Contains(string(contents), "EXECUTE") {
+		t.Fatalf("ask_choice invalid result should not write audit execution: %s", contents)
+	}
+}
+
+func askChoiceResultFromCmd(t *testing.T, cmd tea.Cmd) multiToolResultMsg {
+	t.Helper()
+	msg := execCmd(t, cmd)
+	if result, ok := msg.(multiToolResultMsg); ok {
+		return result
+	}
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd returned %T, want multiToolResultMsg or tea.BatchMsg", msg)
+	}
+	for _, c := range batch {
+		inner := execCmd(t, c)
+		if result, ok := inner.(multiToolResultMsg); ok {
+			return result
+		}
+	}
+	t.Fatal("command did not produce multiToolResultMsg")
+	return multiToolResultMsg{}
 }
 
 func TestConfirmationSummaryShowsFileTransferImpact(t *testing.T) {

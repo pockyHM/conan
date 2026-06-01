@@ -733,7 +733,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.ac = newAutocompleteWithLanguage(m.uiLanguage)
 					m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
 					m.updateViewportContent()
-					return m, nil
+					return m, tea.Batch(m.waitForEventAndTimeout(msg.streamID)...)
 				}
 			} else if memory.IsMemoryTool(e.Name) {
 				toolCmd = m.handleMemoryTool(msg.streamID, call)
@@ -753,7 +753,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.streamEnded = true
 			if e.Reason == llm.StopToolUse {
-				if m.mode == modeNodePrompt {
+				if m.mode == modeChoice {
+					// Keep the choice prompt guidance visible while the stream waits for user input.
+				} else if m.mode == modeNodePrompt {
 					m.status = m.nodePrompt.label + " " + m.uiLanguage.tr("required", "必填")
 				} else if m.hasPendingVisibleTool() {
 					m.status = m.uiLanguage.tr("Running tool...", "正在运行工具...")
@@ -848,7 +850,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.conv.AddToolResult(msg.Call.ID, aggregatedOutput)
 		}
 		m.recordToolResultEvidence(msg.Call, msg.Results, aggregatedOutput)
-		m.logAuditExecution(msg.Call, msg.Results)
+		if msg.Call.Name != metaToolAskChoice {
+			m.logAuditExecution(msg.Call, msg.Results)
+		}
 		return m.completeToolAndResume(msg.streamID, msg.Call)
 
 	case skillManagementResultMsg:
