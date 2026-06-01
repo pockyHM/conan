@@ -5906,6 +5906,77 @@ func TestToolCallNeedsConfirmation(t *testing.T) {
 	}
 }
 
+func TestAskChoiceToolCallEntersChoiceMode(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{
+			"question":"Pick a path",
+			"options":[
+				{"label":"Continue","value":"continue"},
+				{"label":"Revise","value":"revise"}
+			],
+			"default_value":"revise",
+			"allow_cancel":true
+		}`),
+	}})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatalf("ask_choice should pause for user input without command, got %T", execCmd(t, cmd))
+	}
+	if model.mode != modeChoice {
+		t.Fatalf("mode = %v, want modeChoice", model.mode)
+	}
+	if model.choice.question != "Pick a path" || model.choice.selected != 1 {
+		t.Fatalf("choice state = %#v", model.choice)
+	}
+	if len(model.messages) != 1 || model.messages[0].toolCallID != "choice-1" || model.messages[0].toolName != metaToolAskChoice {
+		t.Fatalf("messages = %#v, want recorded ask_choice placeholder", model.messages)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].ToolCallID != "choice-1" || msgs[0].ToolName != metaToolAskChoice {
+		t.Fatalf("conversation messages = %#v, want recorded ask_choice tool call", msgs)
+	}
+}
+
+func TestAskChoiceInvalidArgumentsReturnToolResult(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{"question":"Pick","options":[]}`),
+	}})
+	model = next.(Model)
+
+	if model.mode == modeChoice {
+		t.Fatal("invalid ask_choice arguments should not open choice mode")
+	}
+	if cmd == nil {
+		t.Fatal("invalid ask_choice arguments should return a tool result command")
+	}
+	msg := execCmd(t, cmd)
+	result, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("cmd returned %T, want multiToolResultMsg", msg)
+	}
+	if len(result.Results) != 1 || result.Results[0].Success {
+		t.Fatalf("results = %#v, want one failed result", result.Results)
+	}
+	if !strings.Contains(result.Results[0].Output, "at least 2 options") {
+		t.Fatalf("output = %q, want validation error", result.Results[0].Output)
+	}
+}
+
 func TestConfirmationSummaryShowsFileTransferImpact(t *testing.T) {
 	call := llm.ToolCall{
 		Name:      metaToolFilePut,

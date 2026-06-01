@@ -107,6 +107,7 @@ const (
 	modeChat tuiMode = iota
 	modeNodeSelect
 	modeConfirm
+	modeChoice
 	modeSession
 	modeNodePrompt
 	modeNodeAddForm
@@ -191,6 +192,7 @@ type Model struct {
 	pendingToolCall     *llm.ToolCall
 	pendingRisk         *security.RiskAssessment
 	confirmChoice       int // 0=Allow, 1=Deny
+	choice              choiceState
 	nodePrompt          nodePromptState
 	nodeAddForm         nodeAddForm
 
@@ -718,7 +720,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
 			var toolCmd tea.Cmd
-			if memory.IsMemoryTool(e.Name) {
+			if e.Name == metaToolAskChoice {
+				choice, err := newChoiceState(msg.streamID, call)
+				if err != nil {
+					toolCmd = func() tea.Msg {
+						return singleToolError(msg.streamID, call, err.Error())
+					}
+				} else {
+					m.mode = modeChoice
+					m.choice = choice
+					m.input = ""
+					m.ac = newAutocompleteWithLanguage(m.uiLanguage)
+					m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
+					m.updateViewportContent()
+					return m, nil
+				}
+			} else if memory.IsMemoryTool(e.Name) {
 				toolCmd = m.handleMemoryTool(msg.streamID, call)
 			} else if e.Name == metaToolSubagentsRun {
 				toolCmd = m.dispatchSubagentsRun(msg.streamID, call)
