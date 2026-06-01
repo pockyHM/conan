@@ -6169,6 +6169,9 @@ func TestAskChoiceCtrlCRecordsInterruptedToolResult(t *testing.T) {
 	if model.mode != modeChat {
 		t.Fatalf("mode = %v, want modeChat", model.mode)
 	}
+	if model.status != "Interrupted" {
+		t.Fatalf("status = %q, want Interrupted", model.status)
+	}
 	if model.choice.call.ID != "" {
 		t.Fatalf("choice state should be cleared: %#v", model.choice)
 	}
