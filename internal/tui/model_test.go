@@ -6003,6 +6003,129 @@ func TestAskChoiceStopToolUseKeepsChoiceModeAndStatus(t *testing.T) {
 	}
 }
 
+func TestAskChoiceEnterReturnsSelectedToolResult(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID: 1,
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question: "Pick one",
+		options: []choiceOption{
+			{Label: "Continue", Value: "continue"},
+			{Label: "Revise", Value: "revise"},
+		},
+		selected:    0,
+		allowCancel: true,
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	if model.choice.selected != 1 {
+		t.Fatalf("selected = %d, want 1", model.choice.selected)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.choice.call.ID != "" {
+		t.Fatalf("choice state should be cleared: %#v", model.choice)
+	}
+	if cmd == nil {
+		t.Fatal("enter should continue after tool result")
+	}
+	if len(model.messages) != 1 || !strings.Contains(model.messages[0].toolOutput, `"value":"revise"`) {
+		t.Fatalf("messages = %#v, want selected tool output", model.messages)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].Role != conversation.RoleTool || !strings.Contains(msgs[0].Content, `"value":"revise"`) {
+		t.Fatalf("conversation messages = %#v, want selected tool result", msgs)
+	}
+}
+
+func TestAskChoiceEscCancelsWhenAllowed(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID:    1,
+		call:        llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question:    "Pick one",
+		options:     []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}},
+		allowCancel: true,
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if cmd == nil {
+		t.Fatal("cancel should continue after tool result")
+	}
+	if !strings.Contains(model.messages[0].toolOutput, `"cancelled":true`) {
+		t.Fatalf("tool output = %q, want cancellation JSON", model.messages[0].toolOutput)
+	}
+}
+
+func TestAskChoiceEscBlockedWhenCancelDisabled(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.mode = modeChoice
+	model.choice = choiceState{
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice},
+		question: "Pick one",
+		options:  []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}},
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatalf("cmd = %T, want nil when cancel is disabled", cmd)
+	}
+	if model.mode != modeChoice {
+		t.Fatalf("mode = %v, want modeChoice", model.mode)
+	}
+	if !strings.Contains(model.status, "Choose an option") && !strings.Contains(model.status, "请选择") {
+		t.Fatalf("status = %q, want choose-option guidance", model.status)
+	}
+}
+
+func TestAskChoiceViewRendersOptions(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.width = 80
+	model.mode = modeChoice
+	model.choice = choiceState{
+		question: "Pick a path",
+		options: []choiceOption{
+			{Label: "Continue", Value: "continue", Description: "Run the planned command"},
+			{Label: "Revise", Value: "revise"},
+		},
+		selected:    0,
+		allowCancel: true,
+	}
+
+	view := model.View()
+	for _, want := range []string{"Pick a path", "▶ Continue", "Run the planned command", "Revise", "Enter to choose", "Esc to cancel"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestAskChoiceInvalidArgumentsReturnToolResult(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})

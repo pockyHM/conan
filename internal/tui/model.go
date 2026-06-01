@@ -985,6 +985,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeChoice {
+		return m.handleChoiceKey(key)
+	}
 	if m.mode == modeNodePrompt {
 		return m.handleNodePromptKey(key)
 	}
@@ -1133,6 +1136,57 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) handleChoiceKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyUp:
+		m.choice.moveChoice(-1)
+		m.updateViewportContent()
+		return m, nil
+	case tea.KeyDown:
+		m.choice.moveChoice(1)
+		m.updateViewportContent()
+		return m, nil
+	case tea.KeyEnter:
+		return m.finishChoice(m.choice.selectedResultJSON())
+	case tea.KeyEsc:
+		if !m.choice.allowCancel {
+			m.status = m.uiLanguage.tr("Choose an option", "请选择一个选项")
+			m.updateViewportContent()
+			return m, nil
+		}
+		return m.finishChoice(choiceCancelledResultJSON())
+	case tea.KeyCtrlC:
+		m.finishStream(true)
+		m.mode = modeChat
+		m.choice = choiceState{}
+		m.input = ""
+		m.ac = newAutocompleteWithLanguage(m.uiLanguage)
+		m.resetInputHistoryNavigation()
+		m.status = m.uiLanguage.tr("Interrupted", "已中断")
+		m.updateViewportContent()
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) finishChoice(output string) (tea.Model, tea.Cmd) {
+	state := m.choice
+	m.mode = modeChat
+	m.choice = choiceState{}
+	m.input = ""
+	m.ac = newAutocompleteWithLanguage(m.uiLanguage)
+	m.resetInputHistoryNavigation()
+	results := []nodeToolResult{{Node: "local", Output: output, Success: true}}
+	m.fillToolPlaceholder(state.call, output, results)
+	if m.conv != nil {
+		m.conv.AddToolResult(state.call.ID, output)
+	}
+	m.status = m.uiLanguage.tr("Ready", "就绪")
+	m.updateViewportContent()
+	return m.completeToolAndResume(state.streamID, state.call)
 }
 
 func (m *Model) scrollViewportForKey(key tea.KeyMsg) bool {
@@ -1841,6 +1895,8 @@ func (m Model) View() string {
 	}
 	if m.mode == modeConfirm {
 		footer = m.renderConfirmFooter()
+	} else if m.mode == modeChoice {
+		footer = m.renderChoiceFooter()
 	} else if m.mode == modeNodePrompt {
 		footer = m.renderNodePromptFooter()
 	}
@@ -1885,6 +1941,34 @@ func (m Model) renderNodePromptFooter() string {
 		inputPromptStyle.Render(state.label),
 		renderInputBox(input, m.width, m.uiLanguage),
 		statusStyle.Render(m.uiLanguage.tr("Enter to continue, Esc to cancel", "Enter 继续，Esc 取消")),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderChoiceFooter() string {
+	state := m.choice
+	var opts []string
+	for i, opt := range state.options {
+		prefix := "  "
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		if i == state.selected {
+			prefix = "\u25b6 "
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
+		}
+		opts = append(opts, style.Render(prefix+opt.Label))
+		if opt.Description != "" {
+			opts = append(opts, statusStyle.Render("  "+opt.Description))
+		}
+	}
+	help := m.uiLanguage.tr("Use ↑↓ to choose, Enter to choose", "使用 ↑↓ 选择，Enter 确认")
+	if state.allowCancel {
+		help += m.uiLanguage.tr(", Esc to cancel", "，Esc 取消")
+	}
+	lines := []string{
+		statusStyle.Render(m.status),
+		inputPromptStyle.Render(state.question),
+		strings.Join(opts, "\n"),
+		statusStyle.Render(help),
 	}
 	return strings.Join(lines, "\n")
 }
