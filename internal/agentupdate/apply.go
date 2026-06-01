@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 )
 
 type CommandRunner interface {
@@ -68,18 +67,16 @@ func (a Applier) Apply(ctx context.Context, req Request) (ApplyResult, error) {
 		tempDir = os.TempDir()
 	}
 
-	nanos := time.Now().UnixNano()
-	binaryTmp := filepath.Join(tempDir, fmt.Sprintf("conan-agent.%d", nanos))
-	configTmp := filepath.Join(tempDir, fmt.Sprintf("conan-agent-config.%d", nanos))
-	unitTmp := filepath.Join(tempDir, fmt.Sprintf("conan-agent.service.%d", nanos))
-
-	if err := os.WriteFile(binaryTmp, binary, 0755); err != nil {
+	binaryTmp, err := writeTempFile(tempDir, "conan-agent.*", binary, 0755)
+	if err != nil {
 		return ApplyResult{}, err
 	}
-	if err := os.WriteFile(configTmp, []byte(req.Config), 0600); err != nil {
+	configTmp, err := writeTempFile(tempDir, "conan-agent-config.*", []byte(req.Config), 0600)
+	if err != nil {
 		return ApplyResult{}, err
 	}
-	if err := os.WriteFile(unitTmp, []byte(req.SystemdUnit), 0644); err != nil {
+	unitTmp, err := writeTempFile(tempDir, "conan-agent.service.*", []byte(req.SystemdUnit), 0644)
+	if err != nil {
 		return ApplyResult{}, err
 	}
 
@@ -108,4 +105,24 @@ func (a Applier) Apply(ctx context.Context, req Request) (ApplyResult, error) {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func writeTempFile(dir, pattern string, data []byte, mode os.FileMode) (string, error) {
+	file, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	name := file.Name()
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	return name, nil
 }

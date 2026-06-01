@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -83,11 +84,14 @@ func TestApplierWritesFilesWithExpectedPermissionsAndRunsFixedCommands(t *testin
 		t.Fatalf("Apply: %v", err)
 	}
 
+	binaryTmp := runner.installedSourceFor("install -m 0755 ")
+	configTmp := runner.installedSourceFor("install -m 0600 ")
+	unitTmp := runner.installedSourceFor("install -m 0644 ")
 	wantCommands := []string{
-		"install -m 0755 '/",
+		"install -m 0755 " + shellQuote(binaryTmp) + " '/usr/local/bin/conan-agent'",
 		"mkdir -p '/etc/conan-agent'",
-		"install -m 0600 '/",
-		"install -m 0644 '/",
+		"install -m 0600 " + shellQuote(configTmp) + " '/etc/conan-agent/config.yaml'",
+		"install -m 0644 " + shellQuote(unitTmp) + " '/etc/systemd/system/conan-agent.service'",
 		"systemctl daemon-reload",
 		"systemctl enable --now conan-agent",
 		"systemctl restart conan-agent",
@@ -96,19 +100,44 @@ func TestApplierWritesFilesWithExpectedPermissionsAndRunsFixedCommands(t *testin
 		t.Fatalf("commands = %#v, want %d commands", runner.commands, len(wantCommands))
 	}
 	for i, want := range wantCommands {
-		if !strings.HasPrefix(runner.commands[i], want) {
-			t.Fatalf("command %d = %q, want prefix %q", i, runner.commands[i], want)
+		if runner.commands[i] != want {
+			t.Fatalf("command %d = %q, want %q", i, runner.commands[i], want)
 		}
 	}
 
-	for _, prefix := range []string{"install -m 0755 ", "install -m 0600 ", "install -m 0644 "} {
-		source := runner.installedSourceFor(prefix)
-		data, err := os.ReadFile(source)
+	if filepath.Base(binaryTmp) == filepath.Base(configTmp) ||
+		filepath.Base(binaryTmp) == filepath.Base(unitTmp) ||
+		filepath.Base(configTmp) == filepath.Base(unitTmp) {
+		t.Fatalf("temp source basenames must be unique: binary=%q config=%q unit=%q", binaryTmp, configTmp, unitTmp)
+	}
+	if suffixAfterLastDot(binaryTmp) == suffixAfterLastDot(configTmp) ||
+		suffixAfterLastDot(binaryTmp) == suffixAfterLastDot(unitTmp) ||
+		suffixAfterLastDot(configTmp) == suffixAfterLastDot(unitTmp) {
+		t.Fatalf("temp source suffixes must be independently unique: binary=%q config=%q unit=%q", binaryTmp, configTmp, unitTmp)
+	}
+
+	for _, tt := range []struct {
+		name string
+		path string
+		mode os.FileMode
+	}{
+		{name: "binary", path: binaryTmp, mode: 0755},
+		{name: "config", path: configTmp, mode: 0600},
+		{name: "unit", path: unitTmp, mode: 0644},
+	} {
+		info, err := os.Stat(tt.path)
 		if err != nil {
-			t.Fatalf("read source for %q: %v", prefix, err)
+			t.Fatalf("stat %s source: %v", tt.name, err)
+		}
+		if got := info.Mode().Perm(); got != tt.mode {
+			t.Fatalf("%s mode = %v, want %v", tt.name, got, tt.mode)
+		}
+		data, err := os.ReadFile(tt.path)
+		if err != nil {
+			t.Fatalf("read %s source: %v", tt.name, err)
 		}
 		if len(data) == 0 {
-			t.Fatalf("source for %q is empty", prefix)
+			t.Fatalf("%s source is empty", tt.name)
 		}
 	}
 }
@@ -132,6 +161,58 @@ func TestApplierReturnsCommandFailureWithoutSecrets(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-token") {
 		t.Fatalf("err leaks secret: %v", err)
+	}
+}
+
+func TestApplierCreatesUniqueTempSourcesAcrossConcurrentCalls(t *testing.T) {
+	const workers = 32
+	tempDir := t.TempDir()
+	results := make(chan []string, workers)
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			runner := &fakeRunner{}
+			_, err := Applier{
+				Arch:    func() string { return "amd64" },
+				TempDir: tempDir,
+				Runner:  runner,
+			}.Apply(context.Background(), Request{
+				Binary:           encode("override-binary"),
+				Config:           "listen: 0.0.0.0:9280\ntoken: node-token\n",
+				SystemdUnit:      "unit",
+				RemoteBinaryPath: "/usr/local/bin/conan-agent",
+				RemoteConfigPath: "/etc/conan-agent/config.yaml",
+				SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- []string{
+				runner.installedSourceFor("install -m 0755 "),
+				runner.installedSourceFor("install -m 0600 "),
+				runner.installedSourceFor("install -m 0644 "),
+			}
+		}()
+	}
+
+	seen := map[string]bool{}
+	for i := 0; i < workers; i++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("Apply: %v", err)
+		case paths := <-results:
+			for _, path := range paths {
+				if path == "" {
+					t.Fatalf("temp source path is empty")
+				}
+				if seen[path] {
+					t.Fatalf("temp source path reused: %q", path)
+				}
+				seen[path] = true
+			}
+		}
 	}
 }
 
@@ -162,4 +243,13 @@ func (r *fakeRunner) installedSourceFor(prefix string) string {
 
 func encode(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+func suffixAfterLastDot(path string) string {
+	base := filepath.Base(path)
+	idx := strings.LastIndex(base, ".")
+	if idx == -1 {
+		return base
+	}
+	return base[idx+1:]
 }
