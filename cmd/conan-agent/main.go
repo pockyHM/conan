@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/pockyHM/conan/internal/agent"
+	"github.com/pockyHM/conan/internal/agentupdate"
 	"github.com/pockyHM/conan/internal/tools"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/spf13/cobra"
@@ -87,6 +88,7 @@ func registerAllTools(r *tools.Registry, cfg *configschema.AgentConfig) {
 	registerToolsByName(r, tools.NewPkgTools(), "pkg_list", "pkg_search")
 	registerToolsByName(r, tools.NewCronTools(), "cron_list", "cron_show")
 	registerToolsByName(r, tools.NewDockerTools(), "docker_ps", "docker_images", "docker_logs")
+	r.Register(tools.NewAgentUpdateTool(agentupdate.Applier{}))
 }
 
 func registerToolsByName(r *tools.Registry, candidates []tools.Tool, names ...string) {

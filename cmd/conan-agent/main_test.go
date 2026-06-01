@@ -41,6 +41,7 @@ func TestRegisterAllToolsOnlyExposesShellAndReadOnlyTools(t *testing.T) {
 		"docker_ps":      true,
 		"docker_images":  true,
 		"docker_logs":    true,
+		"agent_update":   true,
 	}
 
 	for _, tool := range registry.List() {
@@ -78,6 +79,16 @@ func TestRegisterAllToolsOnlyExposesShellAndReadOnlyTools(t *testing.T) {
 		if _, ok := registry.Get(name); ok {
 			t.Fatalf("mutating tool %q should not be registered", name)
 		}
+	}
+}
+
+func TestRegisterAllToolsCanDisableAgentUpdate(t *testing.T) {
+	registry := tools.NewRegistry()
+	registerAllTools(registry, &configschema.AgentConfig{DisabledTools: []string{"agent_update"}})
+	registry.DisableAll([]string{"agent_update"})
+
+	if _, ok := registry.Get("agent_update"); ok {
+		t.Fatal("agent_update should be disabled")
 	}
 }
 

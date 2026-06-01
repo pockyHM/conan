@@ -65,6 +65,7 @@ func DefaultMetadata() map[string]Metadata {
 		meta("file_put", SafetyMutating, ScopeNode, []string{"filesystem", "transfer"}, []string{"upload", "copy"}),
 		meta("file_get", SafetyMutating, ScopeLocal, []string{"filesystem", "transfer"}, []string{"download", "copy"}),
 		meta("node_add", SafetyMutating, ScopeCluster, []string{"node", "deploy"}, []string{"agent", "ssh"}),
+		meta("agent_update", SafetyDestructive, ScopeNode, []string{"agent", "deploy"}, []string{"update", "self-update"}),
 		meta("image_analyze", SafetyReadOnly, ScopeLocal, []string{"vision"}, []string{"image"}),
 		meta("memory_search", SafetyReadOnly, ScopeLocal, []string{"memory"}, []string{"search"}),
 		meta("memory_read", SafetyReadOnly, ScopeLocal, []string{"memory"}, []string{"read"}),
