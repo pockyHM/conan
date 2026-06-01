@@ -111,6 +111,38 @@ func TestNodeAddToolOnlyAvailableWhenNodeToolsEnabled(t *testing.T) {
 	}
 }
 
+func TestAskChoiceToolDefinition(t *testing.T) {
+	var def *llm.ToolDef
+	for i := range metaToolDefs {
+		if metaToolDefs[i].Name == metaToolAskChoice {
+			def = &metaToolDefs[i]
+			break
+		}
+	}
+	if def == nil {
+		t.Fatal("ask_choice meta tool is not exposed")
+	}
+	if !strings.Contains(def.Description, "choose one option") {
+		t.Fatalf("description = %q, want choice guidance", def.Description)
+	}
+	schema := string(def.InputSchema)
+	for _, want := range []string{`"question"`, `"options"`, `"label"`, `"value"`, `"description"`, `"default_value"`, `"allow_cancel"`, `"minItems": 2`, `"maxItems": 10`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("ask_choice schema missing %s:\n%s", want, schema)
+		}
+	}
+}
+
+func TestAskChoiceAvailableByDefault(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	for _, tool := range model.availableToolDefs() {
+		if tool.Name == metaToolAskChoice {
+			return
+		}
+	}
+	t.Fatal("ask_choice should be available by default")
+}
+
 func TestSanitizeToolArgumentsRedactsNodeAddPassword(t *testing.T) {
 	raw := json.RawMessage(`{"host":"10.0.0.5","password":"secret","ssh_port":2222}`)
 

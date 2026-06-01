@@ -9,9 +9,8 @@ import (
 )
 
 const (
-	metaToolAskChoice = "ask_choice"
-	minChoiceOptions  = 2
-	maxChoiceOptions  = 10
+	minChoiceOptions = 2
+	maxChoiceOptions = 10
 )
 
 type choiceOption struct {

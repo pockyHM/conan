@@ -26,6 +26,7 @@ const (
 	metaToolFilePut      = "file_put"
 	metaToolFileGet      = "file_get"
 	metaToolImageAnalyze = "image_analyze"
+	metaToolAskChoice    = "ask_choice"
 )
 
 var metaToolDefs = []llm.ToolDef{
@@ -112,6 +113,33 @@ var metaToolDefs = []llm.ToolDef{
 				"local_path": {"type": "string", "description": "Local workspace destination path. Must be relative to the workspace."}
 			},
 			"required": ["node", "remote_path", "local_path"]
+		}`),
+	},
+	{
+		Name:        metaToolAskChoice,
+		Description: "Ask the user to choose one option in the TUI before continuing. Use this when the next step depends on a user decision, such as choosing a plan, approving a non-tool workflow choice, selecting a mode, or clarifying an ambiguous preference. Do not use for security approval of tool execution; Conan handles that separately.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"question": {"type": "string", "description": "The concise question to show to the user."},
+				"options": {
+					"type": "array",
+					"minItems": 2,
+					"maxItems": 10,
+					"items": {
+						"type": "object",
+						"properties": {
+							"label": {"type": "string", "description": "Short user-visible option label."},
+							"value": {"type": "string", "description": "Stable machine-readable value returned to the model."},
+							"description": {"type": "string", "description": "Optional short explanation of the option."}
+						},
+						"required": ["label", "value"]
+					}
+				},
+				"default_value": {"type": "string", "description": "Optional option value to preselect."},
+				"allow_cancel": {"type": "boolean", "description": "Whether Esc should return a cancellation result."}
+			},
+			"required": ["question", "options"]
 		}`),
 	},
 }
