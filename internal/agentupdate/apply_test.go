@@ -31,6 +31,20 @@ func TestApplierRejectsInvalidBinary(t *testing.T) {
 
 func TestApplierSelectsBinaryForProcessArchitecture(t *testing.T) {
 	runner := &fakeRunner{}
+	runner.onRun = func(command string) error {
+		if !strings.HasPrefix(command, "install -m 0755 ") {
+			return nil
+		}
+		binaryTmp := runner.installedSourceFor("install -m 0755 ")
+		data, err := os.ReadFile(binaryTmp)
+		if err != nil {
+			t.Fatalf("read temp binary: %v", err)
+		}
+		if string(data) != "arm64-binary" {
+			t.Fatalf("temp binary = %q, want arm64-binary", data)
+		}
+		return nil
+	}
 	result, err := Applier{
 		Arch:    func() string { return "arm64" },
 		TempDir: t.TempDir(),
@@ -56,18 +70,43 @@ func TestApplierSelectsBinaryForProcessArchitecture(t *testing.T) {
 	if result.BinaryPath == "" {
 		t.Fatalf("binary path is empty")
 	}
-	binaryTmp := runner.installedSourceFor("install -m 0755 ")
-	data, err := os.ReadFile(binaryTmp)
-	if err != nil {
-		t.Fatalf("read temp binary: %v", err)
-	}
-	if string(data) != "arm64-binary" {
-		t.Fatalf("temp binary = %q, want arm64-binary", data)
-	}
 }
 
 func TestApplierWritesFilesWithExpectedPermissionsAndRunsFixedCommands(t *testing.T) {
 	runner := &fakeRunner{}
+	checkedSources := map[string]bool{}
+	runner.onRun = func(command string) error {
+		for _, tt := range []struct {
+			name   string
+			prefix string
+			mode   os.FileMode
+		}{
+			{name: "binary", prefix: "install -m 0755 ", mode: 0755},
+			{name: "config", prefix: "install -m 0600 ", mode: 0600},
+			{name: "unit", prefix: "install -m 0644 ", mode: 0644},
+		} {
+			if !strings.HasPrefix(command, tt.prefix) {
+				continue
+			}
+			source := runner.installedSourceFor(tt.prefix)
+			info, err := os.Stat(source)
+			if err != nil {
+				t.Fatalf("stat %s source: %v", tt.name, err)
+			}
+			if got := info.Mode().Perm(); got != tt.mode {
+				t.Fatalf("%s mode = %v, want %v", tt.name, got, tt.mode)
+			}
+			data, err := os.ReadFile(source)
+			if err != nil {
+				t.Fatalf("read %s source: %v", tt.name, err)
+			}
+			if len(data) == 0 {
+				t.Fatalf("%s source is empty", tt.name)
+			}
+			checkedSources[tt.name] = true
+		}
+		return nil
+	}
 	_, err := Applier{
 		Arch:    func() string { return "amd64" },
 		TempDir: t.TempDir(),
@@ -116,28 +155,9 @@ func TestApplierWritesFilesWithExpectedPermissionsAndRunsFixedCommands(t *testin
 		t.Fatalf("temp source suffixes must be independently unique: binary=%q config=%q unit=%q", binaryTmp, configTmp, unitTmp)
 	}
 
-	for _, tt := range []struct {
-		name string
-		path string
-		mode os.FileMode
-	}{
-		{name: "binary", path: binaryTmp, mode: 0755},
-		{name: "config", path: configTmp, mode: 0600},
-		{name: "unit", path: unitTmp, mode: 0644},
-	} {
-		info, err := os.Stat(tt.path)
-		if err != nil {
-			t.Fatalf("stat %s source: %v", tt.name, err)
-		}
-		if got := info.Mode().Perm(); got != tt.mode {
-			t.Fatalf("%s mode = %v, want %v", tt.name, got, tt.mode)
-		}
-		data, err := os.ReadFile(tt.path)
-		if err != nil {
-			t.Fatalf("read %s source: %v", tt.name, err)
-		}
-		if len(data) == 0 {
-			t.Fatalf("%s source is empty", tt.name)
+	for _, name := range []string{"binary", "config", "unit"} {
+		if !checkedSources[name] {
+			t.Fatalf("%s source was not checked during install", name)
 		}
 	}
 }
@@ -220,13 +240,75 @@ func TestApplierCreatesUniqueTempSourcesAcrossConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestApplierRemovesTempSourcesAfterSuccessAndCommandFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		failCommand string
+		wantErr     bool
+	}{
+		{name: "success"},
+		{name: "later command failure", failCommand: "systemctl daemon-reload", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			runner := &fakeRunner{}
+			var paths []string
+			runner.onRun = func(command string) error {
+				for _, prefix := range []string{"install -m 0755 ", "install -m 0600 ", "install -m 0644 "} {
+					if strings.HasPrefix(command, prefix) {
+						paths = append(paths, runner.installedSourceFor(prefix))
+					}
+				}
+				if command == tt.failCommand {
+					return errors.New("systemctl failed")
+				}
+				return nil
+			}
+
+			_, err := Applier{
+				Arch:    func() string { return "amd64" },
+				TempDir: tempDir,
+				Runner:  runner,
+			}.Apply(context.Background(), Request{
+				Binary:           encode("override-binary"),
+				Config:           "listen: 0.0.0.0:9280\ntoken: node-token\n",
+				SystemdUnit:      "unit",
+				RemoteBinaryPath: "/usr/local/bin/conan-agent",
+				RemoteConfigPath: "/etc/conan-agent/config.yaml",
+				SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
+			})
+			if tt.wantErr && err == nil {
+				t.Fatalf("err = nil, want command failure")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			if len(paths) != 3 {
+				t.Fatalf("temp source paths = %v, want 3", paths)
+			}
+			for _, path := range paths {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("stat %q err = %v, want not exist", path, err)
+				}
+			}
+		})
+	}
+}
+
 type fakeRunner struct {
 	commands []string
 	err      error
+	onRun    func(command string) error
 }
 
 func (r *fakeRunner) Run(_ context.Context, command string) (string, error) {
 	r.commands = append(r.commands, command)
+	if r.onRun != nil {
+		if err := r.onRun(command); err != nil {
+			return "", err
+		}
+	}
 	return "", r.err
 }
 

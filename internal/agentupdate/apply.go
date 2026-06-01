@@ -71,14 +71,17 @@ func (a Applier) Apply(ctx context.Context, req Request) (ApplyResult, error) {
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	defer os.Remove(binaryTmp)
 	configTmp, err := writeTempFile(tempDir, "conan-agent-config.*", []byte(req.Config), 0600)
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	defer os.Remove(configTmp)
 	unitTmp, err := writeTempFile(tempDir, "conan-agent.service.*", []byte(req.SystemdUnit), 0644)
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	defer os.Remove(unitTmp)
 
 	runner := a.Runner
 	if runner == nil {
@@ -135,6 +138,12 @@ func writeTempFile(dir, pattern string, data []byte, mode os.FileMode) (string, 
 		return "", err
 	}
 	name := file.Name()
+	removeOnError := true
+	defer func() {
+		if removeOnError {
+			_ = os.Remove(name)
+		}
+	}()
 	if err := file.Chmod(mode); err != nil {
 		_ = file.Close()
 		return "", err
@@ -146,5 +155,6 @@ func writeTempFile(dir, pattern string, data []byte, mode os.FileMode) (string, 
 	if err := file.Close(); err != nil {
 		return "", err
 	}
+	removeOnError = false
 	return name, nil
 }
