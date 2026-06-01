@@ -808,6 +808,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.isActiveStream(msg.streamID) || !m.streaming || msg.eventSeq != m.streamEventSeq {
 			return m, nil
 		}
+		if m.mode == modeChoice {
+			return m, nil
+		}
 		m.finishStream(true)
 		m.status = fmt.Sprintf("Stream timeout: no model event for %.0fs", streamEventTimeout.Seconds())
 		return m, nil
@@ -1158,6 +1161,13 @@ func (m Model) handleChoiceKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.finishChoice(choiceCancelledResultJSON())
 	case tea.KeyCtrlC:
+		state := m.choice
+		output := "Interrupted by user"
+		results := []nodeToolResult{{Node: "local", Output: output, Success: false}}
+		m.fillToolPlaceholder(state.call, output, results)
+		if m.conv != nil {
+			m.conv.AddToolResult(state.call.ID, output)
+		}
 		m.finishStream(true)
 		m.mode = modeChat
 		m.choice = choiceState{}

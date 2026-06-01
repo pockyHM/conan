@@ -6051,6 +6051,63 @@ func TestAskChoiceEnterReturnsSelectedToolResult(t *testing.T) {
 	}
 }
 
+func TestAskChoiceStreamTimeoutKeepsWaitingForChoice(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.streamEventSeq = 3
+	model.mode = modeChoice
+	model.status = "Use ↑↓ to choose, Enter to confirm"
+	model.choice = choiceState{
+		streamID: 1,
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question: "Pick one",
+		options: []choiceOption{
+			{Label: "Continue", Value: "continue"},
+			{Label: "Revise", Value: "revise"},
+		},
+		selected:    0,
+		allowCancel: true,
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+	choiceStatus := model.status
+
+	next, cmd := model.Update(streamTimeoutMsg{streamID: 1, eventSeq: 3})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatalf("timeout while choosing returned cmd %T, want nil", cmd)
+	}
+	if !model.streaming {
+		t.Fatal("timeout while choosing should keep stream state active")
+	}
+	if model.mode != modeChoice {
+		t.Fatalf("mode = %v, want modeChoice", model.mode)
+	}
+	if model.activeStreamID != 1 || model.streamID != 1 || !model.streamEnded || model.streamToolExpected != 1 {
+		t.Fatalf("stream state changed unexpectedly: active=%d id=%d ended=%v expected=%d", model.activeStreamID, model.streamID, model.streamEnded, model.streamToolExpected)
+	}
+	if model.status != choiceStatus {
+		t.Fatalf("status = %q, want unchanged choice guidance %q", model.status, choiceStatus)
+	}
+
+	next, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if cmd == nil {
+		t.Fatal("enter after timeout should continue after tool result")
+	}
+	if len(model.messages) != 1 || !strings.Contains(model.messages[0].toolOutput, `"value":"continue"`) {
+		t.Fatalf("messages = %#v, want selected tool output", model.messages)
+	}
+}
+
 func TestAskChoiceEscCancelsWhenAllowed(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
@@ -6079,6 +6136,51 @@ func TestAskChoiceEscCancelsWhenAllowed(t *testing.T) {
 	}
 	if !strings.Contains(model.messages[0].toolOutput, `"cancelled":true`) {
 		t.Fatalf("tool output = %q, want cancellation JSON", model.messages[0].toolOutput)
+	}
+}
+
+func TestAskChoiceCtrlCRecordsInterruptedToolResult(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID:    1,
+		call:        llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question:    "Pick one",
+		options:     []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}},
+		allowCancel: true,
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatalf("ctrl-c returned cmd %T, want nil", cmd)
+	}
+	if model.streaming {
+		t.Fatal("ctrl-c should interrupt streaming")
+	}
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.choice.call.ID != "" {
+		t.Fatalf("choice state should be cleared: %#v", model.choice)
+	}
+	if len(model.messages) != 1 || !strings.Contains(strings.ToLower(model.messages[0].toolOutput), "interrupted") {
+		t.Fatalf("messages = %#v, want interrupted tool output", model.messages)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].Role != conversation.RoleTool || msgs[0].ToolCallID != "choice-1" {
+		t.Fatalf("conversation messages = %#v, want tool result for choice-1", msgs)
+	}
+	if !strings.Contains(strings.ToLower(msgs[0].Content), "interrupted") {
+		t.Fatalf("conversation tool result = %q, want interrupted output", msgs[0].Content)
 	}
 }
 
