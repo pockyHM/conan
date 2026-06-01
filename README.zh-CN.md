@@ -295,7 +295,9 @@ Conan 支持 Anthropic 和 OpenAI 兼容提供方。配置中的 API Key 可以�
 ./bin/conan node update --all-cluster
 ```
 
-`node update` 会读取已配置节点和已保存的 SSH 凭据，重新上传本地 `conan-agent` 二进制、刷新远端配置和 systemd unit，并重启 `conan-agent`。可以用 `--agent-bin` 指定本地二进制，用 `--user`、`--password` 或 `--ssh-port` 覆盖 SSH 连接参数。
+`node update` 默认使用 `--mode auto`：读取已配置节点和已保存的 SSH 凭据，先尝试 SSH/SFTP 更新；如果 SSH 无法完成，则回退到已鉴权的 agent 更新接口。可以用 `--mode ssh` 强制旧的仅 SSH 行为，也可以用 `--mode agent` 跳过 SSH 凭据、直接通过正在运行的 agent 更新。
+
+可以用 `--agent-bin` 指定本地二进制覆盖路径。在 `auto` 和 `ssh` 模式下，`--user`、`--password` 和 `--ssh-port` 会覆盖 SSH 连接参数。
 
 查看清单和连通性：
 

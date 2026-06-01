@@ -295,7 +295,9 @@ Update `conan-agent` on existing nodes:
 ./bin/conan node update --all-cluster
 ```
 
-`node update` reads configured nodes and saved SSH credentials, uploads the local `conan-agent` binary, refreshes the remote config and systemd unit, and restarts `conan-agent`. Use `--agent-bin` to point at a local binary, or `--user`, `--password`, and `--ssh-port` to override SSH connection settings.
+`node update` defaults to `--mode auto`: it reads configured nodes and saved SSH credentials, tries the SSH/SFTP update path first, and falls back to the authenticated agent update interface if SSH cannot complete. Use `--mode ssh` to force the old SSH-only behavior, or `--mode agent` to skip SSH credentials and update through the running agent.
+
+Use `--agent-bin` to point at a local binary override. In `auto` and `ssh` modes, `--user`, `--password`, and `--ssh-port` override SSH connection settings.
 
 Check inventory and connectivity:
 
