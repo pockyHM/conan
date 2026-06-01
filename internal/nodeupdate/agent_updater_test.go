@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pockyHM/conan/internal/agentupdate"
 	"github.com/pockyHM/conan/pkg/mcpproto"
@@ -59,7 +60,10 @@ func TestMCPAgentUpdaterCallsAgentUpdateTool(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	updater := MCPAgentUpdater{BaseURL: func(AgentTarget) string { return srv.URL }}
+	updater := MCPAgentUpdater{
+		BaseURL:      func(AgentTarget) string { return srv.URL },
+		RestartDelay: -1,
+	}
 	err := updater.Update(context.Background(), AgentTarget{
 		Host:  "agent.example.com",
 		Port:  9280,
@@ -117,6 +121,8 @@ func TestMCPAgentUpdaterRetriesHealthAfterToolCall(t *testing.T) {
 	updater := MCPAgentUpdater{
 		BaseURL:        func(AgentTarget) string { return srv.URL },
 		HealthAttempts: 3,
+		HealthDelay:    time.Millisecond,
+		RestartDelay:   -1,
 	}
 	err := updater.Update(context.Background(), AgentTarget{Request: agentupdate.Request{
 		Binary:           "Ymlu",
@@ -132,6 +138,106 @@ func TestMCPAgentUpdaterRetriesHealthAfterToolCall(t *testing.T) {
 	}
 	if got := healthCalls.Load(); got != 3 {
 		t.Fatalf("health calls = %d, want 3", got)
+	}
+}
+
+func TestMCPAgentUpdaterWaitsRestartDelayBeforeHealthCheck(t *testing.T) {
+	handlerErrs := make(chan error, 4)
+	readyAt := time.Now().Add(20 * time.Millisecond)
+	var healthCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			healthCalls.Add(1)
+			if time.Now().Before(readyAt) {
+				http.Error(w, "old process still responding", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/rpc":
+			var req mcpproto.JSONRPCRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				recordHandlerError(handlerErrs, fmt.Errorf("decode rpc request: %w", err))
+				http.Error(w, "bad rpc request", http.StatusBadRequest)
+				return
+			}
+			if err := writeRPCResult(w, req.ID, mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("updated")}}); err != nil {
+				recordHandlerError(handlerErrs, err)
+				http.Error(w, "write rpc response", http.StatusInternalServerError)
+				return
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	updater := MCPAgentUpdater{
+		BaseURL:        func(AgentTarget) string { return srv.URL },
+		HealthAttempts: 1,
+		RestartDelay:   25 * time.Millisecond,
+	}
+	err := updater.Update(context.Background(), AgentTarget{Request: agentupdate.Request{
+		Binary:           "Ymlu",
+		Config:           "config",
+		SystemdUnit:      "unit",
+		RemoteBinaryPath: "/usr/local/bin/conan-agent",
+		RemoteConfigPath: "/etc/conan-agent/config.yaml",
+		SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
+	}})
+	assertNoHandlerError(t, handlerErrs)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := healthCalls.Load(); got != 1 {
+		t.Fatalf("health calls = %d, want 1", got)
+	}
+}
+
+func TestMCPAgentUpdaterDefaultRestartDelayRespectsContextCancellation(t *testing.T) {
+	handlerErrs := make(chan error, 4)
+	var healthCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			healthCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		case "/rpc":
+			var req mcpproto.JSONRPCRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				recordHandlerError(handlerErrs, fmt.Errorf("decode rpc request: %w", err))
+				http.Error(w, "bad rpc request", http.StatusBadRequest)
+				return
+			}
+			if err := writeRPCResult(w, req.ID, mcpproto.ToolResult{Content: []mcpproto.ContentBlock{mcpproto.TextContent("updated")}}); err != nil {
+				recordHandlerError(handlerErrs, err)
+				http.Error(w, "write rpc response", http.StatusInternalServerError)
+				return
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	updater := MCPAgentUpdater{BaseURL: func(AgentTarget) string { return srv.URL }}
+	err := updater.Update(ctx, AgentTarget{Request: agentupdate.Request{
+		Binary:           "Ymlu",
+		Config:           "config",
+		SystemdUnit:      "unit",
+		RemoteBinaryPath: "/usr/local/bin/conan-agent",
+		RemoteConfigPath: "/etc/conan-agent/config.yaml",
+		SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
+	}})
+	assertNoHandlerError(t, handlerErrs)
+	if err == nil || err != context.DeadlineExceeded {
+		t.Fatalf("err = %v, want context deadline exceeded", err)
+	}
+	if got := healthCalls.Load(); got != 0 {
+		t.Fatalf("health calls = %d, want 0 before restart delay elapses", got)
 	}
 }
 

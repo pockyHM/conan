@@ -77,10 +77,14 @@ func TestBuildRequestWithoutOverrideSendsConfiguredArchitectureBinaries(t *testi
 	}
 }
 
-func TestBuildRequestReturnsMissingBinaryError(t *testing.T) {
-	_, err := BuildRequest(BuildOptions{
+func TestBuildRequestWithoutOverrideSendsAvailableArchitectureBinaries(t *testing.T) {
+	dir := t.TempDir()
+	amd64 := filepath.Join(dir, "amd64", "conan-agent")
+	mustWrite(t, amd64, "amd64-binary")
+
+	req, err := BuildRequest(BuildOptions{
 		DeployConfig: configschema.AgentDeployConfig{
-			Binaries:         configschema.AgentBinaryConfig{AMD64: "/missing/amd64", ARM64: "/missing/arm64"},
+			Binaries:         configschema.AgentBinaryConfig{AMD64: amd64, ARM64: filepath.Join(dir, "missing-arm64")},
 			RemoteBinaryPath: "/usr/local/bin/conan-agent",
 			RemoteConfigPath: "/etc/conan-agent/config.yaml",
 			SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
@@ -88,8 +92,31 @@ func TestBuildRequestReturnsMissingBinaryError(t *testing.T) {
 		AgentPort: 9280,
 		Token:     "token",
 	})
-	if err == nil || !strings.Contains(err.Error(), "read amd64 agent binary") {
-		t.Fatalf("err = %v", err)
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+
+	if got := decode(t, req.Binaries["amd64"]); got != "amd64-binary" {
+		t.Fatalf("amd64 binary = %q", got)
+	}
+	if _, ok := req.Binaries["arm64"]; ok {
+		t.Fatalf("arm64 binary was included despite missing source: %#v", req.Binaries)
+	}
+}
+
+func TestBuildRequestReturnsErrorWhenNoArchitectureBinariesCanBeRead(t *testing.T) {
+	_, err := BuildRequest(BuildOptions{
+		DeployConfig: configschema.AgentDeployConfig{
+			Binaries:         configschema.AgentBinaryConfig{AMD64: "/missing/amd64", ARM64: ""},
+			RemoteBinaryPath: "/usr/local/bin/conan-agent",
+			RemoteConfigPath: "/etc/conan-agent/config.yaml",
+			SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
+		},
+		AgentPort: 9280,
+		Token:     "token",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no architecture binaries") {
+		t.Fatalf("err = %v, want no architecture binaries", err)
 	}
 }
 

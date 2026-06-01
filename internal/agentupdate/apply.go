@@ -95,7 +95,7 @@ func (a Applier) Apply(ctx context.Context, req Request) (ApplyResult, error) {
 		fmt.Sprintf("install -m 0644 %s %s", shellQuote(unitTmp), shellQuote(req.SystemdUnitPath)),
 		"systemctl daemon-reload",
 		"systemctl enable --now conan-agent",
-		"systemctl restart conan-agent",
+		"sh -c 'sleep 1; systemctl restart conan-agent' >/dev/null 2>&1 &",
 	}
 	for _, command := range commands {
 		if _, err := runner.Run(ctx, command); err != nil {

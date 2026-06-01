@@ -133,7 +133,7 @@ func TestApplierWritesFilesWithExpectedPermissionsAndRunsFixedCommands(t *testin
 		"install -m 0644 " + shellQuote(unitTmp) + " '/etc/systemd/system/conan-agent.service'",
 		"systemctl daemon-reload",
 		"systemctl enable --now conan-agent",
-		"systemctl restart conan-agent",
+		"sh -c 'sleep 1; systemctl restart conan-agent' >/dev/null 2>&1 &",
 	}
 	if len(runner.commands) != len(wantCommands) {
 		t.Fatalf("commands = %#v, want %d commands", runner.commands, len(wantCommands))

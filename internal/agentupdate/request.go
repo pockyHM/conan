@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/pockyHM/conan/internal/deploy"
 	"github.com/pockyHM/conan/pkg/configschema"
@@ -44,18 +45,23 @@ func BuildRequest(opts BuildOptions) (Request, error) {
 		return req, nil
 	}
 
-	amd64, err := readBase64(opts.DeployConfig.Binaries.AMD64)
-	if err != nil {
-		return Request{}, fmt.Errorf("read amd64 agent binary: %w", err)
+	binaries := map[string]string{}
+	failures := []string{}
+	if binary, err := readBase64(opts.DeployConfig.Binaries.AMD64); err == nil {
+		binaries["amd64"] = binary
+	} else {
+		failures = append(failures, fmt.Sprintf("amd64: %v", err))
 	}
-	arm64, err := readBase64(opts.DeployConfig.Binaries.ARM64)
-	if err != nil {
-		return Request{}, fmt.Errorf("read arm64 agent binary: %w", err)
+	if binary, err := readBase64(opts.DeployConfig.Binaries.ARM64); err == nil {
+		binaries["arm64"] = binary
+	} else {
+		failures = append(failures, fmt.Sprintf("arm64: %v", err))
 	}
-	req.Binaries = map[string]string{
-		"amd64": amd64,
-		"arm64": arm64,
+
+	if len(binaries) == 0 {
+		return Request{}, fmt.Errorf("no architecture binaries could be read: %s", strings.Join(failures, "; "))
 	}
+	req.Binaries = binaries
 
 	return req, nil
 }

@@ -30,6 +30,9 @@ type MCPAgentUpdater struct {
 	BaseURL        func(AgentTarget) string
 	HealthAttempts int
 	HealthDelay    time.Duration
+	// RestartDelay waits after a successful update RPC before health polling.
+	// Zero uses the production default; a negative value skips the wait.
+	RestartDelay time.Duration
 }
 
 func (u MCPAgentUpdater) Update(ctx context.Context, target AgentTarget) error {
@@ -54,6 +57,16 @@ func (u MCPAgentUpdater) Update(ctx context.Context, target AgentTarget) error {
 	}
 	if result.IsError {
 		return fmt.Errorf("agent_update failed: %s", toolText(result))
+	}
+
+	if delay := u.restartDelay(); delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 
 	attempts := u.HealthAttempts
@@ -84,6 +97,16 @@ func (u MCPAgentUpdater) Update(ctx context.Context, target AgentTarget) error {
 		}
 	}
 	return fmt.Errorf("agent health check after update failed: %w", lastErr)
+}
+
+func (u MCPAgentUpdater) restartDelay() time.Duration {
+	if u.RestartDelay < 0 {
+		return 0
+	}
+	if u.RestartDelay == 0 {
+		return 1500 * time.Millisecond
+	}
+	return u.RestartDelay
 }
 
 func toolText(result *mcpproto.ToolResult) string {
