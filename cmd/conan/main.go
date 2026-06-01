@@ -327,6 +327,7 @@ func newRootCommand() *cobra.Command {
 	var nodeUpdatePassword string
 	var nodeUpdateSSHPort int
 	var nodeUpdateAgentBin string
+	var nodeUpdateMode string
 	nodeUpdateCmd := &cobra.Command{
 		Use:   "update [hostname-or-ip]",
 		Short: "Update conan-agent on existing nodes",
@@ -355,15 +356,23 @@ func newRootCommand() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := nodeupdate.UpdateMode(nodeUpdateMode)
+			if mode == "" {
+				mode = nodeupdate.ModeAuto
+			}
+			if mode != nodeupdate.ModeAuto && mode != nodeupdate.ModeSSH && mode != nodeupdate.ModeAgent {
+				return fmt.Errorf("invalid update mode %q", nodeUpdateMode)
+			}
 			loader := cfgloader.NewLoader(home)
 			global, err := loader.LoadGlobal()
 			if err != nil {
 				return err
 			}
 			service := nodeupdate.Service{
-				Credentials: credentials.NewStore(loader.Home()),
-				Prompter:    cliPrompter{in: cmd.InOrStdin(), out: cmd.OutOrStdout()},
-				Deployer:    deploy.NewNativeDeployer(),
+				Credentials:  credentials.NewStore(loader.Home()),
+				Prompter:     cliPrompter{in: cmd.InOrStdin(), out: cmd.OutOrStdout()},
+				Deployer:     deploy.NewNativeDeployer(),
+				AgentUpdater: nodeupdate.MCPAgentUpdater{},
 			}
 			clusterNames, selector, all, err := nodeUpdateTargets(loader, global, clusterName, args, nodeUpdateAll, nodeUpdateAllCluster)
 			if err != nil {
@@ -387,6 +396,7 @@ func newRootCommand() *cobra.Command {
 					Username:         nodeUpdateUser,
 					Password:         nodeUpdatePassword,
 					SSHPort:          nodeUpdateSSHPort,
+					Mode:             mode,
 					AgentBinOverride: nodeUpdateAgentBin,
 					DeployConfig:     global.AgentDeploy,
 					KnownHostsPath:   filepath.Join(loader.Home(), "known_hosts"),
@@ -411,6 +421,7 @@ func newRootCommand() *cobra.Command {
 	nodeUpdateCmd.Flags().StringVarP(&nodeUpdatePassword, "password", "p", "", "SSH password override")
 	nodeUpdateCmd.Flags().IntVar(&nodeUpdateSSHPort, "ssh-port", 0, "SSH port override")
 	nodeUpdateCmd.Flags().StringVar(&nodeUpdateAgentBin, "agent-bin", "", "Local conan-agent binary path override")
+	nodeUpdateCmd.Flags().StringVar(&nodeUpdateMode, "mode", "auto", "Update mode: auto, ssh, or agent")
 	nodeCmd.AddCommand(nodeUpdateCmd)
 
 	runTUI := func(cmd *cobra.Command, initialSessionID string) error {

@@ -613,10 +613,17 @@ func TestNodeUpdateCommandRegistered(t *testing.T) {
 	if !strings.Contains(stdout, "update [hostname-or-ip]") {
 		t.Fatalf("help output = %q", stdout)
 	}
-	for _, want := range []string{"--all", "--all-cluster", "--agent-bin"} {
+	for _, want := range []string{"--all", "--all-cluster", "--agent-bin", "--mode"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("help output missing %q: %q", want, stdout)
 		}
+	}
+}
+
+func TestNodeUpdateRejectsInvalidMode(t *testing.T) {
+	_, _, err := executeCommand("node", "update", "web-1", "--mode", "invalid")
+	if err == nil || !strings.Contains(err.Error(), "invalid update mode") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
