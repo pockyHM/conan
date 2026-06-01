@@ -5,10 +5,19 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/pockyHM/conan/internal/agentupdate"
 	cfgloader "github.com/pockyHM/conan/internal/config"
 	"github.com/pockyHM/conan/internal/credentials"
 	"github.com/pockyHM/conan/internal/deploy"
 	"github.com/pockyHM/conan/pkg/configschema"
+)
+
+type UpdateMode string
+
+const (
+	ModeAuto  UpdateMode = "auto"
+	ModeSSH   UpdateMode = "ssh"
+	ModeAgent UpdateMode = "agent"
 )
 
 type Request struct {
@@ -17,6 +26,7 @@ type Request struct {
 	Cluster          *cfgloader.Cluster
 	Selector         string
 	All              bool
+	Mode             UpdateMode
 	Username         string
 	Password         string
 	SSHPort          int
@@ -46,19 +56,26 @@ type Deployer interface {
 }
 
 type Service struct {
-	Credentials CredentialStore
-	Prompter    Prompter
-	Deployer    Deployer
+	Credentials  CredentialStore
+	Prompter     Prompter
+	Deployer     Deployer
+	AgentUpdater AgentUpdater
 }
 
 func (s Service) Update(ctx context.Context, req Request) ([]Result, error) {
+	mode, err := normalizeMode(req.Mode)
+	if err != nil {
+		return nil, err
+	}
+	req.Mode = mode
+
 	if req.ClusterName == "" {
 		return nil, fmt.Errorf("cluster name is required")
 	}
 	if req.Cluster == nil {
 		return nil, fmt.Errorf("cluster is required")
 	}
-	if s.Deployer == nil {
+	if (req.Mode == ModeAuto || req.Mode == ModeSSH) && s.Deployer == nil {
 		return nil, fmt.Errorf("deployer is required")
 	}
 
@@ -80,6 +97,17 @@ func (s Service) Update(ctx context.Context, req Request) ([]Result, error) {
 	return results, nil
 }
 
+func normalizeMode(mode UpdateMode) (UpdateMode, error) {
+	switch mode {
+	case "":
+		return ModeAuto, nil
+	case ModeAuto, ModeSSH, ModeAgent:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid update mode %q", mode)
+	}
+}
+
 func selectNodes(nodes []cfgloader.Node, selector string, all bool) ([]cfgloader.Node, error) {
 	if all {
 		return append([]cfgloader.Node(nil), nodes...), nil
@@ -96,6 +124,26 @@ func selectNodes(nodes []cfgloader.Node, selector string, all bool) ([]cfgloader
 }
 
 func (s Service) updateNode(ctx context.Context, req Request, node cfgloader.Node) error {
+	switch req.Mode {
+	case ModeSSH:
+		return s.updateNodeViaSSH(ctx, req, node)
+	case ModeAgent:
+		return s.updateNodeViaAgent(ctx, req, node)
+	case ModeAuto:
+		sshErr := s.updateNodeViaSSH(ctx, req, node)
+		if sshErr == nil {
+			return nil
+		}
+		if err := s.updateNodeViaAgent(ctx, req, node); err != nil {
+			return fmt.Errorf("ssh update failed: %v; agent update fallback failed: %w", sshErr, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid update mode %q", req.Mode)
+	}
+}
+
+func (s Service) updateNodeViaSSH(ctx context.Context, req Request, node cfgloader.Node) error {
 	sshPort := req.SSHPort
 	if sshPort == 0 {
 		sshPort = req.Cluster.Cluster.NodeDefaults.SSHPort
@@ -175,6 +223,28 @@ func (s Service) updateNode(ctx context.Context, req Request, node cfgloader.Nod
 		return s.Credentials.Put(credentialKey(req.ClusterName, node.Name), credentials.Credential{Username: username, Password: password})
 	}
 	return nil
+}
+
+func (s Service) updateNodeViaAgent(ctx context.Context, req Request, node cfgloader.Node) error {
+	if s.AgentUpdater == nil {
+		return fmt.Errorf("agent updater is required")
+	}
+	updateReq, err := agentupdate.BuildRequest(agentupdate.BuildOptions{
+		DeployConfig:     req.DeployConfig,
+		AgentPort:        node.Agent.Port,
+		Token:            node.Agent.Token,
+		AgentBinOverride: req.AgentBinOverride,
+	})
+	if err != nil {
+		return err
+	}
+	return s.AgentUpdater.Update(ctx, AgentTarget{
+		Host:    node.Agent.Host,
+		Port:    node.Agent.Port,
+		TLS:     node.Agent.TLS,
+		Token:   node.Agent.Token,
+		Request: updateReq,
+	})
 }
 
 func credentialKey(clusterName string, nodeName string) string {

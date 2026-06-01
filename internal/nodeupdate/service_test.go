@@ -2,6 +2,9 @@ package nodeupdate
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -85,10 +88,179 @@ func TestUpdateNodeNotFound(t *testing.T) {
 	}
 }
 
+func TestUpdateAutoUsesSSHAndSkipsAgentWhenSSHWorks(t *testing.T) {
+	creds := &fakeCredentialStore{records: map[string]credentials.Credential{
+		"ssh/prod/web-1": {Username: "deploy", Password: "secret"},
+	}}
+	deployer := &fakeDeployer{}
+	agentUpdater := &fakeAgentUpdater{}
+	service := Service{Credentials: creds, Deployer: deployer, AgentUpdater: agentUpdater}
+	cluster := testCluster([]cfgloader.Node{{
+		NodeConfig: configschema.NodeConfig{Name: "web-1", Host: "web-1.example.com"},
+		Agent:      cfgloader.EffectiveAgentConfig{Host: "web-1.example.com", Port: 9281, User: "root", Token: "node-token"},
+	}})
+
+	_, err := service.Update(context.Background(), Request{
+		ClusterName:      "prod",
+		Cluster:          cluster,
+		Selector:         "web-1",
+		Mode:             ModeAuto,
+		AgentBinOverride: testAgentBinary(t, "agent binary"),
+		DeployConfig:     testDeployConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(deployer.targets) != 1 {
+		t.Fatalf("deploy calls = %d, want 1", len(deployer.targets))
+	}
+	if len(agentUpdater.targets) != 0 {
+		t.Fatalf("agent calls = %d, want 0", len(agentUpdater.targets))
+	}
+}
+
+func TestUpdateAutoFallsBackToAgentWhenSSHFails(t *testing.T) {
+	deployer := &fakeDeployer{err: errors.New("ssh connection refused")}
+	agentUpdater := &fakeAgentUpdater{}
+	service := Service{
+		Credentials:  &fakeCredentialStore{records: map[string]credentials.Credential{"ssh/prod/web-1": {Username: "deploy", Password: "secret"}}},
+		Deployer:     deployer,
+		AgentUpdater: agentUpdater,
+	}
+	cluster := testCluster([]cfgloader.Node{{
+		NodeConfig: configschema.NodeConfig{Name: "web-1", Host: "10.0.0.1"},
+		Agent:      cfgloader.EffectiveAgentConfig{Host: "agent.example.com", Port: 9281, User: "root", Token: "node-token"},
+	}})
+
+	_, err := service.Update(context.Background(), Request{
+		ClusterName:      "prod",
+		Cluster:          cluster,
+		Selector:         "web-1",
+		Mode:             ModeAuto,
+		AgentBinOverride: testAgentBinary(t, "agent binary"),
+		DeployConfig:     testDeployConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(agentUpdater.targets) != 1 {
+		t.Fatalf("agent calls = %d, want 1", len(agentUpdater.targets))
+	}
+	target := agentUpdater.targets[0]
+	if target.Host != "agent.example.com" || target.Port != 9281 || target.Token != "node-token" {
+		t.Fatalf("agent target = %+v", target)
+	}
+}
+
+func TestUpdateAutoReturnsBothErrorsWhenFallbackFails(t *testing.T) {
+	deployer := &fakeDeployer{err: errors.New("ssh failed")}
+	agentUpdater := &fakeAgentUpdater{err: errors.New("agent failed")}
+	service := Service{
+		Credentials:  &fakeCredentialStore{records: map[string]credentials.Credential{"ssh/prod/web-1": {Username: "deploy", Password: "secret"}}},
+		Deployer:     deployer,
+		AgentUpdater: agentUpdater,
+	}
+	cluster := testCluster([]cfgloader.Node{{
+		NodeConfig: configschema.NodeConfig{Name: "web-1", Host: "10.0.0.1"},
+		Agent:      cfgloader.EffectiveAgentConfig{Host: "agent.example.com", Port: 9281, User: "root", Token: "node-token"},
+	}})
+
+	_, err := service.Update(context.Background(), Request{
+		ClusterName:      "prod",
+		Cluster:          cluster,
+		Selector:         "web-1",
+		Mode:             ModeAuto,
+		AgentBinOverride: testAgentBinary(t, "agent binary"),
+		DeployConfig:     testDeployConfig(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "ssh update failed") || !strings.Contains(err.Error(), "agent update fallback failed") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestUpdateAgentModeSkipsSSHCredentialsAndPrompts(t *testing.T) {
+	deployer := &fakeDeployer{}
+	agentUpdater := &fakeAgentUpdater{}
+	service := Service{
+		Prompter:     fakePrompter{err: errors.New("prompt called")},
+		Deployer:     deployer,
+		AgentUpdater: agentUpdater,
+	}
+	cluster := testCluster([]cfgloader.Node{{
+		NodeConfig: configschema.NodeConfig{Name: "web-1", Host: "10.0.0.1"},
+		Agent:      cfgloader.EffectiveAgentConfig{Host: "agent.example.com", Port: 9281, User: "root", Token: "node-token"},
+	}})
+
+	_, err := service.Update(context.Background(), Request{
+		ClusterName:      "prod",
+		Cluster:          cluster,
+		Selector:         "web-1",
+		Mode:             ModeAgent,
+		AgentBinOverride: testAgentBinary(t, "agent binary"),
+		DeployConfig:     testDeployConfig(t),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(deployer.targets) != 0 {
+		t.Fatalf("deploy calls = %d, want 0", len(deployer.targets))
+	}
+	if len(agentUpdater.targets) != 1 {
+		t.Fatalf("agent calls = %d, want 1", len(agentUpdater.targets))
+	}
+}
+
+func TestUpdateSSHModeDoesNotCallAgent(t *testing.T) {
+	deployer := &fakeDeployer{err: errors.New("ssh failed")}
+	agentUpdater := &fakeAgentUpdater{}
+	service := Service{
+		Credentials:  &fakeCredentialStore{records: map[string]credentials.Credential{"ssh/prod/web-1": {Username: "deploy", Password: "secret"}}},
+		Deployer:     deployer,
+		AgentUpdater: agentUpdater,
+	}
+	cluster := testCluster([]cfgloader.Node{{
+		NodeConfig: configschema.NodeConfig{Name: "web-1", Host: "10.0.0.1"},
+		Agent:      cfgloader.EffectiveAgentConfig{Host: "agent.example.com", Port: 9281, User: "root", Token: "node-token"},
+	}})
+
+	_, err := service.Update(context.Background(), Request{
+		ClusterName: "prod",
+		Cluster:     cluster,
+		Selector:    "web-1",
+		Mode:        ModeSSH,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ssh failed") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(agentUpdater.targets) != 0 {
+		t.Fatalf("agent calls = %d, want 0", len(agentUpdater.targets))
+	}
+}
+
 func testCluster(nodes []cfgloader.Node) *cfgloader.Cluster {
 	return &cfgloader.Cluster{
 		Cluster: configschema.ClusterConfig{NodeDefaults: configschema.NodeDefaults{User: "root", SSHPort: 2222}},
 		Nodes:   nodes,
+	}
+}
+
+func testAgentBinary(t *testing.T, contents string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "conan-agent")
+	if err := os.WriteFile(path, []byte(contents), 0755); err != nil {
+		t.Fatalf("write test agent binary: %v", err)
+	}
+	return path
+}
+
+func testDeployConfig(t *testing.T) configschema.AgentDeployConfig {
+	t.Helper()
+
+	return configschema.AgentDeployConfig{
+		RemoteBinaryPath: "/usr/local/bin/conan-agent",
+		RemoteConfigPath: "/etc/conan-agent/config.yaml",
+		SystemdUnitPath:  "/etc/systemd/system/conan-agent.service",
 	}
 }
 
@@ -114,19 +286,34 @@ func (s *fakeCredentialStore) Put(key string, cred credentials.Credential) error
 
 type fakeDeployer struct {
 	targets []deploy.Target
+	err     error
 }
 
 func (d *fakeDeployer) Deploy(_ context.Context, target deploy.Target) error {
 	d.targets = append(d.targets, target)
-	return nil
+	return d.err
+}
+
+type fakeAgentUpdater struct {
+	targets []AgentTarget
+	err     error
+}
+
+func (u *fakeAgentUpdater) Update(_ context.Context, target AgentTarget) error {
+	u.targets = append(u.targets, target)
+	return u.err
 }
 
 type fakePrompter struct {
 	username string
 	password string
+	err      error
 }
 
 func (p fakePrompter) PromptUsername(defaultValue string) (string, error) {
+	if p.err != nil {
+		return "", p.err
+	}
 	if p.username == "" {
 		return defaultValue, nil
 	}
@@ -134,5 +321,8 @@ func (p fakePrompter) PromptUsername(defaultValue string) (string, error) {
 }
 
 func (p fakePrompter) PromptPassword() (string, error) {
+	if p.err != nil {
+		return "", p.err
+	}
 	return p.password, nil
 }
