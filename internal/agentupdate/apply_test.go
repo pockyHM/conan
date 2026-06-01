@@ -143,13 +143,14 @@ func TestApplierWritesFilesWithExpectedPermissionsAndRunsFixedCommands(t *testin
 }
 
 func TestApplierReturnsCommandFailureWithoutSecrets(t *testing.T) {
+	config := "listen: 0.0.0.0:9280\ntoken: secret-token\n"
 	_, err := Applier{
 		Arch:    func() string { return "amd64" },
 		TempDir: t.TempDir(),
-		Runner:  &fakeRunner{err: errors.New("systemctl failed: token: secret-token; raw secret-token")},
+		Runner:  &fakeRunner{err: errors.New("systemctl failed with config:\n" + config + "raw secret-token")},
 	}.Apply(context.Background(), Request{
 		Binary:           encode("override-binary"),
-		Config:           "listen: 0.0.0.0:9280\ntoken: secret-token\n",
+		Config:           config,
 		SystemdUnit:      "unit",
 		RemoteBinaryPath: "/usr/local/bin/conan-agent",
 		RemoteConfigPath: "/etc/conan-agent/config.yaml",
@@ -162,7 +163,7 @@ func TestApplierReturnsCommandFailureWithoutSecrets(t *testing.T) {
 	if !strings.Contains(err.Error(), "agent update command failed") {
 		t.Fatalf("err = %v, want command failure context", err)
 	}
-	if strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "token: secret-token") {
+	if strings.Contains(err.Error(), config) || strings.Contains(err.Error(), "secret-token") {
 		t.Fatalf("err leaks secret: %v", err)
 	}
 }
