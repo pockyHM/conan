@@ -6108,6 +6108,85 @@ func TestAskChoiceStreamTimeoutKeepsWaitingForChoice(t *testing.T) {
 	}
 }
 
+func TestAskChoiceStreamTimeoutBeforeStopInterruptsChoice(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = false
+	model.streamToolExpected = 1
+	model.streamEventSeq = 3
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID: 1,
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question: "Pick one",
+		options:  []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}},
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+
+	next, cmd := model.Update(streamTimeoutMsg{streamID: 1, eventSeq: 3})
+	model = next.(Model)
+
+	if cmd != nil {
+		t.Fatalf("timeout returned cmd %T, want nil", cmd)
+	}
+	if model.streaming {
+		t.Fatal("timeout before StopToolUse should interrupt streaming")
+	}
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.choice.call.ID != "" {
+		t.Fatalf("choice state should be cleared: %#v", model.choice)
+	}
+	if len(model.messages) != 1 || !strings.Contains(strings.ToLower(model.messages[0].toolOutput), "timeout") {
+		t.Fatalf("messages = %#v, want timeout tool output", model.messages)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || msgs[0].Role != conversation.RoleTool || msgs[0].ToolCallID != "choice-1" || !strings.Contains(strings.ToLower(msgs[0].Content), "timeout") {
+		t.Fatalf("conversation messages = %#v, want timeout tool result", msgs)
+	}
+}
+
+func TestAskChoiceRejectsParallelToolCallWhilePending(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID: 1,
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question: "First choice",
+		options:  []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}},
+	}
+
+	next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "choice-2", Name: metaToolAskChoice, Arguments: []byte(`{
+			"question":"Second choice",
+			"options":[{"label":"C","value":"c"},{"label":"D","value":"d"}]
+		}`),
+	}})
+	model = next.(Model)
+
+	if model.mode != modeChoice {
+		t.Fatalf("mode = %v, want modeChoice", model.mode)
+	}
+	if model.choice.call.ID != "choice-1" || model.choice.question != "First choice" {
+		t.Fatalf("choice was overwritten: %#v", model.choice)
+	}
+	result := askChoiceResultFromCmd(t, cmd)
+	if len(result.Results) != 1 || result.Results[0].Success {
+		t.Fatalf("parallel result = %#v, want failed result", result.Results)
+	}
+	if !strings.Contains(strings.ToLower(result.Results[0].Output), "choice already pending") {
+		t.Fatalf("parallel output = %q, want pending-choice error", result.Results[0].Output)
+	}
+}
+
 func TestAskChoiceEscCancelsWhenAllowed(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
@@ -6228,6 +6307,37 @@ func TestAskChoiceViewRendersOptions(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestAskChoiceSelectionRecordsToolResultEvidence(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "model", IncidentDir: filepath.Join(t.TempDir(), "incidents")})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandIncident, Arg: "start Ask choice"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID: 1,
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question: "Pick one",
+		options:  []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}},
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	found := false
+	for _, event := range model.incidentRecorder.Events() {
+		if event.ToolName == metaToolAskChoice && strings.Contains(event.Summary, `"value":"a"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("events missing ask_choice tool result: %#v", model.incidentRecorder.Events())
 	}
 }
 

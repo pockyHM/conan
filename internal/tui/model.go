@@ -720,7 +720,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
 			var toolCmd tea.Cmd
-			if e.Name == metaToolAskChoice {
+			if m.mode == modeChoice && m.choice.call.ID != "" {
+				toolCmd = func() tea.Msg {
+					return singleToolError(msg.streamID, call, "choice already pending; cannot process parallel tool call")
+				}
+			} else if e.Name == metaToolAskChoice {
 				choice, err := newChoiceState(msg.streamID, call)
 				if err != nil {
 					toolCmd = func() tea.Msg {
@@ -809,6 +813,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.mode == modeChoice {
+			if !m.streamEnded {
+				output := fmt.Sprintf("Stream timeout: no model event for %.0fs", streamEventTimeout.Seconds())
+				m = m.interruptChoice(output, output)
+			}
 			return m, nil
 		}
 		m.finishStream(true)
@@ -1161,25 +1169,31 @@ func (m Model) handleChoiceKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.finishChoice(choiceCancelledResultJSON())
 	case tea.KeyCtrlC:
-		state := m.choice
 		output := "Interrupted by user"
-		results := []nodeToolResult{{Node: "local", Output: output, Success: false}}
-		m.fillToolPlaceholder(state.call, output, results)
-		if m.conv != nil {
-			m.conv.AddToolResult(state.call.ID, output)
-		}
-		m.finishStream(true)
-		m.mode = modeChat
-		m.choice = choiceState{}
-		m.input = ""
-		m.ac = newAutocompleteWithLanguage(m.uiLanguage)
-		m.resetInputHistoryNavigation()
-		m.status = m.uiLanguage.tr("Interrupted", "已中断")
+		m = m.interruptChoice(output, m.uiLanguage.tr("Interrupted", "已中断"))
 		m.updateViewportContent()
 		return m, nil
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) interruptChoice(output string, status string) Model {
+	state := m.choice
+	results := []nodeToolResult{{Node: "local", Output: output, Success: false}}
+	m.fillToolPlaceholder(state.call, output, results)
+	if m.conv != nil {
+		m.conv.AddToolResult(state.call.ID, output)
+	}
+	m.recordToolResultEvidence(state.call, results, output)
+	m.finishStream(true)
+	m.mode = modeChat
+	m.choice = choiceState{}
+	m.input = ""
+	m.ac = newAutocompleteWithLanguage(m.uiLanguage)
+	m.resetInputHistoryNavigation()
+	m.status = status
+	return m
 }
 
 func (m Model) finishChoice(output string) (tea.Model, tea.Cmd) {
@@ -1194,6 +1208,7 @@ func (m Model) finishChoice(output string) (tea.Model, tea.Cmd) {
 	if m.conv != nil {
 		m.conv.AddToolResult(state.call.ID, output)
 	}
+	m.recordToolResultEvidence(state.call, results, output)
 	m.status = m.uiLanguage.tr("Ready", "就绪")
 	m.updateViewportContent()
 	return m.completeToolAndResume(state.streamID, state.call)
