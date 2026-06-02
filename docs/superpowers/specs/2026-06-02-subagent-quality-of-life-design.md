@@ -49,7 +49,7 @@ LLM stream emits subagents_run tool call
 TUI model.dispatchSubagentsRun
   │  · parse tasks
   │  · for each task: subagent.Manager.Submit(ctx, request)
-  │  · appends a subagentRuns row with Status="queued"
+  │  · appends a subagentRuns row with Status="running"
   │  · wraps the events channel and result channel in two tea.Cmd values
   │
   ▼
@@ -158,7 +158,7 @@ synchronization is the caller's responsibility.
 
 ### internal/tui/configscreen.go (changed)
 
-Add six new entries to the Subagents group: `subagents.max_inbound_chars`
+Add seven new entries to the Subagents group: `subagents.max_inbound_chars`
 (int), `subagents.debug_transcript` (bool), `subagents.per_role.investigator_turns`
 (int), `subagents.per_role.investigator_tool_calls` (int),
 `subagents.per_role.reviewer_turns` (int), `subagents.per_role.reviewer_tool_calls`
@@ -202,7 +202,7 @@ defaults so a misconfigured YAML does not silently disable the runner.
    `m.memStore` (see "Memory context" below), and resolves per-role limits
    from `m.subagents.PerRole` via `subagent.NormalizeRoleLimits(...).For(role)`.
 4. For each task, it calls `m.subagentManager.Submit(...)` and appends a row
-   to `m.subagentRuns` with `Status="queued"`.
+   to `m.subagentRuns` with `Status="running"`, `StartedAt = time.Now()`.
 5. The events channel is wrapped in a `tea.Cmd` that reads one event at a
    time and returns a `subagentEventMsg`; the result channel is wrapped
    similarly and returns `subagentResultMsg`. Both are returned in a single
@@ -218,8 +218,10 @@ defaults so a misconfigured YAML does not silently disable the runner.
 7. `m.recomputeSubagentStatus()` is called after every relevant mutation and
    from the 250ms tick handler while any subagent is running.
 8. On parent cancel (`m.streamCancel`): call
-   `m.subagentManager.CancelAll()` and let in-flight results flow through
-   normally; queued requests do not start.
+   `m.subagentManager.CancelAll()`. In-flight goroutines see the cancelled
+   context, emit `Done`, and return a `Result` with `Err = context.Canceled`.
+   The `Manager` does not queue requests; every `Submit` starts a goroutine
+   immediately and `CancelAll` short-circuits them.
 9. On per-subagent cancel (`c` keybinding): look up the focused row's ID,
    call `m.subagentManager.Cancel(id)`, and let the runner emit `Done` and
    the final `Result` with `Err = context.Canceled`.
@@ -234,7 +236,7 @@ Defaults applied by `NormalizeSubagentConfig` and `NormalizeRoleLimits`:
 | `subagents.max_parallel`                | 3       | unchanged                      |
 | `subagents.timeout_seconds`             | 120     | unchanged                      |
 | `subagents.max_inbound_chars`           | 0       | 0 means do not pass parent history |
-| `subagents.default_model`               | ""      | empty means use current model  |
+| `subagents.default_model`               | (n/a)   | not yet wired; using current model is the implicit default |
 | `subagents.debug`                       | false   | unchanged                      |
 | `subagents.debug_transcript`            | false   | new                            |
 | `subagents.per_role.investigator_turns` | 8       | new                            |
@@ -253,12 +255,14 @@ with a message pointing the user to the new `per_role` keys.
 `m.buildSubagentMemoryContext(task, nodes)` that:
 
 1. Builds a search query from `task` plus node names.
-2. Calls `m.memStore.Search(query, 5)` to retrieve the top five matching
-   memory entries.
-3. Trims each entry to fit a per-task budget of 600 characters.
+2. Calls `m.memStore.SearchMemories(query, 5)` to retrieve the top five
+   matching `memory.MemoryEntry` values.
+3. Trims each entry to a per-task budget of 600 characters, formatted as
+   `"<title>\n<content>"`.
 4. Joins entries with blank lines into a single string.
-5. Returns the string. If `m.memStore` is nil or `Search` returns nothing,
-   returns the empty string and the runner proceeds without memory context.
+5. Returns the string. If `m.memStore` is nil or `SearchMemories` returns
+   nothing, returns the empty string and the runner proceeds without
+   memory context.
 
 The result is set on `Request.MemoryContext` before `Submit`. The runner
 already injects `MemoryContext` into the first user message via
@@ -273,7 +277,9 @@ already injects `MemoryContext` into the first user message via
   `context.Canceled`.
 - Parent cancel: `m.streamCancel` is augmented to call
   `m.subagentManager.CancelAll()`. In-flight runners return their partial
-  result with `Err = context.Canceled`; queued requests never start.
+  result with `Err = context.Canceled`. The `Manager` does not queue
+  requests; every `Submit` starts a goroutine immediately and `CancelAll`
+  short-circuits them via context cancellation.
 - Per-role turn / tool-call limits: the existing error message
   `"subagent reached turn limit"` and `"subagent exceeded tool call limit"`
   are preserved. With the new defaults these are unlikely to fire on
