@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/pockyHM/conan/internal/nodeadd"
 	"github.com/pockyHM/conan/internal/security"
 	"github.com/pockyHM/conan/internal/skills"
+	"github.com/pockyHM/conan/internal/subagent"
 	"github.com/pockyHM/conan/pkg/configschema"
 	"github.com/pockyHM/conan/pkg/mcpproto"
 	"github.com/pockyHM/conan/pkg/models"
@@ -292,6 +294,193 @@ func TestModelCommandWithoutArgOpensSelectorAndSwitchesModel(t *testing.T) {
 	}
 	if !strings.Contains(model.View(), "Model switched to gpt") {
 		t.Fatalf("view missing switched status:\n%s", model.View())
+	}
+}
+
+func TestClusterCommandWithoutArgOpensSelectorAndSwitchesCluster(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), "name: prod\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "cluster.yaml"), "name: staging\n")
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "claude", ConfigHome: home})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/cluster")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeClusterSelect {
+		t.Fatalf("mode = %v, want modeClusterSelect", model.mode)
+	}
+	view := model.View()
+	for _, want := range []string{"Select Cluster", "prod", "staging", "(current)"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("cluster selector view missing %q:\n%s", want, view)
+		}
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if model.cluster != "staging" {
+		t.Fatalf("cluster = %q, want staging", model.cluster)
+	}
+	if !model.clusterExplicit {
+		t.Fatal("cluster should be explicit after selector switch")
+	}
+	if !strings.Contains(model.View(), "Cluster switched to staging") {
+		t.Fatalf("view missing switched status:\n%s", model.View())
+	}
+}
+
+func TestClusterCommandWithoutArgShowsStatusWhenNoClustersConfigured(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "claude", ConfigHome: t.TempDir()})
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/cluster")})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if !strings.Contains(model.View(), "No configured clusters") {
+		t.Fatalf("view missing no clusters status:\n%s", model.View())
+	}
+}
+
+func TestClusterSwitchReloadsNodesForNodesSelector(t *testing.T) {
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "cluster.yaml"), "name: staging\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "nodes.yaml"), `nodes:
+  - name: staging-node
+    host: 10.0.2.10
+    agent:
+      port: 9380
+`)
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		Model:      "claude",
+		ConfigHome: home,
+		Nodes:      []NodeInfo{{Name: "prod-node", Host: "10.0.1.10", Online: true}},
+	})
+
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandCluster, Arg: "staging"})
+	model, _ = model.applyCommand(SlashCommand{Kind: CommandNodes})
+
+	view := model.View()
+	if !strings.Contains(view, "staging-node") || !strings.Contains(view, "10.0.2.10") {
+		t.Fatalf("nodes selector missing staging node after cluster switch:\n%s", view)
+	}
+	if strings.Contains(view, "prod-node") || strings.Contains(view, "10.0.1.10") {
+		t.Fatalf("nodes selector still shows old cluster node:\n%s", view)
+	}
+	if !model.selectedNodes["staging-node"] || model.selectedNodes["prod-node"] {
+		t.Fatalf("selectedNodes = %#v, want only staging-node selected", model.selectedNodes)
+	}
+	if _, ok := model.clients["staging-node"]; !ok {
+		t.Fatalf("clients = %#v, want staging-node client", model.clients)
+	}
+}
+
+func TestClusterSwitchRefreshesNodeStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("request path = %s, want /health", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "cluster.yaml"), "name: staging\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "nodes.yaml"), fmt.Sprintf(`nodes:
+  - name: staging-node
+    host: %s
+    agent:
+      port: %s
+`, u.Hostname(), u.Port()))
+
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		Model:      "claude",
+		ConfigHome: home,
+	})
+
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandCluster, Arg: "staging"})
+	model = next
+	if cmd == nil {
+		t.Fatal("cluster switch should trigger a node status refresh command")
+	}
+
+	pingMsg := execPingResultFromBatch(t, cmd)
+	updated, _ := model.Update(pingMsg)
+	model = updated.(Model)
+
+	if !model.nodes[0].Online {
+		t.Fatalf("node = %#v, want online after cluster switch refresh", model.nodes[0])
+	}
+	if !strings.Contains(model.View(), "1 online") {
+		t.Fatalf("view missing refreshed online count:\n%s", model.View())
+	}
+}
+
+func TestClusterSelectorSwitchRefreshesNodeStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Fatalf("request path = %s, want /health", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	home := t.TempDir()
+	writeTestFile(t, filepath.Join(home, "clusters", "prod", "cluster.yaml"), "name: prod\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "cluster.yaml"), "name: staging\n")
+	writeTestFile(t, filepath.Join(home, "clusters", "staging", "nodes.yaml"), fmt.Sprintf(`nodes:
+  - name: staging-node
+    host: %s
+    agent:
+      port: %s
+`, u.Hostname(), u.Port()))
+
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "claude", ConfigHome: home})
+
+	next, cmd := model.applyCommand(SlashCommand{Kind: CommandCluster})
+	model = next
+	if cmd != nil {
+		t.Fatal("opening cluster selector should not start status refresh yet")
+	}
+	nextModel, cmd := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = nextModel.(Model)
+	nextModel, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = nextModel.(Model)
+	if cmd == nil {
+		t.Fatal("cluster selector switch should trigger a node status refresh command")
+	}
+
+	pingMsg := execPingResultFromBatch(t, cmd)
+	nextModel, _ = model.Update(pingMsg)
+	model = nextModel.(Model)
+
+	if !model.nodes[0].Online {
+		t.Fatalf("node = %#v, want online after cluster selector refresh", model.nodes[0])
 	}
 }
 
@@ -1282,6 +1471,25 @@ func TestSubagentsRunToolOnlyExposedWhenEnabled(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("subagents_run not exposed while subagents are enabled")
+	}
+}
+
+func TestNewSubagentRequestExcludesPendingToolCallContext(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	conv.AddUser("check nodes")
+	conv.AddToolCall("call_pending", metaToolSubagentsRun, `{"tasks":[{"task":"hello"}]}`)
+	model := NewModel(ModelConfig{
+		Cluster: "test",
+		Model:   "m",
+		Conv:    conv,
+	})
+
+	req := model.newSubagentRequest(subagent.RoleInvestigator, "hello", nil)
+
+	for _, msg := range req.Context {
+		if msg.ToolCallID == "call_pending" {
+			t.Fatalf("subagent context included pending tool call: %#v", req.Context)
+		}
 	}
 }
 
@@ -3554,18 +3762,21 @@ func TestDebugLoggingRecordsLLMRequestAndStreamEvents(t *testing.T) {
 	logText := string(contents)
 	for _, want := range []string{
 		"llm request",
-		"system_prompt",
-		"messages",
-		"tools",
-		"tool_search",
-		"call_tool",
+		"system_prompt_len",
+		"messages_count",
+		"tools_count",
 		"llm stream text_delta",
-		"Hi",
+		"delta_len",
 		"llm stream stop",
 		"end_turn",
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("debug log missing %q:\n%s", want, logText)
+		}
+	}
+	for _, unwanted := range []string{"tool_search", "call_tool", "Read logs", "Hi"} {
+		if strings.Contains(logText, unwanted) {
+			t.Fatalf("debug log should not contain verbose LLM content %q:\n%s", unwanted, logText)
 		}
 	}
 }
@@ -4802,7 +5013,7 @@ func TestNodeAddRiskReviewRedactsPasswordAndPreservesRawCall(t *testing.T) {
 	}
 }
 
-func TestDebugLogStreamEventRedactsNodeAddPassword(t *testing.T) {
+func TestDebugLogStreamEventLogsToolCallSummaryOnly(t *testing.T) {
 	var buf bytes.Buffer
 	previousLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -4816,14 +5027,54 @@ func TestDebugLogStreamEventRedactsNodeAddPassword(t *testing.T) {
 	})
 
 	logText := buf.String()
-	if strings.Contains(logText, "secret") {
-		t.Fatalf("debug log should not contain raw password: %s", logText)
+	for _, unwanted := range []string{"secret", "10.0.0.5", "password"} {
+		if strings.Contains(logText, unwanted) {
+			t.Fatalf("debug log should not contain raw tool argument content %q: %s", unwanted, logText)
+		}
 	}
-	if !strings.Contains(logText, "[REDACTED]") {
-		t.Fatalf("debug log should contain redacted password marker: %s", logText)
+	for _, want := range []string{"llm stream tool_call", "node-add-1", metaToolNodeAdd, "arguments_len"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("debug log missing %q: %s", want, logText)
+		}
 	}
-	if !strings.Contains(logText, "10.0.0.5") {
-		t.Fatalf("debug log should preserve host: %s", logText)
+}
+
+func TestDebugLogLLMRequestLogsSummaryOnly(t *testing.T) {
+	var buf bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	model := NewModel(ModelConfig{Cluster: "prod", Model: "gpt-test"})
+	model.debugLogLLMRequest(&llm.ChatRequest{
+		SystemPrompt: "full system prompt should not be logged",
+		Messages: []models.Message{
+			{Role: "user", Content: "complex request should not be logged"},
+			{Role: "tool", ToolName: "shell_run", ToolInput: "secret tool output should not be logged"},
+		},
+		Tools: []llm.ToolDef{{
+			Name:        "shell_run",
+			Description: "run shell command",
+			InputSchema: json.RawMessage(`{"properties":{"command":{"type":"string"}}}`),
+		}},
+	})
+
+	logText := buf.String()
+	for _, unwanted := range []string{
+		"full system prompt",
+		"complex request",
+		"secret tool output",
+		"run shell command",
+		"properties",
+	} {
+		if strings.Contains(logText, unwanted) {
+			t.Fatalf("debug log should not contain request content %q: %s", unwanted, logText)
+		}
+	}
+	for _, want := range []string{"llm request", "prod", "gpt-test", "system_prompt_len", "messages_count", "tools_count"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("debug log missing %q: %s", want, logText)
+		}
 	}
 }
 

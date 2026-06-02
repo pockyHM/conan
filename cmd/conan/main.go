@@ -49,7 +49,7 @@ func teaProgramOptions(in io.Reader, out io.Writer) []tea.ProgramOption {
 
 func tuiMouseEnabled() bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv("CONAN_TUI_MOUSE")))
-	return value == "1" || value == "true" || value == "yes" || value == "on"
+	return value != "0" && value != "false" && value != "no" && value != "off"
 }
 
 type conversationSaver interface {
@@ -70,14 +70,20 @@ func printResumeHint(out io.Writer, model tea.Model) {
 }
 
 type cliPrompter struct {
-	in  io.Reader
-	out io.Writer
+	in     io.Reader
+	out    io.Writer
+	reader *bufio.Reader
+}
+
+type nodeContextPrompter struct {
+	base cliPrompter
+	name string
+	host string
 }
 
 func (p cliPrompter) PromptUsername(defaultValue string) (string, error) {
 	fmt.Fprint(p.out, "SSH username: ")
-	reader := bufio.NewReader(p.in)
-	value, err := reader.ReadString('\n')
+	value, err := p.readLine()
 	if err != nil && err != io.EOF {
 		return "", err
 	}
@@ -95,18 +101,67 @@ func (p cliPrompter) PromptPassword() (string, error) {
 		fmt.Fprintln(p.out)
 		return string(data), err
 	}
-	reader := bufio.NewReader(p.in)
-	value, err := reader.ReadString('\n')
+	value, err := p.readLine()
 	if err != nil && err != io.EOF {
 		return "", err
 	}
 	return strings.TrimSpace(value), nil
 }
 
+func (p cliPrompter) readLine() (string, error) {
+	reader := p.reader
+	if reader == nil {
+		reader = bufio.NewReader(p.in)
+	}
+	return reader.ReadString('\n')
+}
+
+func (p nodeContextPrompter) PromptUsername(defaultValue string) (string, error) {
+	fmt.Fprintf(p.base.out, "SSH username for %s: ", p.target())
+	value, err := p.base.readLine()
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultValue, nil
+	}
+	return value, nil
+}
+
+func (p nodeContextPrompter) PromptPassword() (string, error) {
+	fmt.Fprintf(p.base.out, "SSH password for %s: ", p.target())
+	if file, ok := p.base.in.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
+		data, err := term.ReadPassword(int(file.Fd()))
+		fmt.Fprintln(p.base.out)
+		return string(data), err
+	}
+	value, err := p.base.readLine()
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func (p nodeContextPrompter) PromptIP(hostname string) (string, error) {
+	return p.base.PromptIP(hostname)
+}
+
+func (p nodeContextPrompter) target() string {
+	name := strings.TrimSpace(p.name)
+	host := strings.TrimSpace(p.host)
+	if name == "" {
+		return host
+	}
+	if host == "" || host == name {
+		return name
+	}
+	return fmt.Sprintf("%s (%s)", name, host)
+}
+
 func (p cliPrompter) PromptIP(hostname string) (string, error) {
 	fmt.Fprintf(p.out, "Hostname %s could not be resolved. Enter IP address: ", hostname)
-	reader := bufio.NewReader(p.in)
-	value, err := reader.ReadString('\n')
+	value, err := p.readLine()
 	if err != nil && err != io.EOF {
 		return "", err
 	}
@@ -243,10 +298,18 @@ func newRootCommand() *cobra.Command {
 	var nodeAddUpdate bool
 	var nodeAddRotateToken bool
 	nodeAddCmd := &cobra.Command{
-		Use:   "add <hostname-or-ip>",
+		Use:   "add <hostname-or-ip>[,<hostname-or-ip>...]",
 		Short: "Add a node and deploy conan-agent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			inputs := nodeadd.SplitCommaList(args[0])
+			if len(inputs) == 0 {
+				return fmt.Errorf("node host or ip is required")
+			}
+			names := nodeadd.SplitCommaList(nodeAddName)
+			if len(names) > 0 && len(names) != len(inputs) {
+				return fmt.Errorf("--name must be omitted or contain %d comma-separated values", len(inputs))
+			}
 			loader := cfgloader.NewLoader(home)
 			global, err := loader.LoadGlobal()
 			if err != nil {
@@ -274,38 +337,54 @@ func newRootCommand() *cobra.Command {
 			if agentPort == 0 {
 				agentPort = 9280
 			}
+			promptInput := cmd.InOrStdin()
+			basePrompter := cliPrompter{in: promptInput, out: cmd.OutOrStdout(), reader: bufio.NewReader(promptInput)}
 			service := nodeadd.Service{
 				Credentials: credentials.NewStore(loader.Home()),
-				Prompter:    cliPrompter{in: cmd.InOrStdin(), out: cmd.OutOrStdout()},
+				Prompter:    basePrompter,
 				Resolver:    nodeadd.NetResolver{},
 				Writer:      nodeadd.ConfigNodeWriter{Home: loader.Home()},
 				Deployer:    deploy.NewNativeDeployer(),
 				Health:      nodeadd.MCPHealthChecker{},
 			}
-			result, err := service.Add(cmd.Context(), nodeadd.Request{
-				Home:             loader.Home(),
-				ClusterName:      selectedCluster,
-				Input:            args[0],
-				Name:             nodeAddName,
-				Username:         nodeAddUser,
-				Password:         nodeAddPassword,
-				SSHPort:          sshPort,
-				AgentPort:        agentPort,
-				NoDeploy:         nodeAddNoDeploy,
-				Update:           nodeAddUpdate,
-				RotateToken:      nodeAddRotateToken,
-				AgentBinOverride: nodeAddAgentBin,
-				DeployConfig:     global.AgentDeploy,
-				KnownHostsPath:   filepath.Join(loader.Home(), "known_hosts"),
-				TLS:              cluster.Cluster.Agent.TLS,
-			})
-			if err != nil {
-				return err
-			}
-			if result.Deployed {
-				fmt.Fprintf(cmd.OutOrStdout(), "node added and deployed: %s\n", result.Node.Name)
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "node added: %s\n", result.Node.Name)
+			for i, input := range inputs {
+				name := ""
+				if len(names) > 0 {
+					name = names[i]
+				}
+				currentService := service
+				if len(inputs) > 1 {
+					displayName := name
+					if displayName == "" {
+						displayName = input
+					}
+					currentService.Prompter = nodeContextPrompter{base: basePrompter, name: displayName, host: input}
+				}
+				result, err := currentService.Add(cmd.Context(), nodeadd.Request{
+					Home:             loader.Home(),
+					ClusterName:      selectedCluster,
+					Input:            input,
+					Name:             name,
+					Username:         nodeAddUser,
+					Password:         nodeAddPassword,
+					SSHPort:          sshPort,
+					AgentPort:        agentPort,
+					NoDeploy:         nodeAddNoDeploy,
+					Update:           nodeAddUpdate,
+					RotateToken:      nodeAddRotateToken,
+					AgentBinOverride: nodeAddAgentBin,
+					DeployConfig:     global.AgentDeploy,
+					KnownHostsPath:   filepath.Join(loader.Home(), "known_hosts"),
+					TLS:              cluster.Cluster.Agent.TLS,
+				})
+				if err != nil {
+					return err
+				}
+				if result.Deployed {
+					fmt.Fprintf(cmd.OutOrStdout(), "node added and deployed: %s\n", result.Node.Name)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "node added: %s\n", result.Node.Name)
+				}
 			}
 			return nil
 		},
@@ -314,7 +393,7 @@ func newRootCommand() *cobra.Command {
 	nodeAddCmd.Flags().StringVarP(&nodeAddPassword, "password", "p", "", "SSH password")
 	nodeAddCmd.Flags().IntVar(&nodeAddSSHPort, "ssh-port", 0, "SSH port")
 	nodeAddCmd.Flags().IntVar(&nodeAddAgentPort, "port", 9280, "Agent listen port")
-	nodeAddCmd.Flags().StringVar(&nodeAddName, "name", "", "Node name override")
+	nodeAddCmd.Flags().StringVar(&nodeAddName, "name", "", "Node name override; use comma-separated names when adding multiple nodes")
 	nodeAddCmd.Flags().StringVar(&nodeAddAgentBin, "agent-bin", "", "Local conan-agent binary path override")
 	nodeAddCmd.Flags().BoolVar(&nodeAddNoDeploy, "no-deploy", false, "Only write node configuration")
 	nodeAddCmd.Flags().BoolVar(&nodeAddUpdate, "update", false, "Update an existing node")

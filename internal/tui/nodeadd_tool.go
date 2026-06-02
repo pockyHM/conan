@@ -20,16 +20,18 @@ import (
 )
 
 type nodeAddArgs struct {
-	Cluster     string `json:"cluster"`
-	Host        string `json:"host"`
-	Name        string `json:"name"`
-	User        string `json:"user"`
-	Password    string `json:"password"`
-	SSHPort     int    `json:"ssh_port"`
-	AgentPort   int    `json:"agent_port"`
-	AgentBin    string `json:"agent_bin"`
-	Update      bool   `json:"update"`
-	RotateToken bool   `json:"rotate_token"`
+	Cluster     string   `json:"cluster"`
+	Host        string   `json:"host"`
+	Name        string   `json:"name"`
+	User        string   `json:"user"`
+	Users       []string `json:"users"`
+	Password    string   `json:"password"`
+	Passwords   []string `json:"passwords"`
+	SSHPort     int      `json:"ssh_port"`
+	AgentPort   int      `json:"agent_port"`
+	AgentBin    string   `json:"agent_bin"`
+	Update      bool     `json:"update"`
+	RotateToken bool     `json:"rotate_token"`
 }
 
 func parseNodeAddArgs(raw json.RawMessage) (nodeAddArgs, error) {
@@ -42,6 +44,9 @@ func parseNodeAddArgs(raw json.RawMessage) (nodeAddArgs, error) {
 	args.Name = strings.TrimSpace(args.Name)
 	args.User = strings.TrimSpace(args.User)
 	args.AgentBin = strings.TrimSpace(args.AgentBin)
+	for i := range args.Users {
+		args.Users[i] = strings.TrimSpace(args.Users[i])
+	}
 	if args.Host == "" {
 		return args, fmt.Errorf("host is required")
 	}
@@ -85,6 +90,7 @@ type nodeAddResultMsg struct {
 	streamID uint64
 	Call     llm.ToolCall
 	Result   nodeadd.Result
+	Results  []nodeadd.Result
 	Cluster  string
 	TLS      bool
 	Output   string
@@ -99,6 +105,8 @@ type nodeAddPromptMsg struct {
 	streamID uint64
 	call     llm.ToolCall
 	field    string
+	list     string
+	index    int
 	label    string
 	secret   bool
 }
@@ -118,26 +126,81 @@ func (m Model) prepareNodeAddOrPrompt(streamID uint64, call llm.ToolCall) tea.Cm
 		if err != nil {
 			return nodeAddLocalResult(streamID, call, "invalid node_add arguments: "+err.Error(), false)
 		}
-		if args.User == "" {
-			return nodeAddPromptMsg{
-				streamID: streamID,
-				call:     call,
-				field:    "user",
-				label:    "SSH username",
-				secret:   false,
-			}
+		prompt, ready, err := nextNodeAddCredentialPrompt(streamID, call, args)
+		if err != nil {
+			return nodeAddLocalResult(streamID, call, "invalid node_add arguments: "+err.Error(), false)
 		}
-		if args.Password == "" {
-			return nodeAddPromptMsg{
-				streamID: streamID,
-				call:     call,
-				field:    "password",
-				label:    "SSH password",
-				secret:   true,
-			}
+		if !ready {
+			return prompt
 		}
 		return nodeAddReadyMsg{streamID: streamID, call: call}
 	}
+}
+
+func nextNodeAddCredentialPrompt(streamID uint64, call llm.ToolCall, args nodeAddArgs) (nodeAddPromptMsg, bool, error) {
+	inputs := nodeadd.SplitCommaList(args.Host)
+	names := nodeadd.SplitCommaList(args.Name)
+	if len(names) > 0 && len(names) != len(inputs) {
+		return nodeAddPromptMsg{}, false, fmt.Errorf("name must be empty or contain %d comma-separated values", len(inputs))
+	}
+	if len(inputs) <= 1 {
+		if args.User == "" {
+			return nodeAddPromptMsg{streamID: streamID, call: call, field: "user", label: "SSH username", secret: false}, false, nil
+		}
+		if args.Password == "" {
+			return nodeAddPromptMsg{streamID: streamID, call: call, field: "password", label: "SSH password", secret: true}, false, nil
+		}
+		return nodeAddPromptMsg{}, true, nil
+	}
+	if args.User == "" {
+		if len(args.Users) > len(inputs) {
+			return nodeAddPromptMsg{}, false, fmt.Errorf("users must contain at most %d values", len(inputs))
+		}
+		for i := range inputs {
+			if i >= len(args.Users) || strings.TrimSpace(args.Users[i]) == "" {
+				return nodeAddPromptMsg{
+					streamID: streamID,
+					call:     call,
+					field:    "user",
+					list:     "users",
+					index:    i,
+					label:    fmt.Sprintf("SSH username for %s", nodeAddPromptTarget(inputs, names, i)),
+					secret:   false,
+				}, false, nil
+			}
+		}
+	}
+	if args.Password == "" {
+		if len(args.Passwords) > len(inputs) {
+			return nodeAddPromptMsg{}, false, fmt.Errorf("passwords must contain at most %d values", len(inputs))
+		}
+		for i := range inputs {
+			if i >= len(args.Passwords) || strings.TrimSpace(args.Passwords[i]) == "" {
+				return nodeAddPromptMsg{
+					streamID: streamID,
+					call:     call,
+					field:    "password",
+					list:     "passwords",
+					index:    i,
+					label:    fmt.Sprintf("SSH password for %s", nodeAddPromptTarget(inputs, names, i)),
+					secret:   true,
+				}, false, nil
+			}
+		}
+	}
+	return nodeAddPromptMsg{}, true, nil
+}
+
+func nodeAddPromptTarget(inputs, names []string, index int) string {
+	host := inputs[index]
+	name := host
+	if len(names) > index && names[index] != "" {
+		name = names[index]
+	}
+	if name == host {
+		return name
+	}
+	return fmt.Sprintf("%s (%s)", name, host)
 }
 
 func setNodeAddArg(raw json.RawMessage, field string, value string) (json.RawMessage, error) {
@@ -149,6 +212,35 @@ func setNodeAddArg(raw json.RawMessage, field string, value string) (json.RawMes
 		return nil, fmt.Errorf("node_add arguments must be an object")
 	}
 	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	args[field] = encoded
+	return json.Marshal(args)
+}
+
+func setNodeAddArgListValue(raw json.RawMessage, field string, index int, value string) (json.RawMessage, error) {
+	if index < 0 {
+		return nil, fmt.Errorf("%s index must be non-negative", field)
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if args == nil {
+		return nil, fmt.Errorf("node_add arguments must be an object")
+	}
+	var values []string
+	if existing, ok := args[field]; ok && len(existing) > 0 {
+		if err := json.Unmarshal(existing, &values); err != nil {
+			return nil, err
+		}
+	}
+	for len(values) <= index {
+		values = append(values, "")
+	}
+	values[index] = value
+	encoded, err := json.Marshal(values)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +300,20 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 		if req.SSHPort == 0 {
 			req.SSHPort = cluster.Cluster.NodeDefaults.SSHPort
 		}
+		inputs := nodeadd.SplitCommaList(args.Host)
+		if len(inputs) == 0 {
+			return nodeAddLocalResult(streamID, call, "invalid node_add arguments: host is required", false)
+		}
+		names := nodeadd.SplitCommaList(args.Name)
+		if len(names) > 0 && len(names) != len(inputs) {
+			return nodeAddLocalResult(streamID, call, fmt.Sprintf("invalid node_add arguments: name must be empty or contain %d comma-separated values", len(inputs)), false)
+		}
+		if len(args.Users) > 0 && len(args.Users) != len(inputs) {
+			return nodeAddLocalResult(streamID, call, fmt.Sprintf("invalid node_add arguments: users must contain %d values", len(inputs)), false)
+		}
+		if len(args.Passwords) > 0 && len(args.Passwords) != len(inputs) {
+			return nodeAddLocalResult(streamID, call, fmt.Sprintf("invalid node_add arguments: passwords must contain %d values", len(inputs)), false)
+		}
 
 		if runner == nil {
 			runner = nodeadd.Service{
@@ -220,41 +326,79 @@ func (m Model) dispatchNodeAdd(streamID uint64, call llm.ToolCall) tea.Cmd {
 			}
 		}
 
-		result, err := runner.Add(parentCtx, req)
-		if err != nil {
-			return nodeAddLocalResult(streamID, call, "node_add failed: "+redactNodeAddError(err, args), false)
-		}
+		results := make([]nodeadd.Result, 0, len(inputs))
+		outputs := make([]string, 0, len(inputs))
+		for i, input := range inputs {
+			currentArgs := args
+			currentArgs.Host = input
+			currentArgs.Name = ""
+			if len(names) > 0 {
+				currentArgs.Name = names[i]
+			}
+			currentReq := req
+			currentReq.Input = input
+			currentReq.Name = currentArgs.Name
+			if len(args.Users) > 0 {
+				currentArgs.User = args.Users[i]
+				currentReq.Username = args.Users[i]
+			}
+			if len(args.Passwords) > 0 {
+				currentArgs.Password = args.Passwords[i]
+				currentReq.Password = args.Passwords[i]
+			}
 
-		name := result.Node.Name
-		if name == "" {
-			name = req.Name
+			result, err := runner.Add(parentCtx, currentReq)
+			if err != nil {
+				return nodeAddLocalResult(streamID, call, "node_add failed: "+redactNodeAddError(err, currentArgs), false)
+			}
+			output, normalized := formatNodeAddResultOutput(result, currentReq)
+			results = append(results, normalized)
+			outputs = append(outputs, output)
 		}
-		if name == "" {
-			name = req.Input
-		}
-		host := result.Node.Host
-		if host == "" {
-			host = req.Input
-		}
-		agentPort := req.AgentPort
-		if result.Node.Agent != nil && result.Node.Agent.Port != 0 {
-			agentPort = result.Node.Agent.Port
-		}
-		if agentPort == 0 {
-			agentPort = 9280
-		}
-		if result.Node.Name == "" {
-			result.Node.Name = name
-		}
-		if result.Node.Host == "" {
-			result.Node.Host = host
-		}
-		if result.Node.Agent != nil && result.Node.Agent.Port == 0 {
-			result.Node.Agent.Port = agentPort
-		}
-		output := fmt.Sprintf("node added and deployed: %s\ncluster: %s\nhost: %s\nagent_port: %d\nhealth: ok", name, req.ClusterName, host, agentPort)
-		return nodeAddResultMsg{streamID: streamID, Call: call, Result: result, Cluster: req.ClusterName, TLS: req.TLS, Output: output}
+		return nodeAddResultMsg{streamID: streamID, Call: call, Result: results[0], Results: results, Cluster: req.ClusterName, TLS: req.TLS, Output: strings.Join(outputs, "\n\n")}
 	}
+}
+
+func formatNodeAddResultOutput(result nodeadd.Result, req nodeadd.Request) (string, nodeadd.Result) {
+	name := result.Node.Name
+	if name == "" {
+		name = req.Name
+	}
+	if name == "" {
+		name = req.Input
+	}
+	host := result.Node.Host
+	if host == "" {
+		host = req.Input
+	}
+	agentPort := req.AgentPort
+	if result.Node.Agent != nil && result.Node.Agent.Port != 0 {
+		agentPort = result.Node.Agent.Port
+	}
+	if agentPort == 0 {
+		agentPort = 9280
+	}
+	if result.Node.Name == "" {
+		result.Node.Name = name
+	}
+	if result.Node.Host == "" {
+		result.Node.Host = host
+	}
+	if result.Node.Agent != nil && result.Node.Agent.Port == 0 {
+		result.Node.Agent.Port = agentPort
+	}
+	output := fmt.Sprintf("node added and deployed: %s\ncluster: %s\nhost: %s\nagent_port: %d\nhealth: ok", name, req.ClusterName, host, agentPort)
+	return output, result
+}
+
+func nodeAddResults(primary nodeadd.Result, results []nodeadd.Result) []nodeadd.Result {
+	if len(results) > 0 {
+		return results
+	}
+	if strings.TrimSpace(primary.Node.Name) == "" {
+		return nil
+	}
+	return []nodeadd.Result{primary}
 }
 
 func (m Model) applyNodeAddResult(cluster string, result nodeadd.Result, tls bool) Model {

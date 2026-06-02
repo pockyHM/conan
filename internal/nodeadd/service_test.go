@@ -136,3 +136,16 @@ func TestServiceRequiresIPWhenHostnameUnresolved(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestSplitCommaListTrimsAndSkipsEmptyItems(t *testing.T) {
+	got := SplitCommaList(" web-1,10.0.0.12,, web-2 ")
+	want := []string{"web-1", "10.0.0.12", "web-2"}
+	if len(got) != len(want) {
+		t.Fatalf("SplitCommaList length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("SplitCommaList[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

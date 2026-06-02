@@ -380,26 +380,7 @@ func TestRootCommandUsesConfiguredStreams(t *testing.T) {
 	}
 }
 
-func TestTUIProgramOptionsDisableMouseByDefaultForTextSelection(t *testing.T) {
-	input := strings.NewReader("")
-	var output bytes.Buffer
-	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
-
-	startupOptions := reflect.ValueOf(program).Elem().FieldByName("startupOptions").Int()
-	const (
-		withMouseCellMotion = int64(1 << 1)
-		withMouseAllMotion  = int64(1 << 2)
-	)
-	if startupOptions&withMouseCellMotion != 0 {
-		t.Fatal("tui should not capture mouse by default so terminal text selection works")
-	}
-	if startupOptions&withMouseAllMotion != 0 {
-		t.Fatal("tui should not enable full mouse motion")
-	}
-}
-
-func TestTUIProgramOptionsCanOptInToMouseCellMotion(t *testing.T) {
-	t.Setenv("CONAN_TUI_MOUSE", "1")
+func TestTUIProgramOptionsEnableMouseByDefaultForWheelScrolling(t *testing.T) {
 	input := strings.NewReader("")
 	var output bytes.Buffer
 	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
@@ -410,7 +391,26 @@ func TestTUIProgramOptionsCanOptInToMouseCellMotion(t *testing.T) {
 		withMouseAllMotion  = int64(1 << 2)
 	)
 	if startupOptions&withMouseCellMotion == 0 {
-		t.Fatal("tui should enable mouse cell motion when CONAN_TUI_MOUSE=1")
+		t.Fatal("tui should capture mouse by default so wheel scrolling reaches the viewport")
+	}
+	if startupOptions&withMouseAllMotion != 0 {
+		t.Fatal("tui should not enable full mouse motion")
+	}
+}
+
+func TestTUIProgramOptionsCanDisableMouseCellMotion(t *testing.T) {
+	t.Setenv("CONAN_TUI_MOUSE", "0")
+	input := strings.NewReader("")
+	var output bytes.Buffer
+	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
+
+	startupOptions := reflect.ValueOf(program).Elem().FieldByName("startupOptions").Int()
+	const (
+		withMouseCellMotion = int64(1 << 1)
+		withMouseAllMotion  = int64(1 << 2)
+	)
+	if startupOptions&withMouseCellMotion != 0 {
+		t.Fatal("tui should disable mouse cell motion when CONAN_TUI_MOUSE=0")
 	}
 	if startupOptions&withMouseAllMotion != 0 {
 		t.Fatal("tui should not enable full mouse motion")
@@ -668,6 +668,83 @@ func TestNodeAddNoDeployWritesConfig(t *testing.T) {
 	for _, want := range []string{"name: 127.0.0.1", "host: 127.0.0.1", "port: 9300", "token:"} {
 		if !strings.Contains(contents, want) {
 			t.Fatalf("nodes.yaml missing %q:\n%s", want, contents)
+		}
+	}
+}
+
+func TestNodeAddNoDeployWritesCommaSeparatedNodes(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "clusters", "prod"), 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: prod\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "clusters", "prod", "cluster.yaml"), []byte("name: prod\n"), 0644); err != nil {
+		t.Fatalf("write cluster: %v", err)
+	}
+
+	stdout, _, err := executeCommand("--home", home, "node", "add", "10.0.0.1,10.0.0.2", "--name", "web-1,web-2", "--no-deploy", "--port", "9300")
+	if err != nil {
+		t.Fatalf("node add: %v", err)
+	}
+	for _, want := range []string{"node added: web-1", "node added: web-2"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(home, "clusters", "prod", "nodes.yaml"))
+	if err != nil {
+		t.Fatalf("read nodes.yaml: %v", err)
+	}
+	contents := string(data)
+	for _, want := range []string{"name: web-1", "host: 10.0.0.1", "name: web-2", "host: 10.0.0.2"} {
+		if !strings.Contains(contents, want) {
+			t.Fatalf("nodes.yaml missing %q:\n%s", want, contents)
+		}
+	}
+}
+
+func TestNodeAddBatchRequiresMatchingNames(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "clusters", "prod"), 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: prod\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "clusters", "prod", "cluster.yaml"), []byte("name: prod\n"), 0644); err != nil {
+		t.Fatalf("write cluster: %v", err)
+	}
+
+	_, _, err := executeCommand("--home", home, "node", "add", "10.0.0.1,10.0.0.2", "--name", "web-1", "--no-deploy")
+	if err == nil || !strings.Contains(err.Error(), "--name must be omitted or contain 2 comma-separated values") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNodeContextPrompterIncludesNodeInCredentialPrompts(t *testing.T) {
+	var out bytes.Buffer
+	prompter := nodeContextPrompter{
+		base: cliPrompter{
+			in:  strings.NewReader("deploy\nsecret\n"),
+			out: &out,
+		},
+		name: "web-1",
+		host: "10.0.0.12",
+	}
+
+	if _, err := prompter.PromptUsername(""); err != nil {
+		t.Fatalf("PromptUsername: %v", err)
+	}
+	if _, err := prompter.PromptPassword(); err != nil {
+		t.Fatalf("PromptPassword: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{"SSH username for web-1 (10.0.0.12):", "SSH password for web-1 (10.0.0.12):"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("prompt output missing %q:\n%s", want, output)
 		}
 	}
 }

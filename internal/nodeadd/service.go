@@ -80,6 +80,18 @@ type Service struct {
 
 var ErrAuthFailed = fmt.Errorf("ssh authentication failed")
 
+func SplitCommaList(input string) []string {
+	parts := strings.Split(input, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
 func isAuthFailed(err error) bool {
 	return errors.Is(err, ErrAuthFailed) || errors.Is(err, deploy.ErrAuthFailed)
 }

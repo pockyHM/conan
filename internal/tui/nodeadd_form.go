@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/pockyHM/conan/internal/nodeadd"
 )
 
 type nodeAddFormField int
@@ -22,6 +23,8 @@ const (
 type nodeAddFormValues struct {
 	Name      string
 	Host      string
+	Names     []string
+	Hosts     []string
 	AgentPort int
 	User      string
 	Password  string
@@ -115,12 +118,17 @@ func (f nodeAddForm) Values() (nodeAddFormValues, error) {
 	portText := strings.TrimSpace(f.values[nodeAddFormFieldPort])
 	user := strings.TrimSpace(f.values[nodeAddFormFieldUser])
 	password := f.values[nodeAddFormFieldPassword]
+	names := nodeadd.SplitCommaList(name)
+	hosts := nodeadd.SplitCommaList(host)
 
-	if name == "" {
+	if len(names) == 0 && len(hosts) <= 1 {
 		return nodeAddFormValues{}, fmt.Errorf("name is required")
 	}
-	if host == "" {
+	if len(hosts) == 0 {
 		return nodeAddFormValues{}, fmt.Errorf("host is required")
+	}
+	if len(names) > 0 && len(names) != len(hosts) {
+		return nodeAddFormValues{}, fmt.Errorf("name must be empty or contain %d comma-separated values", len(hosts))
 	}
 	if portText == "" {
 		portText = "9280"
@@ -138,7 +146,7 @@ func (f nodeAddForm) Values() (nodeAddFormValues, error) {
 	if strings.TrimSpace(password) == "" {
 		return nodeAddFormValues{}, fmt.Errorf("password is required")
 	}
-	return nodeAddFormValues{Name: name, Host: host, AgentPort: port, User: user, Password: password}, nil
+	return nodeAddFormValues{Name: strings.Join(names, ","), Host: strings.Join(hosts, ","), Names: names, Hosts: hosts, AgentPort: port, User: user, Password: password}, nil
 }
 
 func (f nodeAddForm) View() string {

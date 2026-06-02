@@ -1,8 +1,11 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -14,6 +17,14 @@ type retryTestProvider struct {
 	streamErrors []error
 	chatCalls    int
 	streamCalls  int
+}
+
+type retryCurlTestProvider struct {
+	retryTestProvider
+}
+
+func (p *retryCurlTestProvider) CurlCommand(req *ChatRequest) string {
+	return "curl -d 'full prompt and request body'"
 }
 
 func (p *retryTestProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
@@ -179,5 +190,40 @@ func TestRetryProviderRetriesStreams(t *testing.T) {
 	}
 	if inner.streamCalls != 2 {
 		t.Fatalf("stream calls = %d, want 2", inner.streamCalls)
+	}
+}
+
+func TestRetryProviderDoesNotPrintCurlRequestOnRetry(t *testing.T) {
+	inner := &retryCurlTestProvider{retryTestProvider: retryTestProvider{chatErrors: []error{
+		&httpError{Status: 502, Body: "bad gateway"},
+	}}}
+	provider := NewRetryProvider(inner, RetryConfig{MaxRetries: 1, BaseDelay: time.Nanosecond})
+
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = writer
+	t.Cleanup(func() { os.Stdout = oldStdout })
+	_, chatErr := provider.Chat(context.Background(), &ChatRequest{
+		SystemPrompt: "full system prompt",
+		Messages:     []models.Message{{Role: "user", Content: "complex request"}},
+	})
+	os.Stdout = oldStdout
+	if closeErr := writer.Close(); closeErr != nil {
+		t.Fatalf("close stdout pipe writer: %v", closeErr)
+	}
+	defer reader.Close()
+	var output bytes.Buffer
+	if _, err := io.Copy(&output, reader); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+
+	if chatErr != nil {
+		t.Fatalf("Chat: %v", chatErr)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("retry should not print curl request to stdout, got %q", output.String())
 	}
 }

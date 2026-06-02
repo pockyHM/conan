@@ -79,14 +79,14 @@ func TestReadSSESendsDoneSentinel(t *testing.T) {
 	}
 }
 
-func TestReadSSEDebugLogsRawEvents(t *testing.T) {
+func TestReadSSEDebugLogsEventSummaryOnly(t *testing.T) {
 	logFile := filepath.Join(t.TempDir(), "conan.jsonl")
 	if err := logging.Setup(logging.Config{Level: "debug", File: logFile}); err != nil {
 		t.Fatalf("setup logging: %v", err)
 	}
 	defer logging.Close()
 
-	input := "event: completion\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	input := "event: completion\ndata: {\"choices\":[{\"delta\":{\"content\":\"secret chunk\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
 	events := ReadSSE(strings.NewReader(input))
 	for range events {
 	}
@@ -100,13 +100,15 @@ func TestReadSSEDebugLogsRawEvents(t *testing.T) {
 	for _, want := range []string{
 		"llm raw sse event",
 		"completion",
-		"finish_reason",
-		"stop",
-		"[DONE]",
 		"data_len",
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("debug log missing %q:\n%s", want, logText)
+		}
+	}
+	for _, unwanted := range []string{"secret chunk", "finish_reason", "[DONE]"} {
+		if strings.Contains(logText, unwanted) {
+			t.Fatalf("debug log should not contain raw SSE data %q:\n%s", unwanted, logText)
 		}
 	}
 }
@@ -161,8 +163,8 @@ func TestReadSSEDebugLogsRedactPasswordFields(t *testing.T) {
 					t.Fatalf("debug log should not contain raw password fragment %q:\n%s", secret, logText)
 				}
 			}
-			if !strings.Contains(logText, "[redacted]") && !strings.Contains(logText, "[redacted tool arguments]") {
-				t.Fatalf("debug log should contain redacted marker:\n%s", logText)
+			if !strings.Contains(logText, "data_len") {
+				t.Fatalf("debug log should contain SSE data length:\n%s", logText)
 			}
 		})
 	}
@@ -203,7 +205,7 @@ func TestReadSSEDebugLogsRedactToolArgumentFragments(t *testing.T) {
 			t.Fatalf("debug log should not contain tool argument fragment %q:\n%s", secret, logText)
 		}
 	}
-	if !strings.Contains(logText, "[redacted tool arguments]") {
-		t.Fatalf("debug log should contain redacted tool argument marker:\n%s", logText)
+	if !strings.Contains(logText, "data_len") {
+		t.Fatalf("debug log should contain SSE data length:\n%s", logText)
 	}
 }

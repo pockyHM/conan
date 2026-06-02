@@ -282,6 +282,7 @@ Conan 支持 Anthropic 和 OpenAI 兼容提供方。配置中的 API Key 可以�
 
 ```bash
 ./bin/conan node add web-1.example.com --no-deploy
+./bin/conan node add 10.0.0.12,10.0.0.13 --name web-1,web-2 --no-deploy
 ./bin/conan node add web-1.example.com --update
 ./bin/conan node add web-1.example.com --update --rotate-token
 ./bin/conan node add web-1.example.com --agent-bin ./bin/conan-agent-linux-amd64

@@ -148,6 +148,78 @@ func TestDispatchNodeAddUsesInjectedRunnerAndPreservesRawPassword(t *testing.T) 
 	}
 }
 
+func TestDispatchNodeAddAddsCommaSeparatedHosts(t *testing.T) {
+	var gotReqs []nodeadd.Request
+	model := NewModel(ModelConfig{
+		Cluster:    "prod",
+		ConfigHome: t.TempDir(),
+		NodeAddRunner: nodeAddRunnerFunc(func(_ context.Context, req nodeadd.Request) (nodeadd.Result, error) {
+			gotReqs = append(gotReqs, req)
+			return nodeadd.Result{
+				Node: configschema.NodeConfig{
+					Name: req.Name,
+					Host: req.Input,
+					Agent: &configschema.NodeAgentOverride{
+						Port: req.AgentPort,
+					},
+				},
+				Deployed: true,
+			}, nil
+		}),
+	})
+	model.nodeToolsEnabled = true
+	call := llm.ToolCall{ID: "node-add-1", Name: metaToolNodeAdd, Arguments: json.RawMessage(`{
+		"host":"10.0.0.12,10.0.0.13",
+		"name":"web-1,web-2",
+		"users":["deploy-1","deploy-2"],
+		"passwords":["secret-1","secret-2"],
+		"agent_port":9281
+	}`)}
+
+	msg := execCmd(t, model.dispatchNodeAdd(7, call))
+	result, ok := msg.(nodeAddResultMsg)
+	if !ok {
+		t.Fatalf("dispatchNodeAdd returned %T, want nodeAddResultMsg", msg)
+	}
+	if len(gotReqs) != 2 {
+		t.Fatalf("runner calls = %d, want 2: %#v", len(gotReqs), gotReqs)
+	}
+	for i, want := range []struct {
+		input string
+		name  string
+	}{
+		{input: "10.0.0.12", name: "web-1"},
+		{input: "10.0.0.13", name: "web-2"},
+	} {
+		if gotReqs[i].Input != want.input || gotReqs[i].Name != want.name {
+			t.Fatalf("request %d = %#v, want input %q name %q", i, gotReqs[i], want.input, want.name)
+		}
+		if gotReqs[i].Username != fmt.Sprintf("deploy-%d", i+1) || gotReqs[i].Password != fmt.Sprintf("secret-%d", i+1) {
+			t.Fatalf("request %d credentials = %#v", i, gotReqs[i])
+		}
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("result count = %d, want 2", len(result.Results))
+	}
+	for _, want := range []string{"node added and deployed: web-1", "node added and deployed: web-2"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("output missing %q:\n%s", want, result.Output)
+		}
+	}
+
+	result.streamID = 0
+	next, _ := model.Update(result)
+	model = next.(Model)
+	if len(model.nodes) != 2 {
+		t.Fatalf("nodes = %#v, want two added nodes", model.nodes)
+	}
+	for _, name := range []string{"web-1", "web-2"} {
+		if !model.selectedNodes[name] {
+			t.Fatalf("selectedNodes = %#v, want %s selected", model.selectedNodes, name)
+		}
+	}
+}
+
 func TestNodeAddPreparePromptsForMissingPassword(t *testing.T) {
 	model := NewModel(ModelConfig{})
 	model.nodeToolsEnabled = true
@@ -164,6 +236,92 @@ func TestNodeAddPreparePromptsForMissingPassword(t *testing.T) {
 	}
 	if prompt.streamID != 7 || prompt.field != "password" || prompt.label != "SSH password" || !prompt.secret {
 		t.Fatalf("prompt = %#v, want password secret prompt", prompt)
+	}
+}
+
+func TestNodeAddBatchPromptCollectsCredentialsPerNode(t *testing.T) {
+	model := NewModel(ModelConfig{})
+	model.nodeToolsEnabled = true
+	call := llm.ToolCall{
+		ID:        "node-add-1",
+		Name:      metaToolNodeAdd,
+		Arguments: json.RawMessage(`{"host":"10.0.0.12,10.0.0.13","name":"web-1,web-2"}`),
+	}
+
+	msg := execCmd(t, model.prepareNodeAddOrPrompt(0, call))
+	prompt, ok := msg.(nodeAddPromptMsg)
+	if !ok {
+		t.Fatalf("prepareNodeAddOrPrompt returned %T, want nodeAddPromptMsg", msg)
+	}
+	if prompt.label != "SSH username for web-1 (10.0.0.12)" {
+		t.Fatalf("label = %q", prompt.label)
+	}
+
+	next, _ := model.Update(prompt)
+	model = next.(Model)
+	model.input = "deploy-1"
+	next, cmd := model.submit()
+	model = next.(Model)
+	msg = execCmd(t, cmd)
+	prompt, ok = msg.(nodeAddPromptMsg)
+	if !ok {
+		t.Fatalf("second prompt returned %T, want nodeAddPromptMsg", msg)
+	}
+	if prompt.label != "SSH username for web-2 (10.0.0.13)" {
+		t.Fatalf("label = %q", prompt.label)
+	}
+
+	next, _ = model.Update(prompt)
+	model = next.(Model)
+	model.input = "deploy-2"
+	next, cmd = model.submit()
+	model = next.(Model)
+	msg = execCmd(t, cmd)
+	prompt, ok = msg.(nodeAddPromptMsg)
+	if !ok {
+		t.Fatalf("password prompt returned %T, want nodeAddPromptMsg", msg)
+	}
+	if prompt.label != "SSH password for web-1 (10.0.0.12)" || !prompt.secret {
+		t.Fatalf("password prompt = %#v", prompt)
+	}
+
+	next, _ = model.Update(prompt)
+	model = next.(Model)
+	model.input = "secret-1"
+	next, cmd = model.submit()
+	model = next.(Model)
+	msg = execCmd(t, cmd)
+	prompt, ok = msg.(nodeAddPromptMsg)
+	if !ok {
+		t.Fatalf("second password prompt returned %T, want nodeAddPromptMsg", msg)
+	}
+	if prompt.label != "SSH password for web-2 (10.0.0.13)" || !prompt.secret {
+		t.Fatalf("password prompt = %#v", prompt)
+	}
+
+	next, _ = model.Update(prompt)
+	model = next.(Model)
+	model.input = "secret-2"
+	next, cmd = model.submit()
+	model = next.(Model)
+	msg = execCmd(t, cmd)
+	ready, ok := msg.(nodeAddReadyMsg)
+	if !ok {
+		t.Fatalf("final prompt returned %T, want nodeAddReadyMsg", msg)
+	}
+
+	var args struct {
+		Users     []string `json:"users"`
+		Passwords []string `json:"passwords"`
+	}
+	if err := json.Unmarshal(ready.call.Arguments, &args); err != nil {
+		t.Fatalf("unmarshal ready args: %v", err)
+	}
+	if got := strings.Join(args.Users, ","); got != "deploy-1,deploy-2" {
+		t.Fatalf("users = %#v", args.Users)
+	}
+	if got := strings.Join(args.Passwords, ","); got != "secret-1,secret-2" {
+		t.Fatalf("passwords = %#v", args.Passwords)
 	}
 }
 

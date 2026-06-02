@@ -76,3 +76,34 @@ func TestNodeAddFormValidation(t *testing.T) {
 		t.Fatalf("bad port err = %v, want agent port validation", err)
 	}
 }
+
+func TestNodeAddFormAllowsBatchHostsWithMatchingNames(t *testing.T) {
+	form := newNodeAddForm(uiLanguageEnglish).
+		withValue(nodeAddFormFieldName, "web-1,web-2").
+		withValue(nodeAddFormFieldHost, "10.0.0.12,10.0.0.13").
+		withValue(nodeAddFormFieldUser, "deploy").
+		withValue(nodeAddFormFieldPassword, "secret")
+
+	values, err := form.Values()
+	if err != nil {
+		t.Fatalf("Values returned error: %v", err)
+	}
+	if len(values.Hosts) != 2 || values.Hosts[0] != "10.0.0.12" || values.Hosts[1] != "10.0.0.13" {
+		t.Fatalf("hosts = %#v", values.Hosts)
+	}
+	if len(values.Names) != 2 || values.Names[0] != "web-1" || values.Names[1] != "web-2" {
+		t.Fatalf("names = %#v", values.Names)
+	}
+}
+
+func TestNodeAddFormRejectsBatchHostsWithMismatchedNames(t *testing.T) {
+	form := newNodeAddForm(uiLanguageEnglish).
+		withValue(nodeAddFormFieldName, "web-1").
+		withValue(nodeAddFormFieldHost, "10.0.0.12,10.0.0.13").
+		withValue(nodeAddFormFieldUser, "deploy").
+		withValue(nodeAddFormFieldPassword, "secret")
+
+	if _, err := form.Values(); err == nil || !strings.Contains(err.Error(), "name must be empty or contain 2 comma-separated values") {
+		t.Fatalf("err = %v", err)
+	}
+}

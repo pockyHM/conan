@@ -113,6 +113,7 @@ const (
 	modeNodeAddForm
 	modeLangSelect
 	modeModelSelect
+	modeClusterSelect
 	modeConfig
 	modeSkillsManage
 	modeSkillInstallSelect
@@ -127,12 +128,15 @@ type nodePromptState struct {
 	streamID uint64
 	call     llm.ToolCall
 	field    string
+	list     string
+	index    int
 	label    string
 	secret   bool
 }
 
 type nodeAddFormResultMsg struct {
 	result  nodeadd.Result
+	results []nodeadd.Result
 	cluster string
 	tls     bool
 	output  string
@@ -168,11 +172,12 @@ type Model struct {
 	selectedNodes    map[string]bool
 	nodeToolsEnabled bool
 
-	mode          tuiMode
-	nodeSelector  nodeSelector
-	langSelector  langSelector
-	modelSelector modelSelector
-	prevSelected  map[string]bool
+	mode            tuiMode
+	nodeSelector    nodeSelector
+	langSelector    langSelector
+	modelSelector   modelSelector
+	clusterSelector clusterSelector
+	prevSelected    map[string]bool
 
 	reviewer            *security.Reviewer
 	auditLog            *security.AuditLogger
@@ -592,6 +597,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			streamID: msg.streamID,
 			call:     msg.call,
 			field:    msg.field,
+			list:     msg.list,
+			index:    msg.index,
 			label:    msg.label,
 			secret:   msg.secret,
 		}
@@ -913,7 +920,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		results := []nodeToolResult{{Node: "local", Output: msg.Output, Success: true}}
-		m = m.applyNodeAddResult(msg.Cluster, msg.Result, msg.TLS)
+		for _, result := range nodeAddResults(msg.Result, msg.Results) {
+			m = m.applyNodeAddResult(msg.Cluster, result, msg.TLS)
+		}
 		m.fillToolPlaceholder(msg.Call, msg.Output, results)
 		if m.conv != nil {
 			m.conv.AddToolResult(msg.Call.ID, msg.Output)
@@ -935,7 +944,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.mode = modeNodeSelect
-		m = m.applyNodeAddResult(msg.cluster, msg.result, msg.tls)
+		for _, result := range nodeAddResults(msg.result, msg.results) {
+			m = m.applyNodeAddResult(msg.cluster, result, msg.tls)
+		}
 		m.nodeAddForm = nodeAddForm{}
 		m.status = m.uiLanguage.tr("Node added and deployed", "节点已添加并部署")
 		m.updateViewportContent()
@@ -1010,6 +1021,9 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeModelSelect {
 		return m.handleModelSelectKey(key)
+	}
+	if m.mode == modeClusterSelect {
+		return m.handleClusterSelectKey(key)
 	}
 	if m.mode == modeConfig {
 		return m.handleConfigKey(key)
@@ -1344,7 +1358,13 @@ func (m Model) submitNodePrompt() (tea.Model, tea.Cmd) {
 		value = strings.TrimSpace(value)
 	}
 	call := state.call
-	updatedArgs, err := setNodeAddArg(call.Arguments, state.field, value)
+	var updatedArgs json.RawMessage
+	var err error
+	if state.list != "" {
+		updatedArgs, err = setNodeAddArgListValue(call.Arguments, state.list, state.index, value)
+	} else {
+		updatedArgs, err = setNodeAddArg(call.Arguments, state.field, value)
+	}
 	if err != nil {
 		m.mode = modeChat
 		m.nodePrompt = nodePromptState{}
@@ -1433,6 +1453,7 @@ func (m Model) dispatchNodeAddForm(call llm.ToolCall) tea.Cmd {
 		case nodeAddResultMsg:
 			return nodeAddFormResultMsg{
 				result:  result.Result,
+				results: result.Results,
 				cluster: result.Cluster,
 				tls:     result.TLS,
 				output:  result.Output,
@@ -1603,6 +1624,28 @@ func (m Model) handleModelSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		var cmd tea.Cmd
 		m.modelSelector, cmd = m.modelSelector.Update(key)
+		return m, cmd
+	}
+}
+
+func (m Model) handleClusterSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.Type {
+	case tea.KeyEnter:
+		selected, ok := m.clusterSelector.Selected()
+		if !ok {
+			m.mode = modeChat
+			m.status = m.uiLanguage.tr("No configured clusters", "没有已配置集群")
+			return m, nil
+		}
+		m.mode = modeChat
+		return m.switchCluster(selected)
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.mode = modeChat
+		m.status = m.uiLanguage.tr("Cluster selection cancelled", "已取消集群选择")
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.clusterSelector, cmd = m.clusterSelector.Update(key)
 		return m, cmd
 	}
 }
@@ -1823,6 +1866,84 @@ func (m Model) saveUILanguage(lang uiLanguage) error {
 	return loader.SaveGlobal(global)
 }
 
+func (m Model) switchCluster(name string) (Model, tea.Cmd) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		m.status = m.uiLanguage.tr("Usage: /cluster <name>", "用法: /cluster <名称>")
+		return m, nil
+	}
+	m.cluster = name
+	m.clusterExplicit = true
+	m.status = m.uiLanguage.tr("Cluster switched to ", "已切换集群: ") + name
+	if m.configHome != "" {
+		if updated, err := m.reloadClusterNodes(name); err != nil {
+			m = updated
+			m.status = m.uiLanguage.tr("Cluster switched, but node reload failed: ", "集群已切换，但节点重载失败: ") + err.Error()
+			return m, nil
+		} else {
+			m = updated
+		}
+	}
+	if len(m.clients) > 0 {
+		return m, m.pingNodes()
+	}
+	return m, nil
+}
+
+func (m Model) reloadClusterNodes(name string) (Model, error) {
+	cluster, err := cfgloader.NewLoader(m.configHome).LoadCluster(name)
+	if err != nil {
+		return m, err
+	}
+	nodes := nodeInfosFromCluster(cluster)
+	m.nodes = nodes
+	m.selectedNodes = selectedNodesFromNodeInfos(nodes)
+	m.clients = clientsFromCluster(cluster)
+	m.toolCache = newToolCache()
+	m.prevSelected = nil
+	if m.mode == modeNodeSelect {
+		m.nodeSelector = newNodeSelector(m.nodes, m.selectedNodes, m.uiLanguage)
+	}
+	return m, nil
+}
+
+func nodeInfosFromCluster(cluster *cfgloader.Cluster) []NodeInfo {
+	if cluster == nil {
+		return nil
+	}
+	nodes := make([]NodeInfo, 0, len(cluster.Nodes))
+	for _, node := range cluster.Nodes {
+		nodes = append(nodes, NodeInfo{
+			Name:             node.Name,
+			Host:             node.Agent.Host,
+			CommandWhitelist: node.CommandWhitelist,
+		})
+	}
+	return nodes
+}
+
+func selectedNodesFromNodeInfos(nodes []NodeInfo) map[string]bool {
+	selected := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		selected[node.Name] = true
+	}
+	return selected
+}
+
+func clientsFromCluster(cluster *cfgloader.Cluster) map[string]*mcp.Client {
+	clients := make(map[string]*mcp.Client)
+	if cluster == nil {
+		return clients
+	}
+	for _, node := range cluster.Nodes {
+		clients[node.Name] = mcp.NewClient(mcp.Config{
+			BaseURL: mcp.URL(node.Agent.Host, node.Agent.Port, node.Agent.TLS),
+			Token:   node.Agent.Token,
+		})
+	}
+	return clients
+}
+
 func (m Model) switchModel(name string) (Model, tea.Cmd) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -1889,6 +2010,9 @@ func (m Model) View() string {
 	}
 	if m.mode == modeModelSelect {
 		return header + "\n\n" + m.modelSelector.View() + "\n\n" + statusView
+	}
+	if m.mode == modeClusterSelect {
+		return header + "\n\n" + m.clusterSelector.View() + "\n\n" + statusView
 	}
 	if m.mode == modeConfig {
 		return header + "\n\n" + m.configScreen.View(m.width, m.uiLanguage) + "\n\n" + statusView
@@ -2536,11 +2660,21 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		m.status = m.uiLanguage.tr("Exit requested", "已请求退出")
 	case CommandCluster:
 		if cmd.Arg != "" {
-			m.cluster = cmd.Arg
-			m.status = m.uiLanguage.tr("Cluster switched to ", "已切换集群: ") + cmd.Arg
-		} else {
-			m.status = m.uiLanguage.tr("Current cluster: ", "当前集群: ") + m.cluster
+			return m.switchCluster(cmd.Arg)
 		}
+		clusters, err := cfgloader.NewLoader(m.configHome).ListClusters()
+		if err != nil {
+			m.status = m.uiLanguage.tr("Load clusters failed: ", "加载集群失败: ") + err.Error()
+			return m, nil
+		}
+		if len(clusters) == 0 {
+			m.status = m.uiLanguage.tr("No configured clusters", "没有已配置集群")
+			return m, nil
+		}
+		m.mode = modeClusterSelect
+		m.clusterSelector = newClusterSelector(clusters, m.cluster, m.uiLanguage)
+		m.status = m.uiLanguage.tr("Select cluster", "选择集群")
+		return m, nil
 	case CommandSkills:
 		return m.applySkillsCommand(cmd.Arg)
 	case CommandSkill:
@@ -3123,7 +3257,37 @@ func recentConversationContext(conv *conversation.Conversation, maxChars int) []
 	if conv == nil {
 		return nil
 	}
-	return conv.Context(maxChars)
+	return completeToolCallContext(conv.Context(maxChars))
+}
+
+func completeToolCallContext(messages []models.Message) []models.Message {
+	toolCalls := make(map[string]bool)
+	toolResults := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.ToolCallID == "" {
+			continue
+		}
+		switch msg.Role {
+		case conversation.RoleAssistant:
+			toolCalls[msg.ToolCallID] = true
+		case conversation.RoleTool:
+			toolResults[msg.ToolCallID] = true
+		}
+	}
+
+	result := make([]models.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.ToolCallID == "" {
+			if msg.Role != conversation.RoleTool {
+				result = append(result, msg)
+			}
+			continue
+		}
+		if toolCalls[msg.ToolCallID] && toolResults[msg.ToolCallID] {
+			result = append(result, msg)
+		}
+	}
+	return result
 }
 
 func (m Model) runSubagent(ctx context.Context, req subagent.Request) subagent.Result {
@@ -3424,9 +3588,10 @@ func (m Model) debugLogLLMRequest(req *llm.ChatRequest) {
 	slog.Debug("llm request",
 		"cluster", m.cluster,
 		"model", m.model,
-		"system_prompt", req.SystemPrompt,
-		"messages", debugMessages(req.Messages),
-		"tools", debugTools(req.Tools),
+		"system_prompt_len", len(req.SystemPrompt),
+		"messages_count", len(req.Messages),
+		"messages_content_len", debugMessagesContentLen(req.Messages),
+		"tools_count", len(req.Tools),
 		"thinking", debugThinking(req.Thinking),
 	)
 }
@@ -3434,12 +3599,11 @@ func (m Model) debugLogLLMRequest(req *llm.ChatRequest) {
 func (m Model) debugLogStreamEvent(event llm.ChatEvent) {
 	switch e := event.(type) {
 	case llm.TextDeltaEvent:
-		slog.Debug("llm stream text_delta", "stream_id", m.activeStreamID, "delta", e.Delta, "delta_len", len(e.Delta))
+		slog.Debug("llm stream text_delta", "stream_id", m.activeStreamID, "delta_len", len(e.Delta))
 	case llm.ReasoningDeltaEvent:
-		slog.Debug("llm stream reasoning_delta", "stream_id", m.activeStreamID, "delta", e.Delta, "delta_len", len(e.Delta))
+		slog.Debug("llm stream reasoning_delta", "stream_id", m.activeStreamID, "delta_len", len(e.Delta))
 	case llm.ToolCallEvent:
-		sanitizedArgs := sanitizeToolArguments(e.Name, e.Arguments)
-		slog.Debug("llm stream tool_call", "stream_id", m.activeStreamID, "id", e.ID, "name", e.Name, "arguments", string(sanitizedArgs))
+		slog.Debug("llm stream tool_call", "stream_id", m.activeStreamID, "id", e.ID, "name", e.Name, "arguments_len", len(e.Arguments))
 	case llm.StopEvent:
 		slog.Debug("llm stream stop", "stream_id", m.activeStreamID, "reason", e.Reason, "buffer_len", len(m.streamBuf), "tool_calls", m.streamToolExpected)
 	case llm.ErrorEvent:
@@ -3463,30 +3627,13 @@ func debugThinking(thinking *bool) string {
 	return "disabled"
 }
 
-func debugMessages(messages []models.Message) []map[string]string {
-	result := make([]map[string]string, 0, len(messages))
+func debugMessagesContentLen(messages []models.Message) int {
+	total := 0
 	for _, msg := range messages {
-		result = append(result, map[string]string{
-			"role":         msg.Role,
-			"content":      msg.Content,
-			"tool_call_id": msg.ToolCallID,
-			"tool_name":    msg.ToolName,
-			"tool_input":   msg.ToolInput,
-		})
+		total += len(msg.Content)
+		total += len(msg.ToolInput)
 	}
-	return result
-}
-
-func debugTools(tools []llm.ToolDef) []map[string]string {
-	result := make([]map[string]string, 0, len(tools))
-	for _, tool := range tools {
-		result = append(result, map[string]string{
-			"name":         tool.Name,
-			"description":  tool.Description,
-			"input_schema": string(tool.InputSchema),
-		})
-	}
-	return result
+	return total
 }
 
 func (m *Model) markStreamToolDone(streamID uint64) {

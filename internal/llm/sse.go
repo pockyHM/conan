@@ -151,7 +151,7 @@ func ReadSSE(reader io.Reader) <-chan SSEEvent {
 			if line == "" {
 				if data.Len() > 0 {
 					ev := SSEEvent{Event: event.String(), Data: data.String()}
-					slog.Debug("llm raw sse event", "event", ev.Event, "data", sanitizeSSELogData(ev.Data), "data_len", len(ev.Data))
+					slog.Debug("llm raw sse event", "event", ev.Event, "data_len", len(ev.Data))
 					ch <- ev
 				}
 				event.Reset()
