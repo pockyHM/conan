@@ -3554,6 +3554,39 @@ func parseFormattedSubagentStatuses(results []nodeToolResult) []parsedSubagentSt
 	return statuses
 }
 
+const subagentMemoryContextBudget = 600
+
+// buildSubagentMemoryContext returns a string of relevant memory entries
+// for the given subagent task. Returns "" if memStore is nil or no entries
+// match. Each entry is trimmed to subagentMemoryContextBudget characters.
+func (m Model) buildSubagentMemoryContext(task string, nodes []string) string {
+	if m.memStore == nil {
+		return ""
+	}
+	query := strings.TrimSpace(task)
+	if len(nodes) > 0 {
+		query = query + " " + strings.Join(nodes, " ")
+	}
+	entries, err := m.memStore.SearchMemories(query, 5)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	var parts []string
+	budget := subagentMemoryContextBudget
+	for _, e := range entries {
+		body := strings.TrimSpace(e.Title + "\n" + e.Content)
+		if len(body) > budget {
+			body = body[:budget]
+		}
+		parts = append(parts, body)
+		budget -= len(body)
+		if budget <= 0 {
+			break
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func subagentPromptForDisplay(req subagent.Request) string {
 	var b strings.Builder
 	b.WriteString("Role: ")
