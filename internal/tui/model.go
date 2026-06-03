@@ -1189,15 +1189,6 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollViewportForKey(key)
 		return m, nil
 	case tea.KeyRunes:
-		if len(key.Runes) == 1 && key.Runes[0] == 'c' && !key.Paste &&
-			m.mode == modeChat && len(m.subagentRuns) > 0 {
-			focusedID := m.subagentRuns[len(m.subagentRuns)-1].ID
-			if m.subagentManager != nil && focusedID != "" {
-				_ = m.subagentManager.Cancel(focusedID)
-			}
-			m.status = m.uiLanguage.tr("Subagent cancelled (open Ctrl+A for full list)", "已取消子智能体（按 Ctrl+A 查看完整列表）")
-			return m, nil
-		}
 		added := string(key.Runes)
 		if key.Paste {
 			images, ok, err := imageAttachmentsFromPastedText(added, m.attachmentDir(), len(m.attachedImages)+len(m.pendingImages)+1)
@@ -2652,8 +2643,6 @@ func (m *Model) toggleLastToolOutputExpanded() {
 	}
 	m.status = m.uiLanguage.tr("No tool output to expand", "没有可展开的工具输出")
 }
-
-
 
 func (m Model) hasPendingVisibleTool() bool {
 	for _, msg := range m.messages {

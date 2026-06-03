@@ -3011,6 +3011,20 @@ func TestTypingSpaceAddsInputSpace(t *testing.T) {
 	}
 }
 
+func TestTypingCInChatInputWorksWhenSubagentRunsExist(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.subagentRuns = []subagentRunView{
+		{ID: "abc123", Role: subagent.RoleInvestigator, Model: "m", Status: "running"},
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	model = next.(Model)
+
+	if model.input != "c" {
+		t.Fatalf("input = %q, want typed c preserved", model.input)
+	}
+}
+
 func TestCtrlPNNavigatesInputHistoryAndRestoresDraft(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
 	model = typeAndEnter(t, model, "first")
