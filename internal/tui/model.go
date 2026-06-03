@@ -223,6 +223,7 @@ type Model struct {
 	subagentStatus             string
 	subagentRuns               []subagentRunView
 	subagentRunsExpanded       bool
+	subagentManager            *subagent.Manager
 	sessionList                sessionList
 	configScreen               configScreen
 	ac                         autocomplete
@@ -316,6 +317,7 @@ func NewModel(cfg ModelConfig) Model {
 		memoryRulesPromptLimit:     memoryPrompt.RulesTokenBudget,
 		memoryKnowledgePromptLimit: memoryPrompt.KnowledgeTokenBudget,
 		subagents:                  normalizeSubagentConfig(cfg.Subagents),
+		subagentManager:            subagent.NewManager(),
 		toolCache:                  newToolCache(),
 		ac:                         newAutocompleteWithLanguage(language),
 		inputHistoryIndex:          -1,
@@ -3995,6 +3997,9 @@ func (m Model) resumeAfterStreamTools(streamID uint64) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) cancelActiveStream() {
+	if m.subagentManager != nil {
+		m.subagentManager.CancelAll()
+	}
 	if m.streamCancel != nil {
 		m.streamCancel()
 	}
