@@ -30,6 +30,7 @@ func TestRegisterAllToolsOnlyExposesShellAndReadOnlyTools(t *testing.T) {
 		"net_traceroute": true,
 		"net_portcheck":  true,
 		"web_fetch":      true,
+		"web_report":     true,
 		"k8s_pods":       true,
 		"k8s_logs":       true,
 		"k8s_events":     true,

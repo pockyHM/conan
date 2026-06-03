@@ -35,7 +35,7 @@ func TestDefaultMetadataCoversBuiltInAndMetaTools(t *testing.T) {
 		"svc_list", "svc_status",
 		"log_read", "log_journalctl",
 		"net_ping", "net_traceroute", "net_portcheck", "net_curl",
-		"web_search", "web_fetch",
+		"web_search", "web_fetch", "web_report",
 		"docker_ps", "docker_images", "docker_logs",
 		"k8s_pods", "k8s_logs", "k8s_events", "k8s_describe",
 		"pkg_list", "pkg_search",

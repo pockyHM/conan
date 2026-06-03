@@ -48,6 +48,7 @@ func DefaultMetadata() map[string]Metadata {
 		meta("net_curl", SafetyReadOnly, ScopeNode, []string{"network", "web"}, []string{"http", "curl"}),
 		meta("web_search", SafetyReadOnly, ScopeNode, []string{"web"}, []string{"search"}),
 		meta("web_fetch", SafetyReadOnly, ScopeNode, []string{"web"}, []string{"fetch"}),
+		meta("web_report", SafetyReadOnly, ScopeLocal, []string{"web", "report"}, []string{"markdown", "preview", "download", "html"}),
 		meta("docker_ps", SafetyReadOnly, ScopeNode, []string{"container"}, []string{"docker", "ps"}),
 		meta("docker_images", SafetyReadOnly, ScopeNode, []string{"container"}, []string{"docker", "images"}),
 		meta("docker_logs", SafetyReadOnly, ScopeNode, []string{"container", "logs"}, []string{"docker", "logs"}),
