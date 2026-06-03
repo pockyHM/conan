@@ -3656,8 +3656,20 @@ func (m Model) runSubagent(ctx context.Context, req subagent.Request) subagent.R
 		Executor: subagentToolExecutor{model: m, nodes: req.Nodes},
 	}
 	events, results := runner.Run(ctx, req)
+	var tr *subagent.Transcript
+	if m.subagents.DebugTranscript && m.configHome != "" && req.SessionID != "" && req.ID != "" {
+		if opened, err := subagent.OpenTranscript(m.configHome, req.SessionID, req.ID); err == nil {
+			tr = opened
+		}
+	}
 	go func() {
-		for range events {
+		for ev := range events {
+			if tr != nil {
+				_ = tr.Write(ev)
+			}
+		}
+		if tr != nil {
+			_ = tr.Close()
 		}
 	}()
 	return <-results
