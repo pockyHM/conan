@@ -130,6 +130,7 @@ const (
 	modeConfig
 	modeSkillsManage
 	modeSkillInstallSelect
+	modeSubagentList
 )
 
 type pingResultMsg struct {
@@ -222,8 +223,9 @@ type Model struct {
 	subagentResults            []subagent.Result
 	subagentStatus             string
 	subagentRuns               []subagentRunView
-	subagentRunsExpanded       bool
 	subagentManager            *subagent.Manager
+	subagentListCursor         int
+	subagentDetailVisible      bool
 	sessionList                sessionList
 	configScreen               configScreen
 	ac                         autocomplete
@@ -857,7 +859,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case thinkingTickMsg:
-		if !m.isActiveStream(msg.streamID) || !m.streaming || m.streamBuf != "" || m.streamReasoningBuf != "" {
+		if !m.isActiveStream(msg.streamID) || !m.streaming || m.streamBuf != "" {
 			return m, nil
 		}
 		m.thinkingFrame++
@@ -1075,6 +1077,9 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeSession {
 		return m.handleSessionSelectKey(key)
 	}
+	if m.mode == modeSubagentList {
+		return m.handleSubagentListKey(key)
+	}
 	if m.mode == modeConfirm {
 		return m.handleConfirmKey(key)
 	}
@@ -1087,7 +1092,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if key.Type == tea.KeyCtrlA {
-			m.toggleSubagentRunsExpanded()
+			m.openSubagentList()
 			return m, nil
 		}
 		if key.Type == tea.KeyCtrlC || key.Type == tea.KeyEsc {
@@ -1117,7 +1122,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toggleLastToolOutputExpanded()
 		return m, nil
 	case tea.KeyCtrlA:
-		m.toggleSubagentRunsExpanded()
+		m.openSubagentList()
 		return m, nil
 	case tea.KeyCtrlL:
 		m.messages = nil
@@ -1180,11 +1185,12 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyRunes:
 		if len(key.Runes) == 1 && key.Runes[0] == 'c' && !key.Paste &&
-			m.mode == modeChat && m.subagentRunsExpanded && len(m.subagentRuns) > 0 {
+			m.mode == modeChat && len(m.subagentRuns) > 0 {
 			focusedID := m.subagentRuns[len(m.subagentRuns)-1].ID
 			if m.subagentManager != nil && focusedID != "" {
 				_ = m.subagentManager.Cancel(focusedID)
 			}
+			m.status = m.uiLanguage.tr("Subagent cancelled (open Ctrl+A for full list)", "已取消子智能体（按 Ctrl+A 查看完整列表）")
 			return m, nil
 		}
 		added := string(key.Runes)
@@ -1230,6 +1236,10 @@ func (m Model) handleChoiceKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyDown:
 		m.choice.moveChoice(1)
+		m.updateViewportContent()
+		return m, nil
+	case tea.KeySpace:
+		m.choice.toggleSelectedValue()
 		m.updateViewportContent()
 		return m, nil
 	case tea.KeyEnter:
@@ -2088,6 +2098,9 @@ func (m Model) View() string {
 	if m.mode == modeSession {
 		return header + "\n\n" + m.sessionList.View(m.width) + "\n\n" + statusView
 	}
+	if m.mode == modeSubagentList {
+		return header + "\n\n" + m.renderSubagentPage() + "\n\n" + statusView
+	}
 	var body string
 
 	if m.viewportReady {
@@ -2170,18 +2183,25 @@ func (m Model) renderChoiceFooter() string {
 	state := m.choice
 	var opts []string
 	for i, opt := range state.options {
-		prefix := "  "
+		cursor := "  "
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 		if i == state.selected {
-			prefix = "\u25b6 "
+			cursor = "\u25b6 "
 			style = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
 		}
-		opts = append(opts, style.Render(prefix+opt.Label))
+		marker := "○"
+		if state.multiple {
+			marker = "☐"
+			if state.selectedValues[opt.Value] {
+				marker = "☑"
+			}
+		}
+		opts = append(opts, style.Render(cursor+marker+" "+opt.Label))
 		if opt.Description != "" {
-			opts = append(opts, statusStyle.Render("  "+opt.Description))
+			opts = append(opts, statusStyle.Render("    └─ "+opt.Description))
 		}
 	}
-	help := m.uiLanguage.tr("Use ↑↓ to choose, Enter to choose", "使用 ↑↓ 选择，Enter 确认")
+	help := choiceHelpText(state, m.uiLanguage)
 	if state.allowCancel {
 		help += m.uiLanguage.tr(", Esc to cancel", "，Esc 取消")
 	}
@@ -2192,6 +2212,13 @@ func (m Model) renderChoiceFooter() string {
 		statusStyle.Render(help),
 	}
 	return strings.Join(lines, "\n")
+}
+
+func choiceHelpText(state choiceState, lang uiLanguage) string {
+	if state.multiple {
+		return lang.tr("Use ↑↓ to move, Space to toggle, Enter to choose", "使用 ↑↓ 移动，Space 切换，Enter 确认")
+	}
+	return lang.tr("Use ↑↓ to choose, Enter to choose", "使用 ↑↓ 选择，Enter 确认")
 }
 
 func (m Model) renderConfirmFooter() string {
@@ -2474,7 +2501,7 @@ func (m Model) renderBody() string {
 		if m.streamBuf != "" {
 			bodyParts = append(bodyParts, renderStreamingMsg(m.streamBuf))
 		} else if m.streamReasoningBuf != "" {
-			bodyParts = append(bodyParts, renderReasoningMsg(m.streamReasoningBuf, m.uiLanguage))
+			bodyParts = append(bodyParts, renderReasoningMsg(m.streamReasoningBuf, m.streamElapsed(), m.uiLanguage))
 		} else {
 			bodyParts = append(bodyParts, renderThinkingMsg(m.thinkingFrame, m.streamElapsed(), m.uiLanguage))
 		}
@@ -2509,18 +2536,10 @@ func renderMessageWithElapsed(content string, elapsed time.Duration, lang uiLang
 }
 
 func (m Model) renderSubagentRuns() string {
-	if len(m.subagentRuns) == 0 {
+	if m.mode == modeSubagentList || len(m.subagentRuns) == 0 {
 		return ""
 	}
-	if !m.subagentRunsExpanded {
-		return renderSubagentRunCollapsed(m.subagentRuns[len(m.subagentRuns)-1], m.thinkingFrame, m.uiLanguage)
-	}
-	var lines []string
-	lines = append(lines, statusStyle.Render(m.uiLanguage.tr("Subagents", "Subagents")))
-	for _, run := range m.subagentRuns {
-		lines = append(lines, renderSubagentRunExpanded(run, m.uiLanguage))
-	}
-	return strings.Join(lines, "\n")
+	return renderSubagentRunCollapsed(m.subagentRuns[len(m.subagentRuns)-1], m.thinkingFrame, m.uiLanguage)
 }
 
 func renderSubagentRunCollapsed(run subagentRunView, frame int, lang uiLanguage) string {
@@ -2542,33 +2561,6 @@ func renderSubagentRunCollapsed(run subagentRunView, frame int, lang uiLanguage)
 		parts = append(parts, "·", "prompt:", preview)
 	}
 	return statusStyle.Render(strings.Join(parts, " "))
-}
-
-func renderSubagentRunExpanded(run subagentRunView, lang uiLanguage) string {
-	var lines []string
-	header := fmt.Sprintf("- subagent %s · %s · %s · %s", run.ID, normalizeSubagentRoleForStatus(run.Role), run.Model, subagentStatusLabel(run.Status, lang))
-	if run.Elapsed > 0 {
-		header += " · " + run.Elapsed.Round(100*time.Millisecond).String()
-	}
-	lines = append(lines, statusStyle.Render(header))
-	lines = append(lines, statusStyle.Render("  Role: "+string(normalizeSubagentRoleForStatus(run.Role))))
-	lines = append(lines, statusStyle.Render("  Model: "+run.Model))
-	if len(run.Nodes) > 0 {
-		lines = append(lines, statusStyle.Render("  Nodes: "+strings.Join(run.Nodes, ", ")))
-	}
-	if strings.TrimSpace(run.Prompt) != "" {
-		lines = append(lines, statusStyle.Render("  Prompt:"))
-		for _, line := range strings.Split(strings.TrimSpace(run.Prompt), "\n") {
-			lines = append(lines, statusStyle.Render("    "+line))
-		}
-	}
-	if run.Summary != "" {
-		lines = append(lines, statusStyle.Render("  Summary: "+run.Summary))
-	}
-	if run.Err != "" {
-		lines = append(lines, statusStyle.Render("  Error: "+run.Err))
-	}
-	return strings.Join(lines, "\n")
 }
 
 func oneLineSubagentPrompt(prompt string) string {
@@ -2695,20 +2687,7 @@ func (m *Model) toggleLastToolOutputExpanded() {
 	m.status = m.uiLanguage.tr("No tool output to expand", "没有可展开的工具输出")
 }
 
-func (m *Model) toggleSubagentRunsExpanded() {
-	if len(m.subagentRuns) == 0 {
-		m.status = m.uiLanguage.tr("No subagents to expand", "没有可展开的 Subagent")
-		return
-	}
-	m.subagentRunsExpanded = !m.subagentRunsExpanded
-	m.lastBodyContent = ""
-	if m.subagentRunsExpanded {
-		m.status = m.uiLanguage.tr("Subagents expanded", "Subagents 已展开")
-	} else {
-		m.status = m.uiLanguage.tr("Subagents collapsed", "Subagents 已折叠")
-	}
-	m.updateViewportContent()
-}
+
 
 func (m Model) hasPendingVisibleTool() bool {
 	for _, msg := range m.messages {
@@ -5347,6 +5326,90 @@ func (m Model) handleSessionSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sessionList, cmd = m.sessionList.Update(key)
 		return m, cmd
 	}
+}
+
+func (m *Model) openSubagentList() {
+	if len(m.subagentRuns) == 0 {
+		m.status = m.uiLanguage.tr("No subagents yet", "暂无子智能体")
+		return
+	}
+	m.mode = modeSubagentList
+	m.subagentDetailVisible = false
+	if m.subagentListCursor < 0 || m.subagentListCursor >= len(m.subagentRuns) {
+		m.subagentListCursor = len(m.subagentRuns) - 1
+	}
+}
+
+func (m Model) handleSubagentListKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.subagentRuns) == 0 {
+		m.mode = modeChat
+		return m, nil
+	}
+	switch key.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		if m.subagentDetailVisible {
+			m.subagentDetailVisible = false
+			m.status = m.uiLanguage.tr("Back to subagent list", "返回子智能体列表")
+			return m, nil
+		}
+		m.mode = modeChat
+		m.status = m.uiLanguage.tr("Subagent page closed", "已关闭子智能体页面")
+		return m, nil
+	case tea.KeyEnter:
+		if !m.subagentDetailVisible {
+			m.subagentDetailVisible = true
+			return m, nil
+		}
+		return m, nil
+	case tea.KeyUp:
+		if m.subagentListCursor > 0 {
+			m.subagentListCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.subagentListCursor < len(m.subagentRuns)-1 {
+			m.subagentListCursor++
+		}
+		return m, nil
+	}
+	if key.Type == tea.KeyRunes && len(key.Runes) == 1 && !key.Paste {
+		switch key.Runes[0] {
+		case 'k':
+			if m.subagentListCursor > 0 {
+				m.subagentListCursor--
+			}
+			return m, nil
+		case 'j':
+			if m.subagentListCursor < len(m.subagentRuns)-1 {
+				m.subagentListCursor++
+			}
+			return m, nil
+		case 'c':
+			m.cancelFocusedSubagent()
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) cancelFocusedSubagent() {
+	if m.subagentListCursor < 0 || m.subagentListCursor >= len(m.subagentRuns) {
+		return
+	}
+	run := m.subagentRuns[m.subagentListCursor]
+	if m.subagentManager == nil || run.ID == "" {
+		return
+	}
+	if run.Status == "completed" || run.Status == "failed" || run.Status == "cancelled" {
+		return
+	}
+	if err := m.subagentManager.Cancel(run.ID); err != nil {
+		m.status = m.uiLanguage.tr("Cancel failed: ", "取消失败: ") + err.Error()
+		return
+	}
+	m.subagentRuns[m.subagentListCursor].Status = "cancelled"
+	m.lastBodyContent = ""
+	m.status = m.uiLanguage.tr("Subagent cancelled", "已取消子智能体")
 }
 
 func (m Model) loadSession(id string) tea.Cmd {

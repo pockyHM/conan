@@ -2166,7 +2166,7 @@ func TestInitialModelViewRendersStartupOverview(t *testing.T) {
 	view := model.View()
 
 	for _, want := range []string{
-		"██████╗ ██████╗ ███╗   ██╗ █████╗ ███╗   ██╗",
+		"█████  █████  █   █",
 		"Cluster   production",
 		"Model     claude-sonnet",
 		"Nodes     2/3 selected, 2 online",
@@ -2199,6 +2199,36 @@ func TestInitialModelViewUsesCompactStartupOverviewInSmallWindow(t *testing.T) {
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("compact startup overview missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestStartupOverviewLogoUsesSolidBlockGlyphs(t *testing.T) {
+	view := renderStartupOverview("production", "claude-sonnet", nil, nil, uiLanguageEnglish, 80, 20, 0)
+
+	for _, glyph := range []string{"╔", "╗", "╚", "╝", "═", "║"} {
+		if strings.Contains(view, glyph) {
+			t.Fatalf("startup logo contains box-drawing glyph %q that can render clipped:\n%s", glyph, view)
+		}
+	}
+	if !strings.Contains(view, "█████") {
+		t.Fatalf("startup logo should render a solid block wordmark:\n%s", view)
+	}
+}
+
+func TestStartupOverviewAnimationStaysInsideLogo(t *testing.T) {
+	initial := renderStartupOverview("production", "claude-sonnet", nil, nil, uiLanguageEnglish, 80, 20, 0)
+	animated := renderStartupOverview("production", "claude-sonnet", nil, nil, uiLanguageEnglish, 80, 20, 1)
+
+	if initial == animated {
+		t.Fatalf("startup logo should visibly animate between frames:\n%s", animated)
+	}
+	for _, line := range strings.Split(animated, "\n") {
+		trimmed := strings.TrimSpace(line)
+		for _, frame := range startupFrames {
+			if trimmed == frame {
+				t.Fatalf("startup animation rendered standalone frame %q:\n%s", frame, animated)
+			}
 		}
 	}
 }
@@ -2691,30 +2721,45 @@ func TestManualSubagentRendersPromptPreviewWithShortID(t *testing.T) {
 	}
 }
 
-func TestCtrlATogglesSubagentDetails(t *testing.T) {
+func TestCtrlAOpensSubagentListPage(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}})
 	model, _ = model.startManualSubagent("reviewer check config")
 
-	collapsed := model.View()
-	if strings.Contains(collapsed, "Task: check config") {
-		t.Fatalf("collapsed subagent view leaked full prompt:\n%s", collapsed)
+	chatView := model.View()
+	if strings.Contains(chatView, "Role: reviewer\nTask:") {
+		t.Fatalf("chat view should not leak full subagent prompt:\n%s", chatView)
 	}
 
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	model = next.(Model)
-	expanded := model.View()
-
-	for _, want := range []string{"Subagents", "Task: check config", "Model: m", "Role: reviewer"} {
-		if !strings.Contains(expanded, want) {
-			t.Fatalf("expanded view missing %q:\n%s", want, expanded)
+	if model.mode != modeSubagentList {
+		t.Fatalf("mode = %v, want modeSubagentList", model.mode)
+	}
+	listView := model.View()
+	for _, want := range []string{"Subagents", "reviewer"} {
+		if !strings.Contains(listView, want) {
+			t.Fatalf("list view missing %q:\n%s", want, listView)
 		}
 	}
 
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
-	collapsed = model.View()
-	if strings.Contains(collapsed, "Task: check config") {
-		t.Fatalf("Ctrl+A should collapse subagent details:\n%s", collapsed)
+	detail := model.View()
+	for _, want := range []string{"Task: check config", "Model: m", "Role: reviewer"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detail view missing %q:\n%s", want, detail)
+		}
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.subagentDetailVisible {
+		t.Fatalf("Esc from detail should return to list")
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = next.(Model)
+	if model.mode != modeChat {
+		t.Fatalf("Esc from list should return to chat, got mode %v", model.mode)
 	}
 }
 
@@ -2808,6 +2853,29 @@ func TestThinkingTickAnimatesWhileWaitingForFirstToken(t *testing.T) {
 	model = next.(Model)
 	if cmd != nil {
 		t.Fatal("thinking tick should stop after first token arrives")
+	}
+}
+
+func TestThinkingTickContinuesWhileReasoningIsVisible(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamStartedAt = time.Now().Add(-1500 * time.Millisecond)
+	model.streamReasoningBuf = "checking cluster state"
+
+	next, cmd := model.Update(thinkingTickMsg{streamID: 1})
+	model = next.(Model)
+	view := model.View()
+
+	if cmd == nil {
+		t.Fatal("thinking tick should continue while reasoning is visible")
+	}
+	if !strings.Contains(view, "Thinking: checking cluster state") {
+		t.Fatalf("view missing reasoning line:\n%s", view)
+	}
+	if !strings.Contains(view, "Esc to interrupt") || !strings.Contains(view, "1.") {
+		t.Fatalf("reasoning view should keep elapsed interrupt meta updating:\n%s", view)
 	}
 }
 
@@ -6663,6 +6731,53 @@ func TestAskChoiceEnterReturnsSelectedToolResult(t *testing.T) {
 	}
 }
 
+func TestAskChoiceSpaceTogglesMultiSelectionAndEnterReturnsValues(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamEnded = true
+	model.streamToolExpected = 1
+	model.mode = modeChoice
+	model.choice = choiceState{
+		streamID: 1,
+		call:     llm.ToolCall{ID: "choice-1", Name: metaToolAskChoice, Arguments: []byte(`{}`)},
+		question: "Pick targets",
+		options: []choiceOption{
+			{Label: "Logs", Value: "logs"},
+			{Label: "Metrics", Value: "metrics"},
+		},
+		multiple:       true,
+		selectedValues: map[string]bool{"logs": true},
+	}
+	model.messages = []chatMsg{{role: "tool", toolCallID: "choice-1", toolName: metaToolAskChoice}}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	if !model.choice.selectedValues["metrics"] {
+		t.Fatalf("selectedValues = %#v, want metrics selected", model.choice.selectedValues)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.mode != modeChat {
+		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+	if cmd == nil {
+		t.Fatal("enter should continue after multi-choice tool result")
+	}
+	if len(model.messages) != 1 || !strings.Contains(model.messages[0].toolOutput, `"values":["logs","metrics"]`) {
+		t.Fatalf("messages = %#v, want multi-choice values", model.messages)
+	}
+	msgs := conv.Messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, `"values":["logs","metrics"]`) {
+		t.Fatalf("conversation messages = %#v, want multi-choice values", msgs)
+	}
+}
+
 func TestAskChoiceStreamTimeoutKeepsWaitingForChoice(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Conv: conv, Provider: &fakeProvider{}})
@@ -6915,7 +7030,29 @@ func TestAskChoiceViewRendersOptions(t *testing.T) {
 	}
 
 	view := model.View()
-	for _, want := range []string{"Pick a path", "▶ Continue", "Run the planned command", "Revise", "Enter to choose", "Esc to cancel"} {
+	for _, want := range []string{"Pick a path", "▶ ○ Continue", "└─ Run the planned command", "○ Revise", "Enter to choose", "Esc to cancel"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestAskChoiceViewRendersMultiSelectStateAndHelp(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.width = 80
+	model.mode = modeChoice
+	model.choice = choiceState{
+		question: "Pick targets",
+		options: []choiceOption{
+			{Label: "Logs", Value: "logs", Description: "Collect application logs"},
+			{Label: "Metrics", Value: "metrics"},
+		},
+		multiple:       true,
+		selectedValues: map[string]bool{"logs": true},
+	}
+
+	view := model.View()
+	for _, want := range []string{"Pick targets", "▶ ☑ Logs", "└─ Collect application logs", "☐ Metrics", "Space to toggle", "Enter to choose"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
 		}
