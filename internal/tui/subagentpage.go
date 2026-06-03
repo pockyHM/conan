@@ -189,3 +189,11 @@ func truncateWithEllipsis(s string, max int) string {
 	}
 	return string(runes[:max-1]) + "…"
 }
+
+func oneLineSubagentPrompt(prompt string) string {
+	line := strings.Join(strings.Fields(prompt), " ")
+	if len(line) > 100 {
+		return line[:100] + "..."
+	}
+	return line
+}

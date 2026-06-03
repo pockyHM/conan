@@ -2494,9 +2494,6 @@ func (m Model) renderBody() string {
 			bodyParts = append(bodyParts, renderMessageWithElapsed(m.renderToolMsg(msg), msg.elapsed, m.uiLanguage))
 		}
 	}
-	if subagentView := m.renderSubagentRuns(); subagentView != "" {
-		bodyParts = append(bodyParts, subagentView)
-	}
 	if m.streaming {
 		if m.streamBuf != "" {
 			bodyParts = append(bodyParts, renderStreamingMsg(m.streamBuf))
@@ -2533,42 +2530,6 @@ func renderMessageWithElapsed(content string, elapsed time.Duration, lang uiLang
 		return content
 	}
 	return strings.TrimRight(content, "\n") + "\n\n" + footer
-}
-
-func (m Model) renderSubagentRuns() string {
-	if m.mode == modeSubagentList || len(m.subagentRuns) == 0 {
-		return ""
-	}
-	return renderSubagentRunCollapsed(m.subagentRuns[len(m.subagentRuns)-1], m.thinkingFrame, m.uiLanguage)
-}
-
-func renderSubagentRunCollapsed(run subagentRunView, frame int, lang uiLanguage) string {
-	icon := "◦"
-	if len(thinkingFrames) > 0 && run.Status == "receiving" {
-		icon = thinkingFrames[frame%len(thinkingFrames)]
-	}
-	parts := []string{
-		icon,
-		"subagent",
-		run.ID,
-		string(normalizeSubagentRoleForStatus(run.Role)),
-		"·",
-		run.Model,
-		"·",
-		subagentStatusLabel(run.Status, lang),
-	}
-	if preview := oneLineSubagentPrompt(run.Task); preview != "" {
-		parts = append(parts, "·", "prompt:", preview)
-	}
-	return statusStyle.Render(strings.Join(parts, " "))
-}
-
-func oneLineSubagentPrompt(prompt string) string {
-	line := strings.Join(strings.Fields(prompt), " ")
-	if len(line) > 100 {
-		return line[:100] + "..."
-	}
-	return line
 }
 
 func subagentStatusLabel(status string, lang uiLanguage) string {

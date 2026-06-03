@@ -2705,7 +2705,6 @@ func TestManualSubagentRendersPromptPreviewWithShortID(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}})
 
 	model, _ = model.startManualSubagent("reviewer check config")
-	view := model.View()
 
 	if len(model.subagentRuns) != 1 {
 		t.Fatalf("subagent runs = %#v, want one", model.subagentRuns)
@@ -2714,9 +2713,20 @@ func TestManualSubagentRendersPromptPreviewWithShortID(t *testing.T) {
 	if len(id) != 8 {
 		t.Fatalf("subagent id = %q, want 8-char short id", id)
 	}
-	for _, want := range []string{"subagent " + id, "reviewer", "receiving", "prompt:", "check config"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("view missing %q:\n%s", want, view)
+
+	chatView := model.View()
+	for _, want := range []string{"subagent " + id, "prompt:", "check config"} {
+		if strings.Contains(chatView, want) {
+			t.Fatalf("chat view should not leak inline subagent preview (%q):\n%s", want, chatView)
+		}
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	pageView := model.View()
+	for _, want := range []string{id, "reviewer", "receiving", "check config"} {
+		if !strings.Contains(pageView, want) {
+			t.Fatalf("subagent page missing %q:\n%s", want, pageView)
 		}
 	}
 }
