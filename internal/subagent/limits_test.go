@@ -1,13 +1,13 @@
 package subagent
 
-import "testing"
+import (
+	"testing"
 
-// stubRoleLimits is declared in limits.go (mirrors the user's WIP
-// configschema.SubagentRoleLimits). Task 2 will replace both declarations
-// with an import of configschema.SubagentRoleLimits.
+	"github.com/pockyHM/conan/pkg/configschema"
+)
 
 func TestNormalizeRoleLimitsAppliesDefaults(t *testing.T) {
-	got := NormalizeRoleLimits(stubRoleLimits{})
+	got := NormalizeRoleLimits(configschema.SubagentRoleLimits{})
 
 	cases := []struct {
 		role  Role
@@ -27,7 +27,7 @@ func TestNormalizeRoleLimitsAppliesDefaults(t *testing.T) {
 }
 
 func TestNormalizeRoleLimitsPreservesCustomValues(t *testing.T) {
-	cfg := stubRoleLimits{
+	cfg := configschema.SubagentRoleLimits{
 		InvestigatorTurns:    16,
 		InvestigatorToolCalls: 20,
 		ReviewerTurns:        2,
@@ -51,7 +51,7 @@ func TestNormalizeRoleLimitsPreservesCustomValues(t *testing.T) {
 }
 
 func TestRoleLimitsFallsBackToDefaultsForZeroValues(t *testing.T) {
-	got := NormalizeRoleLimits(stubRoleLimits{
+	got := NormalizeRoleLimits(configschema.SubagentRoleLimits{
 		InvestigatorTurns: 0,
 	})
 

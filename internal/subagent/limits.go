@@ -1,14 +1,6 @@
 package subagent
 
-// stubRoleLimits mirrors the user's WIP configschema.SubagentRoleLimits
-// (pkg/configschema/config.go). Task 2 will replace this with an import.
-type stubRoleLimits struct {
-	InvestigatorTurns     int
-	InvestigatorToolCalls int
-	ReviewerTurns         int
-	ReviewerToolCalls     int
-	SummarizerTurns       int
-}
+import "github.com/pockyHM/conan/pkg/configschema"
 
 type RoleLimits struct {
 	InvestigatorTurns    int
@@ -26,7 +18,7 @@ const (
 	defaultSummarizerTurns      = 2
 )
 
-func NormalizeRoleLimits(cfg stubRoleLimits) RoleLimits {
+func NormalizeRoleLimits(cfg configschema.SubagentRoleLimits) RoleLimits {
 	r := RoleLimits{
 		InvestigatorTurns:    cfg.InvestigatorTurns,
 		InvestigatorToolCalls: cfg.InvestigatorToolCalls,
