@@ -105,11 +105,22 @@ type AgentBinaryConfig struct {
 }
 
 type SubagentConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	MaxParallel    int    `yaml:"max_parallel"`
-	DefaultModel   string `yaml:"default_model"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
-	Debug          bool   `yaml:"debug"`
+	Enabled         bool               `yaml:"enabled"`
+	MaxParallel     int                `yaml:"max_parallel"`
+	DefaultModel    string             `yaml:"default_model"`
+	TimeoutSeconds  int                `yaml:"timeout_seconds"`
+	MaxInboundChars int                `yaml:"max_inbound_chars"`
+	Debug           bool               `yaml:"debug"`
+	DebugTranscript bool               `yaml:"debug_transcript"`
+	PerRole         SubagentRoleLimits `yaml:"per_role"`
+}
+
+type SubagentRoleLimits struct {
+	InvestigatorTurns     int `yaml:"investigator_turns"`
+	InvestigatorToolCalls int `yaml:"investigator_tool_calls"`
+	ReviewerTurns         int `yaml:"reviewer_turns"`
+	ReviewerToolCalls     int `yaml:"reviewer_tool_calls"`
+	SummarizerTurns       int `yaml:"summarizer_turns"`
 }
 
 type VisionConfig struct {
