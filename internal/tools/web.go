@@ -34,7 +34,7 @@ type WebToolConfig struct {
 }
 
 func NewWebTools(cfg WebToolConfig) []Tool {
-	result := []Tool{&webFetchTool{cfg: cfg}}
+	result := []Tool{&webFetchTool{cfg: cfg}, &webReportTool{}}
 	if cfg.SearchProvider != "" && cfg.SearchAPIKey != "" {
 		result = append(result, &webSearchTool{cfg: cfg})
 	}
