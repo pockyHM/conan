@@ -44,6 +44,8 @@
 - Create: `internal/subagent/limits.go`
 - Create: `internal/subagent/limits_test.go`
 
+> **Implementation note (added after first dispatch):** The user's working tree has `SubagentRoleLimits` already defined in WIP `pkg/configschema/config.go` (uncommitted), so Task 1 cannot import it without forcing the WIP into a commit. To keep Task 1 self-contained, the implementation uses a local `stubRoleLimits` type with the same fields, declared in `limits.go`. Task 2 will replace the stub with the real `configschema.SubagentRoleLimits` import.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `internal/subagent/limits_test.go`:
@@ -51,11 +53,17 @@ Create `internal/subagent/limits_test.go`:
 ```go
 package subagent
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/pockyHM/conan/pkg/configschema"
-)
+// stubRoleLimits mirrors the user's WIP configschema.SubagentRoleLimits
+// (pkg/configschema/config.go). Task 2 will replace this with an import.
+type stubRoleLimits struct {
+	InvestigatorTurns     int
+	InvestigatorToolCalls int
+	ReviewerTurns         int
+	ReviewerToolCalls     int
+	SummarizerTurns       int
+}
 
 func TestNormalizeRoleLimitsAppliesDefaults(t *testing.T) {
 	got := NormalizeRoleLimits(configschema.SubagentRoleLimits{})
@@ -125,7 +133,15 @@ Create `internal/subagent/limits.go`:
 ```go
 package subagent
 
-import "github.com/pockyHM/conan/pkg/configschema"
+// stubRoleLimits mirrors the user's WIP configschema.SubagentRoleLimits
+// (pkg/configschema/config.go). Task 2 will replace this with an import.
+type stubRoleLimits struct {
+	InvestigatorTurns     int
+	InvestigatorToolCalls int
+	ReviewerTurns         int
+	ReviewerToolCalls     int
+	SummarizerTurns       int
+}
 
 type RoleLimits struct {
 	InvestigatorTurns    int
@@ -1839,3 +1855,52 @@ Run: `go run ./cmd/conan -h 2>&1 | head -5` (or whatever command is used to star
 - Type consistency: `Event`, `EventKind`, `Manager`, `Transcript`, `RoleLimits`, `subagentEventMsg`, `subagentResultMsg`, `subagentStartMsg` are defined in the task that first introduces them and reused identically thereafter.
 - Migration: the breaking config change (`subagents.max_turns` / `subagents.max_tool_calls` removal) is not validated by the schema; the YAML decoder silently drops unknown keys. A user with the old keys will see no error and will fall back to the new defaults. This is acceptable per the spec's "Skip" note and avoids introducing a custom unmarshaler.
 - Out of scope: live timer tick, README migration note, `.gitignore` for `.superpowers/`. These are intentionally omitted and can be a follow-up plan.
+
+---
+
+## As-built deviations
+
+The plan was followed for the subagent package (Tasks 1-5). The TUI portion (Tasks 6-12) was substantially rewritten by the user in a parallel WIP (`315d180 wip: TUI subagent 状态面板和当前模型集成`) before the plan reached Phase B. Specifically the user already had:
+
+- `subagentRunView` struct (basic version) and Model fields (`subagentStatus`, `subagentRuns`, `subagentRunsExpanded`)
+- `Ctrl+A` toggle for the runs panel
+- `runSubagent` adapted to the new channel-based `Runner.Run` API
+- The new API: `events, results := runner.Run(ctx, req)` with a goroutine draining `events` and a `<-results` to get the final result
+- 4 tests in `model_test.go` (model switching, no default_model, etc.)
+- `internal/tui/configscreen.go` removes the `subagents.default_model` entry (subagent inherits the main model — design choice)
+
+To avoid a large refactor of the user's working code, only the 5 specific gaps were filled in by the plan:
+
+| Plan task | What was actually done | Commit |
+|---|---|---|
+| Task 7 (Manager dispatch) | Reduced to: add `subagentManager` field on `Model`, init in `NewModel`, wire `CancelAll` into `cancelActiveStream` | `e6e9857` |
+| Task 9 (c keybinding) | Added as a guard at the top of the existing `case tea.KeyRunes:` in `handleKey` (the user's `key.Type` switch doesn't accept string cases) | `03c9995` |
+| Task 10 (config screen) | All 7 entries added to `rebuildItems` and `SetValue` | `c7d07e8` |
+| Task 11 (memory helper) | `buildSubagentMemoryContext` added but not yet wired into the dispatch path (the user uses a different dispatch flow) | `f635abf` |
+| Task 5 wiring (Transcript) | `runSubagent` opens a Transcript when `DebugTranscript` is on and the events-drain goroutine writes events to it | `c848487` |
+
+**Not done** (left to future work or to the user's design):
+- Tasks 6, 8 (event/result/start message types, `recomputeSubagentStatus`) — the user's `renderSubagentRunningStatus` / `subagentCommandResultMsg` flow covers the same UX without the new message types
+- Task 12 (TUI tests for event-driven state) — the user has their own tests
+- Task 13 (smoke check) — verified manually: `go build ./...` clean, `go vet ./...` clean, all subagent/tui/configschema/security/memory tests pass; the `internal/agent` test suite has a pre-existing hang unrelated to this work
+- Plan-level Task 2 cleanup (migration from `stubRoleLimits` to `configschema.SubagentRoleLimits`) — done as part of the WIP reconciliation; see commit `31c6aa9`
+
+**Resulting commit list (newest first):**
+
+```
+c848487 feat(tui): write subagent events to JSONL transcript when enabled
+f635abf feat(tui): add buildSubagentMemoryContext helper
+c7d07e8 feat(tui): add per-role subagent entries to config screen
+03c9995 feat(tui): add c keybinding to cancel focused subagent
+e6e9857 feat(tui): add subagentManager and wire CancelAll into cancelActiveStream
+315d180 wip: TUI subagent 状态面板和当前模型集成
+31c6aa9 refactor(subagent): migrate RoleLimits from stub to configschema type
+240d742 feat(config): add per-role subagent limits and new subagent fields
+66e550c feat(subagent): add JSONL transcript sink
+10c5700 fix(subagent): propagate manager-generated id to runner
+076ca7f fix(subagent): remove manager cleanup goroutine to avoid consuming events channel
+857ca4f feat(subagent): add Manager for per-subagent cancellation
+90c966b feat(subagent): emit events from Runner.Run via channels
+f084d22 feat(subagent): add RoleLimits helpers
+a246c76 docs: add subagent quality-of-life implementation plan
+```
