@@ -499,9 +499,10 @@ type nodeToolResult struct {
 }
 
 type multiToolResultMsg struct {
-	streamID uint64
-	Call     llm.ToolCall
-	Results  []nodeToolResult
+	streamID       uint64
+	Call           llm.ToolCall
+	Results        []nodeToolResult
+	subagentEvents map[string][]subagent.Event
 }
 
 type riskAssessmentMsg struct {
@@ -913,6 +914,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Call.Name == metaToolSubagentsRun {
 			m.subagentStatus = summarizeSubagentsRunStatus(msg.Results, m.uiLanguage)
 			m.updateSubagentRunResultsFromToolOutput(msg.Results)
+			m.applySubagentEventsFromMessage(msg.subagentEvents)
 		}
 		return m.completeToolAndResume(msg.streamID, msg.Call)
 
@@ -3472,6 +3474,28 @@ func (m *Model) updateSubagentRunResultsFromToolOutput(results []nodeToolResult)
 	}
 }
 
+func (m *Model) applySubagentEventsFromMessage(eventsByID map[string][]subagent.Event) {
+	if len(eventsByID) == 0 {
+		return
+	}
+	changed := false
+	for i := range m.subagentRuns {
+		id := m.subagentRuns[i].ID
+		if id == "" {
+			continue
+		}
+		events, ok := eventsByID[id]
+		if !ok || len(events) == 0 {
+			continue
+		}
+		m.subagentRuns[i].Events = append([]subagent.Event(nil), events...)
+		changed = true
+	}
+	if changed {
+		m.lastBodyContent = ""
+	}
+}
+
 type parsedSubagentStatus struct {
 	status  string
 	summary string
@@ -4528,7 +4552,13 @@ func (m Model) dispatchSubagentsRun(streamID uint64, call llm.ToolCall) tea.Cmd 
 		}
 		results := m.runSubagentBatch(ctx, requests)
 		output := subagent.FormatResults(results)
-		return multiToolResultMsg{streamID: streamID, Call: call, Results: []nodeToolResult{{Node: "local", Output: output, Success: subagentResultsSuccessful(results)}}}
+		events := map[string][]subagent.Event{}
+		for _, r := range results {
+			if r.ID != "" {
+				events[r.ID] = r.Events
+			}
+		}
+		return multiToolResultMsg{streamID: streamID, Call: call, Results: []nodeToolResult{{Node: "local", Output: output, Success: subagentResultsSuccessful(results)}}, subagentEvents: events}
 	}
 }
 

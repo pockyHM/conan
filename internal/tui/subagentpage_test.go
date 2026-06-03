@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/internal/llm"
 	"github.com/pockyHM/conan/internal/subagent"
+	"github.com/pockyHM/conan/pkg/configschema"
 )
 
 func TestSubagentListPageOpensOnCtrlA(t *testing.T) {
@@ -324,11 +329,8 @@ func TestSubagentDetailSpaceTogglesExpansion(t *testing.T) {
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 
-	if !model.subagentDetailExpanded[1] && !isLastTurnExpandedForTest(model) {
-		view := model.View()
-		if strings.Contains(view, "I'll check disk space.") {
-			t.Fatalf("turn 1 should start collapsed, but assistant text leaked:\n%s", view)
-		}
+	if model.subagentDetailExpanded[1] {
+		t.Fatal("turn 1 should start collapsed (subagentDetailExpanded[1] should be false)")
 	}
 
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
@@ -471,6 +473,72 @@ func TestSubagentDetailJKAlsoMovesCursor(t *testing.T) {
 	}
 }
 
-func isLastTurnExpandedForTest(m Model) bool {
-	return m.subagentDetailCursor == 2
+func TestSubagentDetailEventsArriveViaStreamingToolPath(t *testing.T) {
+	home := t.TempDir()
+	conv := conversation.New("test", nil, "m")
+	model := NewModel(ModelConfig{
+		Cluster:    "test",
+		Model:      "m",
+		ConfigHome: home,
+		Conv:       conv,
+		Subagents:  configschema.SubagentConfig{Enabled: true},
+	})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamCh = make(chan llm.ChatEvent)
+	model.streamCtx = context.Background()
+
+	args := json.RawMessage(`{"tasks":[{"role":"investigator","task":"check disk"}]}`)
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "sa1", Name: metaToolSubagentsRun, Arguments: args,
+	}})
+	model = next.(Model)
+
+	if len(model.subagentRuns) != 1 {
+		t.Fatalf("expected 1 subagent run after tool call, got %d", len(model.subagentRuns))
+	}
+	runID := model.subagentRuns[0].ID
+	if runID == "" {
+		t.Fatal("subagent run has empty ID")
+	}
+
+	events := []subagent.Event{
+		{Kind: subagent.EventTurnStart, Turn: 1, Elapsed: 0},
+		{Kind: subagent.EventAssistantText, Turn: 1, Content: "checking now", Elapsed: 200 * time.Millisecond},
+		{Kind: subagent.EventToolCall, Turn: 1, Tool: "k8s_pods", Args: `{"ns":"*"}`, Elapsed: 300 * time.Millisecond},
+		{Kind: subagent.EventToolResult, Turn: 1, Tool: "k8s_pods", Out: "pod-1 OK", OK: true, Elapsed: 1 * time.Second},
+		{Kind: subagent.EventTurnEnd, Turn: 1, Elapsed: 1 * time.Second},
+		{Kind: subagent.EventTurnStart, Turn: 2, Elapsed: 1*time.Second + 100*time.Millisecond},
+		{Kind: subagent.EventAssistantText, Turn: 2, Content: "all good", Elapsed: 2 * time.Second},
+		{Kind: subagent.EventTurnEnd, Turn: 2, Elapsed: 2 * time.Second},
+		{Kind: subagent.EventDone, Elapsed: 2 * time.Second},
+	}
+	call := llm.ToolCall{ID: "sa1", Name: metaToolSubagentsRun, Arguments: args}
+	next, _ = model.Update(multiToolResultMsg{
+		Call:    call,
+		Results: []nodeToolResult{{Node: "local", Output: "[investigator:local:ok] all good", Success: true}},
+		subagentEvents: map[string][]subagent.Event{
+			runID: events,
+		},
+	})
+	model = next.(Model)
+
+	if len(model.subagentRuns[0].Events) == 0 {
+		t.Fatal("expected events to be copied onto the run view, got none")
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	view := model.View()
+	for _, want := range []string{"Conversation", "Turn 1", "Turn 2", "k8s_pods", "all good"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("detail view missing %q after streaming path:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "checking now") {
+		t.Fatalf("turn 1 assistant text leaked (should be collapsed):\n%s", view)
+	}
 }
