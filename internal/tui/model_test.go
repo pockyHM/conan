@@ -2755,7 +2755,7 @@ func TestCtrlAOpensSubagentListPage(t *testing.T) {
 	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = next.(Model)
 	detail := model.View()
-	for _, want := range []string{"Task: check config", "Model: m", "Role: reviewer"} {
+	for _, want := range []string{"Conversation", "Role: reviewer", "receiving"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("detail view missing %q:\n%s", want, detail)
 		}

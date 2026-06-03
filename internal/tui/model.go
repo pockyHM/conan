@@ -112,6 +112,7 @@ type subagentRunView struct {
 	Summary string
 	Err     string
 	Elapsed time.Duration
+	Events  []subagent.Event
 }
 
 type tuiMode int
@@ -226,6 +227,8 @@ type Model struct {
 	subagentManager            *subagent.Manager
 	subagentListCursor         int
 	subagentDetailVisible      bool
+	subagentDetailCursor       int
+	subagentDetailExpanded     map[int]bool
 	sessionList                sessionList
 	configScreen               configScreen
 	ac                         autocomplete
@@ -3441,6 +3444,9 @@ func (m *Model) updateSubagentRunResult(result subagent.Result) {
 		}
 		m.subagentRuns[i].Summary = strings.TrimSpace(result.Summary)
 		m.subagentRuns[i].Elapsed = result.Elapsed
+		if len(result.Events) > 0 {
+			m.subagentRuns[i].Events = append([]subagent.Event(nil), result.Events...)
+		}
 		m.lastBodyContent = ""
 		return
 	}
@@ -5296,6 +5302,8 @@ func (m *Model) openSubagentList() {
 	}
 	m.mode = modeSubagentList
 	m.subagentDetailVisible = false
+	m.subagentDetailExpanded = nil
+	m.subagentDetailCursor = 0
 	if m.subagentListCursor < 0 || m.subagentListCursor >= len(m.subagentRuns) {
 		m.subagentListCursor = len(m.subagentRuns) - 1
 	}
@@ -5319,15 +5327,38 @@ func (m Model) handleSubagentListKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		if !m.subagentDetailVisible {
 			m.subagentDetailVisible = true
+			m.subagentDetailExpanded = nil
+			if idx := m.subagentListCursor; idx >= 0 && idx < len(m.subagentRuns) {
+				if turns := collectSubagentTurns(m.subagentRuns[idx].Events); len(turns) > 0 {
+					m.subagentDetailCursor = len(turns) - 1
+				} else {
+					m.subagentDetailCursor = 0
+				}
+			}
+			return m, nil
+		}
+		m.toggleSubagentDetailExpansion()
+		return m, nil
+	case tea.KeySpace:
+		if m.subagentDetailVisible {
+			m.toggleSubagentDetailExpansion()
 			return m, nil
 		}
 		return m, nil
 	case tea.KeyUp:
+		if m.subagentDetailVisible {
+			m.moveSubagentDetailCursor(-1)
+			return m, nil
+		}
 		if m.subagentListCursor > 0 {
 			m.subagentListCursor--
 		}
 		return m, nil
 	case tea.KeyDown:
+		if m.subagentDetailVisible {
+			m.moveSubagentDetailCursor(1)
+			return m, nil
+		}
 		if m.subagentListCursor < len(m.subagentRuns)-1 {
 			m.subagentListCursor++
 		}
@@ -5336,12 +5367,16 @@ func (m Model) handleSubagentListKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Type == tea.KeyRunes && len(key.Runes) == 1 && !key.Paste {
 		switch key.Runes[0] {
 		case 'k':
-			if m.subagentListCursor > 0 {
+			if m.subagentDetailVisible {
+				m.moveSubagentDetailCursor(-1)
+			} else if m.subagentListCursor > 0 {
 				m.subagentListCursor--
 			}
 			return m, nil
 		case 'j':
-			if m.subagentListCursor < len(m.subagentRuns)-1 {
+			if m.subagentDetailVisible {
+				m.moveSubagentDetailCursor(1)
+			} else if m.subagentListCursor < len(m.subagentRuns)-1 {
 				m.subagentListCursor++
 			}
 			return m, nil
@@ -5351,6 +5386,47 @@ func (m Model) handleSubagentListKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) moveSubagentDetailCursor(delta int) {
+	idx := m.subagentListCursor
+	if idx < 0 || idx >= len(m.subagentRuns) {
+		return
+	}
+	turns := collectSubagentTurns(m.subagentRuns[idx].Events)
+	n := len(turns)
+	if n == 0 {
+		return
+	}
+	m.subagentDetailCursor += delta
+	if m.subagentDetailCursor < 0 {
+		m.subagentDetailCursor = 0
+	}
+	if m.subagentDetailCursor > n-1 {
+		m.subagentDetailCursor = n - 1
+	}
+}
+
+func (m *Model) toggleSubagentDetailExpansion() {
+	idx := m.subagentListCursor
+	if idx < 0 || idx >= len(m.subagentRuns) {
+		return
+	}
+	turns := collectSubagentTurns(m.subagentRuns[idx].Events)
+	if len(turns) == 0 {
+		return
+	}
+	if m.subagentDetailCursor < 0 || m.subagentDetailCursor >= len(turns) {
+		return
+	}
+	turn := turns[m.subagentDetailCursor]
+	if isLastTurn(turns, m.subagentDetailCursor) {
+		return
+	}
+	if m.subagentDetailExpanded == nil {
+		m.subagentDetailExpanded = map[int]bool{}
+	}
+	m.subagentDetailExpanded[turn.Number] = !m.subagentDetailExpanded[turn.Number]
 }
 
 func (m *Model) cancelFocusedSubagent() {

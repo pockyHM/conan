@@ -34,6 +34,7 @@ type EventKind int
 const (
 	EventTurnStart EventKind = iota + 1
 	EventTurnEnd
+	EventAssistantText
 	EventToolCall
 	EventToolResult
 	EventDone
@@ -47,6 +48,7 @@ type Event struct {
 	Args    string
 	Out     string
 	OK      bool
+	Content string
 	Elapsed time.Duration
 }
 
@@ -80,6 +82,7 @@ type Result struct {
 	Nodes     []string
 	Summary   string
 	ToolCalls []ToolCall
+	Events    []Event
 	Err       error
 	Elapsed   time.Duration
 }
@@ -147,9 +150,15 @@ func (r Runner) Run(ctx context.Context, req Request) (<-chan Event, <-chan Resu
 		messages := buildMessages(req)
 		tools := allowedTools(result.Role, r.Tools)
 		toolCalls := 0
+		recorded := make([]Event, 0, 16)
+		record := func(ev Event) Event {
+			recorded = append(recorded, ev)
+			emitEvent(events, ev)
+			return ev
+		}
 
 		for turn := 1; turn <= maxTurns; turn++ {
-			emitEvent(events, Event{ID: result.ID, Kind: EventTurnStart, Turn: turn, Elapsed: time.Since(start)})
+			record(Event{ID: result.ID, Kind: EventTurnStart, Turn: turn, Elapsed: time.Since(start)})
 
 			resp, err := r.Provider.Chat(ctx, &llm.ChatRequest{
 				SystemPrompt: rolePrompt(result.Role, req),
@@ -164,27 +173,31 @@ func (r Runner) Run(ctx context.Context, req Request) (<-chan Event, <-chan Resu
 					result.Err = err
 				}
 				result.Elapsed = time.Since(start)
-				emitEvent(events, Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+				record(Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+				result.Events = recorded
 				results <- result
 				return
 			}
 
-			emitEvent(events, Event{ID: result.ID, Kind: EventTurnEnd, Turn: turn, Elapsed: time.Since(start)})
+			record(Event{ID: result.ID, Kind: EventTurnEnd, Turn: turn, Elapsed: time.Since(start)})
 
 			if strings.TrimSpace(resp.Message.Content) != "" {
+				record(Event{ID: result.ID, Kind: EventAssistantText, Turn: turn, Content: resp.Message.Content, Elapsed: time.Since(start)})
 				messages = append(messages, models.Message{Role: "assistant", Content: resp.Message.Content})
 				result.Summary = strings.TrimSpace(resp.Message.Content)
 			}
 			if len(resp.ToolCalls) == 0 {
 				result.Elapsed = time.Since(start)
-				emitEvent(events, Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+				record(Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+				result.Events = recorded
 				results <- result
 				return
 			}
 			if r.Executor == nil {
 				result.Err = fmt.Errorf("subagent requested tools but no executor is configured")
 				result.Elapsed = time.Since(start)
-				emitEvent(events, Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+				record(Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+				result.Events = recorded
 				results <- result
 				return
 			}
@@ -192,12 +205,13 @@ func (r Runner) Run(ctx context.Context, req Request) (<-chan Event, <-chan Resu
 				if toolCalls >= maxToolCalls {
 					result.Err = fmt.Errorf("subagent exceeded tool call limit")
 					result.Elapsed = time.Since(start)
-					emitEvent(events, Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+					record(Event{ID: result.ID, Kind: EventDone, Turn: turn, Elapsed: result.Elapsed})
+					result.Events = recorded
 					results <- result
 					return
 				}
 				toolCalls++
-				emitEvent(events, Event{ID: result.ID, Kind: EventToolCall, Turn: turn, Tool: call.Name, Args: string(call.Arguments), Elapsed: time.Since(start)})
+				record(Event{ID: result.ID, Kind: EventToolCall, Turn: turn, Tool: call.Name, Args: string(call.Arguments), Elapsed: time.Since(start)})
 				output, success := r.Executor.ExecuteSubagentTool(ctx, call)
 				result.ToolCalls = append(result.ToolCalls, ToolCall{
 					Name:      call.Name,
@@ -205,7 +219,7 @@ func (r Runner) Run(ctx context.Context, req Request) (<-chan Event, <-chan Resu
 					Output:    output,
 					Success:   success,
 				})
-				emitEvent(events, Event{ID: result.ID, Kind: EventToolResult, Turn: turn, Tool: call.Name, Out: output, OK: success, Elapsed: time.Since(start)})
+				record(Event{ID: result.ID, Kind: EventToolResult, Turn: turn, Tool: call.Name, Out: output, OK: success, Elapsed: time.Since(start)})
 				messages = append(messages,
 					models.Message{Role: "assistant", ToolCallID: call.ID, ToolName: call.Name, ToolInput: string(call.Arguments)},
 					models.Message{Role: "tool", ToolCallID: call.ID, Content: output, ToolOutput: output},
@@ -214,7 +228,8 @@ func (r Runner) Run(ctx context.Context, req Request) (<-chan Event, <-chan Resu
 		}
 		result.Err = fmt.Errorf("subagent reached turn limit")
 		result.Elapsed = time.Since(start)
-		emitEvent(events, Event{ID: result.ID, Kind: EventDone, Elapsed: result.Elapsed})
+		record(Event{ID: result.ID, Kind: EventDone, Elapsed: result.Elapsed})
+		result.Events = recorded
 		results <- result
 	}()
 

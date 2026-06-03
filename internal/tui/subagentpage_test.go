@@ -62,7 +62,7 @@ func TestSubagentListPageEnterShowsDetail(t *testing.T) {
 		t.Fatalf("expected detail visible after Enter")
 	}
 	view := model.View()
-	for _, want := range []string{"abc123", "reviewer", "node-01, node-02", "2s", "Prompt:", "review logs"} {
+	for _, want := range []string{"abc123", "reviewer", "node-01, node-02", "2s", "Conversation", "(no trace events captured)"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail view missing %q:\n%s", want, view)
 		}
@@ -236,4 +236,241 @@ func TestSubagentListPageCancelIgnoredForCompleted(t *testing.T) {
 	if model.subagentRuns[0].Status != "completed" {
 		t.Fatalf("status = %q, want unchanged completed", model.subagentRuns[0].Status)
 	}
+}
+
+func sampleThreeTurnRun() subagentRunView {
+	return subagentRunView{
+		ID: "abc123", Role: subagent.RoleInvestigator, Model: "claude-opus",
+		Nodes:   []string{"node-01"},
+		Status:  "completed",
+		Summary: "Two pods pending on node-01.",
+		Elapsed: 4 * time.Second,
+		Events: []subagent.Event{
+			{Kind: subagent.EventTurnStart, Turn: 1, Elapsed: 0},
+			{Kind: subagent.EventAssistantText, Turn: 1, Content: "I'll check disk space.", Elapsed: 300 * time.Millisecond},
+			{Kind: subagent.EventToolCall, Turn: 1, Tool: "k8s_pods", Args: `{"ns":"*"}`, Elapsed: 350 * time.Millisecond},
+			{Kind: subagent.EventToolResult, Turn: 1, Tool: "k8s_pods", Out: "pod-1 Running\npod-2 Pending", OK: true, Elapsed: 1*time.Second + 200*time.Millisecond},
+			{Kind: subagent.EventTurnEnd, Turn: 1, Elapsed: 1*time.Second + 200*time.Millisecond},
+			{Kind: subagent.EventTurnStart, Turn: 2, Elapsed: 1*time.Second + 300*time.Millisecond},
+			{Kind: subagent.EventToolCall, Turn: 2, Tool: "k8s_logs", Args: `{"pod":"pod-2"}`, Elapsed: 1*time.Second + 400*time.Millisecond},
+			{Kind: subagent.EventToolResult, Turn: 2, Tool: "k8s_logs", Out: "warning: image pull backoff", OK: true, Elapsed: 2 * time.Second},
+			{Kind: subagent.EventTurnEnd, Turn: 2, Elapsed: 2 * time.Second},
+			{Kind: subagent.EventTurnStart, Turn: 3, Elapsed: 2*time.Second + 100*time.Millisecond},
+			{Kind: subagent.EventAssistantText, Turn: 3, Content: "Two pods are pending on node-01.", Elapsed: 3 * time.Second},
+			{Kind: subagent.EventTurnEnd, Turn: 3, Elapsed: 3 * time.Second},
+		},
+	}
+}
+
+func TestSubagentDetailShowsConversation(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	view := model.View()
+	for _, want := range []string{"Conversation", "Turn 1", "Turn 2", "Turn 3", "k8s_pods", "k8s_logs"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("detail view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestSubagentDetailLastTurnAlwaysExpanded(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "Two pods are pending on node-01.") {
+		t.Fatalf("final reply text missing from detail view:\n%s", view)
+	}
+	if strings.Contains(view, "I'll check disk space.") {
+		t.Fatalf("intermediate turn text leaked into detail view (turn 1 should be collapsed):\n%s", view)
+	}
+}
+
+func TestSubagentDetailOtherTurnsCollapsedByDefault(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	view := model.View()
+	if strings.Contains(view, "pod-1 Running") {
+		t.Fatalf("turn 1 tool result leaked (turn 1 should be collapsed by default):\n%s", view)
+	}
+	if strings.Contains(view, "warning: image pull backoff") {
+		t.Fatalf("turn 2 tool result leaked (turn 2 should be collapsed by default):\n%s", view)
+	}
+}
+
+func TestSubagentDetailSpaceTogglesExpansion(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if !model.subagentDetailExpanded[1] && !isLastTurnExpandedForTest(model) {
+		view := model.View()
+		if strings.Contains(view, "I'll check disk space.") {
+			t.Fatalf("turn 1 should start collapsed, but assistant text leaked:\n%s", view)
+		}
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.subagentDetailCursor != 0 {
+		t.Fatalf("expected cursor 0 after two Ups, got %d", model.subagentDetailCursor)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	if !model.subagentDetailExpanded[1] {
+		t.Fatalf("expected turn 1 to be expanded after Space")
+	}
+	view := model.View()
+	if !strings.Contains(view, "I'll check disk space.") {
+		t.Fatalf("turn 1 assistant text missing after Space toggle:\n%s", view)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(Model)
+	if model.subagentDetailExpanded[1] {
+		t.Fatalf("expected turn 1 to be collapsed after second Space")
+	}
+	view = model.View()
+	if strings.Contains(view, "I'll check disk space.") {
+		t.Fatalf("turn 1 assistant text still present after collapse:\n%s", view)
+	}
+}
+
+func TestSubagentDetailEnterTogglesExpansion(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	if model.subagentDetailCursor != 2 {
+		t.Fatalf("expected cursor at last turn (2) on entry, got %d", model.subagentDetailCursor)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.subagentDetailCursor != 0 {
+		t.Fatalf("after two Ups cursor = %d, want 0", model.subagentDetailCursor)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	view := model.View()
+	if !strings.Contains(view, "I'll check disk space.") {
+		t.Fatalf("Enter on turn 1 should toggle expansion - assistant text missing:\n%s", view)
+	}
+}
+
+func TestSubagentDetailUpDownMovesCursor(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	if model.subagentDetailCursor != 2 {
+		t.Fatalf("entry cursor = %d, want 2", model.subagentDetailCursor)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.subagentDetailCursor != 1 {
+		t.Fatalf("after Up cursor = %d, want 1", model.subagentDetailCursor)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.subagentDetailCursor != 0 {
+		t.Fatalf("after Up cursor = %d, want 0", model.subagentDetailCursor)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+	if model.subagentDetailCursor != 0 {
+		t.Fatalf("at top, Up should keep cursor at 0, got %d", model.subagentDetailCursor)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+	if model.subagentDetailCursor != 1 {
+		t.Fatalf("after Down cursor = %d, want 1", model.subagentDetailCursor)
+	}
+}
+
+func TestSubagentDetailEmptyEventsShowsPlaceholder(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{
+		{ID: "abc", Role: subagent.RoleInvestigator, Model: "claude", Status: "completed", Summary: "done"},
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "Conversation") {
+		t.Fatalf("expected Conversation section, got:\n%s", view)
+	}
+	if !strings.Contains(view, "no trace events") {
+		t.Fatalf("expected placeholder for empty events, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Summary") {
+		t.Fatalf("expected Summary section, got:\n%s", view)
+	}
+	if !strings.Contains(view, "done") {
+		t.Fatalf("expected summary text, got:\n%s", view)
+	}
+}
+
+func TestSubagentDetailJKAlsoMovesCursor(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{sampleThreeTurnRun()}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	model = next.(Model)
+	if model.subagentDetailCursor != 1 {
+		t.Fatalf("after k cursor = %d, want 1", model.subagentDetailCursor)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model = next.(Model)
+	if model.subagentDetailCursor != 2 {
+		t.Fatalf("after j cursor = %d, want 2", model.subagentDetailCursor)
+	}
+}
+
+func isLastTurnExpandedForTest(m Model) bool {
+	return m.subagentDetailCursor == 2
 }
