@@ -70,6 +70,13 @@ func (s *configScreen) rebuildItems() {
 		{Group: "Subagents", Key: "subagents.max_parallel", Type: configInt, Value: strconv.Itoa(g.Subagents.MaxParallel)},
 		{Group: "Subagents", Key: "subagents.timeout_seconds", Type: configInt, Value: strconv.Itoa(g.Subagents.TimeoutSeconds)},
 		{Group: "Subagents", Key: "subagents.debug", Type: configBool, Value: formatBool(g.Subagents.Debug)},
+		{Group: "Subagents", Key: "subagents.max_inbound_chars", Type: configInt, Value: strconv.Itoa(g.Subagents.MaxInboundChars)},
+		{Group: "Subagents", Key: "subagents.debug_transcript", Type: configBool, Value: formatBool(g.Subagents.DebugTranscript)},
+		{Group: "Subagents", Key: "subagents.per_role.investigator_turns", Type: configInt, Value: strconv.Itoa(g.Subagents.PerRole.InvestigatorTurns)},
+		{Group: "Subagents", Key: "subagents.per_role.investigator_tool_calls", Type: configInt, Value: strconv.Itoa(g.Subagents.PerRole.InvestigatorToolCalls)},
+		{Group: "Subagents", Key: "subagents.per_role.reviewer_turns", Type: configInt, Value: strconv.Itoa(g.Subagents.PerRole.ReviewerTurns)},
+		{Group: "Subagents", Key: "subagents.per_role.reviewer_tool_calls", Type: configInt, Value: strconv.Itoa(g.Subagents.PerRole.ReviewerToolCalls)},
+		{Group: "Subagents", Key: "subagents.per_role.summarizer_turns", Type: configInt, Value: strconv.Itoa(g.Subagents.PerRole.SummarizerTurns)},
 		{Group: "Vision", Key: "vision.model", Type: configString, Value: g.Vision.Model},
 		{Group: "Vision", Key: "vision.max_images", Type: configInt, Value: strconv.Itoa(g.Vision.MaxImages)},
 		{Group: "Vision", Key: "vision.max_summary_chars_per_image", Type: configInt, Value: strconv.Itoa(g.Vision.MaxSummaryCharsPerImage)},
@@ -284,6 +291,48 @@ func (s *configScreen) SetValue(key string, value string) error {
 			return fmt.Errorf("invalid subagents.debug: %s", value)
 		}
 		g.Subagents.Debug = parsed
+	case "subagents.debug_transcript":
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("invalid subagents.debug_transcript: %s", value)
+		}
+		g.Subagents.DebugTranscript = parsed
+	case "subagents.max_inbound_chars":
+		parsed, err := parsePositiveInt("subagents.max_inbound_chars", value)
+		if err != nil {
+			return err
+		}
+		g.Subagents.MaxInboundChars = parsed
+	case "subagents.per_role.investigator_turns":
+		parsed, err := parsePositiveInt("subagents.per_role.investigator_turns", value)
+		if err != nil {
+			return err
+		}
+		g.Subagents.PerRole.InvestigatorTurns = parsed
+	case "subagents.per_role.investigator_tool_calls":
+		parsed, err := parsePositiveInt("subagents.per_role.investigator_tool_calls", value)
+		if err != nil {
+			return err
+		}
+		g.Subagents.PerRole.InvestigatorToolCalls = parsed
+	case "subagents.per_role.reviewer_turns":
+		parsed, err := parsePositiveInt("subagents.per_role.reviewer_turns", value)
+		if err != nil {
+			return err
+		}
+		g.Subagents.PerRole.ReviewerTurns = parsed
+	case "subagents.per_role.reviewer_tool_calls":
+		parsed, err := parsePositiveInt("subagents.per_role.reviewer_tool_calls", value)
+		if err != nil {
+			return err
+		}
+		g.Subagents.PerRole.ReviewerToolCalls = parsed
+	case "subagents.per_role.summarizer_turns":
+		parsed, err := parsePositiveInt("subagents.per_role.summarizer_turns", value)
+		if err != nil {
+			return err
+		}
+		g.Subagents.PerRole.SummarizerTurns = parsed
 	case "vision.model":
 		g.Vision.Model = strings.TrimSpace(value)
 	case "vision.max_images":
