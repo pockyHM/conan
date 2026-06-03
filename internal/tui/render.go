@@ -70,6 +70,7 @@ var (
 var mdRenderer *glamour.TermRenderer
 
 var thinkingFrames = []string{"◐", "◓", "◑", "◒"}
+var startupFrames = []string{"▌", "▐", "▔", "▁"}
 
 func init() {
 	var err error
@@ -270,9 +271,9 @@ func multilineInputLineCount(input string) int {
 	return strings.Count(normalized, "\n") + 1
 }
 
-func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map[string]bool, lang uiLanguage) string {
+func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map[string]bool, lang uiLanguage, width int, bodyHeight int, frame int) string {
 	const maxNodeRows = 5
-	wordmark := strings.Join([]string{
+	fullWordmark := strings.Join([]string{
 		" ██████╗ ██████╗ ███╗   ██╗ █████╗ ███╗   ██╗",
 		"██╔════╝██╔═══██╗████╗  ██║██╔══██╗████╗  ██║",
 		"██║     ██║   ██║██╔██╗ ██║███████║██╔██╗ ██║",
@@ -280,6 +281,20 @@ func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map
 		"╚██████╗╚██████╔╝██║ ╚████║██║  ██║██║ ╚████║",
 		" ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═══╝",
 	}, "\n")
+	markFrame := "▌"
+	if len(startupFrames) > 0 {
+		markFrame = startupFrames[frame%len(startupFrames)]
+	}
+	compact := width > 0 && width < 56
+	if bodyHeight > 0 && bodyHeight < 10 {
+		compact = true
+	}
+	wordmark := fullWordmark
+	if compact {
+		wordmark = "CONAN " + markFrame
+	} else {
+		wordmark += "\n" + markFrame
+	}
 
 	selectedCount := 0
 	for _, ok := range selected {
@@ -299,6 +314,10 @@ func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("%-9s %s\n", lang.tr("Cluster", "集群"), cluster))
 	b.WriteString(fmt.Sprintf("%-9s %s\n", lang.tr("Model", "模型"), model))
+	if compact && bodyHeight > 0 && bodyHeight <= 5 {
+		b.WriteString(statusStyle.Render(lang.tr("Type a message or /help", "输入消息或 /help")))
+		return strings.TrimRight(b.String(), "\n")
+	}
 	b.WriteString(fmt.Sprintf("%-9s %s\n", lang.tr("Nodes", "节点"), fmt.Sprintf(lang.tr("%d/%d selected, %d online", "已选 %d/%d，在线 %d"), selectedCount, len(nodes), onlineCount)))
 
 	nodeLimit := min(len(nodes), maxNodeRows)

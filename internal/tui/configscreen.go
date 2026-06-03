@@ -68,7 +68,6 @@ func (s *configScreen) rebuildItems() {
 		{Group: "Memory", Key: "memory.knowledge_token_budget", Type: configInt, Value: strconv.Itoa(g.Memory.KnowledgeTokenBudget)},
 		{Group: "Subagents", Key: "subagents.enabled", Type: configBool, Value: formatBool(g.Subagents.Enabled)},
 		{Group: "Subagents", Key: "subagents.max_parallel", Type: configInt, Value: strconv.Itoa(g.Subagents.MaxParallel)},
-		{Group: "Subagents", Key: "subagents.default_model", Type: configString, Value: g.Subagents.DefaultModel},
 		{Group: "Subagents", Key: "subagents.timeout_seconds", Type: configInt, Value: strconv.Itoa(g.Subagents.TimeoutSeconds)},
 		{Group: "Subagents", Key: "subagents.debug", Type: configBool, Value: formatBool(g.Subagents.Debug)},
 		{Group: "Vision", Key: "vision.model", Type: configString, Value: g.Vision.Model},
@@ -273,8 +272,6 @@ func (s *configScreen) SetValue(key string, value string) error {
 			return err
 		}
 		g.Subagents.MaxParallel = parsed
-	case "subagents.default_model":
-		g.Subagents.DefaultModel = strings.TrimSpace(value)
 	case "subagents.timeout_seconds":
 		parsed, err := parsePositiveInt("subagents.timeout_seconds", value)
 		if err != nil {

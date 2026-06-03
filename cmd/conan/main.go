@@ -49,7 +49,7 @@ func teaProgramOptions(in io.Reader, out io.Writer) []tea.ProgramOption {
 
 func tuiMouseEnabled() bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv("CONAN_TUI_MOUSE")))
-	return value != "0" && value != "false" && value != "no" && value != "off"
+	return value == "1" || value == "true" || value == "yes" || value == "on"
 }
 
 type conversationSaver interface {
@@ -590,7 +590,6 @@ func newRootCommand() *cobra.Command {
 		}
 
 		var clients map[string]*mcp.Client
-		var agentTools []llm.ToolDef
 		var cluster *cfgloader.Cluster
 		if selectedCluster != "" {
 			var err error
@@ -605,15 +604,6 @@ func newRootCommand() *cobra.Command {
 						BaseURL: url,
 						Token:   node.Agent.Token,
 					})
-				}
-				for _, client := range clients {
-					tools, err := client.ListTools(cmd.Context())
-					if err == nil {
-						for _, t := range tools {
-							agentTools = append(agentTools, llm.ToolDef(t))
-						}
-					}
-					break
 				}
 			}
 		}
@@ -666,7 +656,6 @@ func newRootCommand() *cobra.Command {
 			Vision:             global.Vision,
 			Conv:               conv,
 			Clients:            clients,
-			Tools:              agentTools,
 			Nodes:              nodeInfos,
 			Reviewer:           reviewer,
 			AuditLogger:        auditLog,

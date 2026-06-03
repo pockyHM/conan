@@ -1474,6 +1474,112 @@ func TestSubagentsRunToolOnlyExposedWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestConfigPageDoesNotExposeSubagentDefaultModel(t *testing.T) {
+	screen := newConfigScreen(&configschema.GlobalConfig{})
+
+	for _, item := range screen.items {
+		if item.Key == "subagents.default_model" {
+			t.Fatalf("config screen exposed %s; subagents should inherit the main model", item.Key)
+		}
+	}
+}
+
+func TestNewSubagentRequestUsesCurrentModelAfterSwitch(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "claude"})
+
+	model, _ = model.switchModel("gpt")
+	req := model.newSubagentRequest(subagent.RoleInvestigator, "hello", nil)
+
+	if req.Model != "gpt" {
+		t.Fatalf("subagent model = %q, want current main model gpt", req.Model)
+	}
+}
+
+func TestRunSubagentUsesProviderFromCurrentModelAfterSwitch(t *testing.T) {
+	var requestedModels []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if model, _ := body["model"].(string); model != "" {
+			requestedModels = append(requestedModels, model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"subagent ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	model := NewModel(ModelConfig{
+		Cluster: "test",
+		Model:   "claude",
+		ModelConfigs: []configschema.ModelConfig{
+			{Name: "claude", Type: "openai", Endpoint: server.URL, Model: "claude-compatible", APIKey: "sk-test"},
+			{Name: "gpt", Type: "openai", Endpoint: server.URL, Model: "gpt-4.1", APIKey: "sk-test"},
+		},
+	})
+
+	model, _ = model.switchModel("gpt")
+	result := model.runSubagent(context.Background(), model.newSubagentRequest(subagent.RoleInvestigator, "hello", nil))
+
+	if result.Err != nil {
+		t.Fatalf("runSubagent error: %v", result.Err)
+	}
+	if len(requestedModels) != 1 || requestedModels[0] != "gpt-4.1" {
+		t.Fatalf("requested models = %#v, want only gpt-4.1", requestedModels)
+	}
+}
+
+func TestRiskAssessmentUsesProviderFromCurrentModelAfterSwitch(t *testing.T) {
+	var requestedModels []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if model, _ := body["model"].(string); model != "" {
+			requestedModels = append(requestedModels, model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"risk_level\":\"confirm\",\"reason\":\"Risky\"}"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	models := []configschema.ModelConfig{
+		{Name: "claude", Type: "openai", Endpoint: server.URL, Model: "claude-compatible", APIKey: "sk-test"},
+		{Name: "gpt", Type: "openai", Endpoint: server.URL, Model: "gpt-4.1", APIKey: "sk-test"},
+	}
+	provider, modelName, err := llm.NewProvider(models, "claude")
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	provider = llm.NewRetryProvider(provider, llm.DefaultRetryConfig())
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Provider:  provider,
+		ModelName: modelName,
+	})
+	model := NewModel(ModelConfig{
+		Cluster:      "test",
+		Model:        modelName,
+		ModelConfigs: models,
+		Provider:     provider,
+		Reviewer:     reviewer,
+	})
+
+	model, _ = model.switchModel("gpt")
+	call := llm.ToolCall{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"rm -rf /tmp/conan-risk-test"}`)}
+	msg := execCmd(t, model.assessToolRisk(7, call))
+	if result, ok := msg.(riskAssessmentMsg); !ok {
+		t.Fatalf("assessToolRisk returned %T, want riskAssessmentMsg", msg)
+	} else if result.err != nil {
+		t.Fatalf("risk assessment error: %v", result.err)
+	}
+
+	if len(requestedModels) != 1 || requestedModels[0] != "gpt-4.1" {
+		t.Fatalf("requested models = %#v, want only gpt-4.1", requestedModels)
+	}
+}
+
 func TestNewSubagentRequestExcludesPendingToolCallContext(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	conv.AddUser("check nodes")
@@ -2075,6 +2181,53 @@ func TestInitialModelViewRendersStartupOverview(t *testing.T) {
 	}
 }
 
+func TestInitialModelViewUsesCompactStartupOverviewInSmallWindow(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model = next.(Model)
+
+	view := model.View()
+
+	if strings.Contains(view, "██████╗ ██████╗") {
+		t.Fatalf("small window should not render clipped full logo:\n%s", view)
+	}
+	for _, want := range []string{
+		"CONAN",
+		"Cluster   production",
+		"Model     claude-sonnet",
+		"Type a message or /help",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("compact startup overview missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestStartupTickAnimatesInitialOverview(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
+	model = next.(Model)
+
+	initial := model.View()
+	next, cmd := model.Update(startupTickMsg{})
+	model = next.(Model)
+	animated := model.View()
+
+	if initial == animated {
+		t.Fatalf("startup tick should change rendered frame:\n%s", animated)
+	}
+	if cmd == nil {
+		t.Fatal("startup tick should schedule another tick while overview is visible")
+	}
+
+	model.messages = append(model.messages, chatMsg{role: "user", content: "hello"})
+	next, cmd = model.Update(startupTickMsg{})
+	model = next.(Model)
+	if cmd != nil {
+		t.Fatal("startup tick should stop after chat starts")
+	}
+}
+
 func TestInputRendersAsBox(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
 	next, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 10})
@@ -2098,6 +2251,49 @@ func TestInputRendersCursor(t *testing.T) {
 
 	if !strings.Contains(view, "❯ hello█") {
 		t.Fatalf("view missing input cursor:\n%s", view)
+	}
+}
+
+func TestChatViewRendersShortcutHintsBelowInputBox(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	model = next.(Model)
+	model.input = "hello"
+
+	view := model.View()
+	inputIndex := strings.LastIndex(view, "│ ❯ hello")
+	borderIndex := strings.LastIndex(view, "╯")
+	hintIndex := strings.LastIndex(view, "↑/↓ Scroll")
+
+	if inputIndex < 0 || borderIndex < 0 {
+		t.Fatalf("view missing input box:\n%s", view)
+	}
+	if hintIndex < 0 {
+		t.Fatalf("view missing shortcut hints:\n%s", view)
+	}
+	if hintIndex < borderIndex {
+		t.Fatalf("shortcut hints should render below input box:\n%s", view)
+	}
+	if hintIndex < inputIndex {
+		t.Fatalf("shortcut hints should not render inside input line:\n%s", view)
+	}
+	for _, want := range []string{"Ctrl+P/N History", "PgUp/PgDn Page", "Ctrl+O Tool", "Ctrl+A Agents", "Ctrl+L Clear"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing shortcut hint %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestChatViewRendersChineseShortcutHints(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet", UILanguage: "zh-CN"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	model = next.(Model)
+
+	view := model.View()
+	for _, want := range []string{"↑/↓ 滚动", "Ctrl+P/N 历史", "PgUp/PgDn 翻页", "Ctrl+O 工具输出", "Ctrl+A Agents", "Ctrl+L 清屏"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing Chinese shortcut hint %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -2439,6 +2635,132 @@ func TestStreamingThinkingRendersInBodyOnly(t *testing.T) {
 	}
 }
 
+func TestSubagentStatusRendersInFooterStatus(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.subagentStatus = "Subagents running: 2 active"
+
+	view := model.View()
+
+	statusIndex := strings.Index(view, "Subagents running: 2 active")
+	inputIndex := strings.Index(view, "│ ❯")
+	if statusIndex == -1 {
+		t.Fatalf("view missing subagent status:\n%s", view)
+	}
+	if inputIndex == -1 || statusIndex > inputIndex {
+		t.Fatalf("subagent status should render before input footer:\n%s", view)
+	}
+}
+
+func TestManualSubagentStatusUpdatesOnStartAndCompletion(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}})
+
+	model, _ = model.startManualSubagent("reviewer check config")
+	if !strings.Contains(model.View(), "Subagent reviewer running") {
+		t.Fatalf("view missing running subagent status:\n%s", model.View())
+	}
+
+	next, _ := model.Update(subagentCommandResultMsg{result: subagent.Result{
+		Role:    subagent.RoleReviewer,
+		Summary: "ok",
+		Elapsed: 1500 * time.Millisecond,
+	}})
+	model = next.(Model)
+
+	if !strings.Contains(model.View(), "Subagent reviewer completed in 1.5s") {
+		t.Fatalf("view missing completed subagent status:\n%s", model.View())
+	}
+}
+
+func TestManualSubagentRendersPromptPreviewWithShortID(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}})
+
+	model, _ = model.startManualSubagent("reviewer check config")
+	view := model.View()
+
+	if len(model.subagentRuns) != 1 {
+		t.Fatalf("subagent runs = %#v, want one", model.subagentRuns)
+	}
+	id := model.subagentRuns[0].ID
+	if len(id) != 8 {
+		t.Fatalf("subagent id = %q, want 8-char short id", id)
+	}
+	for _, want := range []string{"subagent " + id, "reviewer", "receiving", "prompt:", "check config"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestCtrlATogglesSubagentDetails(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}})
+	model, _ = model.startManualSubagent("reviewer check config")
+
+	collapsed := model.View()
+	if strings.Contains(collapsed, "Task: check config") {
+		t.Fatalf("collapsed subagent view leaked full prompt:\n%s", collapsed)
+	}
+
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	expanded := model.View()
+
+	for _, want := range []string{"Subagents", "Task: check config", "Model: m", "Role: reviewer"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded view missing %q:\n%s", want, expanded)
+		}
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+	collapsed = model.View()
+	if strings.Contains(collapsed, "Task: check config") {
+		t.Fatalf("Ctrl+A should collapse subagent details:\n%s", collapsed)
+	}
+}
+
+func TestSubagentsRunStatusSummarizesBatchResults(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	call := llm.ToolCall{ID: "sa1", Name: metaToolSubagentsRun, Arguments: json.RawMessage(`{"tasks":[{"task":"a"},{"task":"b"}]}`)}
+
+	next, _ := model.Update(multiToolResultMsg{
+		Call: call,
+		Results: []nodeToolResult{{
+			Node:    "local",
+			Output:  "[investigator:local:ok] a\n[reviewer:local:error: failed] (no summary)",
+			Success: false,
+		}},
+	})
+	model = next.(Model)
+
+	if !strings.Contains(model.View(), "Subagents completed: 1 ok, 1 error") {
+		t.Fatalf("view missing subagent batch summary:\n%s", model.View())
+	}
+}
+
+func TestSubagentsRunStatusUpdatesWhenToolCallStarts(t *testing.T) {
+	model := NewModel(ModelConfig{
+		Cluster:   "test",
+		Model:     "m",
+		Subagents: configschema.SubagentConfig{Enabled: true},
+	})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamCh = make(chan llm.ChatEvent)
+	model.streamCtx = context.Background()
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID:        "sa1",
+		Name:      metaToolSubagentsRun,
+		Arguments: json.RawMessage(`{"tasks":[{"task":"a"},{"task":"b"}]}`),
+	}})
+	model = next.(Model)
+
+	if !strings.Contains(model.View(), "Subagents running: 2 active") {
+		t.Fatalf("view missing running subagents status:\n%s", model.View())
+	}
+}
+
 func TestSubmittingMessageSchedulesThinkingTick(t *testing.T) {
 	conv := conversation.New("test", nil, "model")
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, Conv: conv})
@@ -2611,40 +2933,40 @@ func TestTypingSpaceAddsInputSpace(t *testing.T) {
 	}
 }
 
-func TestUpDownNavigatesInputHistoryAndRestoresDraft(t *testing.T) {
+func TestCtrlPNNavigatesInputHistoryAndRestoresDraft(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
 	model = typeAndEnter(t, model, "first")
 	model = typeAndEnter(t, model, "second")
 	model = typeRunes(t, model, "draft")
 
-	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
 	model = next.(Model)
 	if model.input != "second" {
-		t.Fatalf("after first Up input = %q, want second", model.input)
+		t.Fatalf("after first Ctrl+P input = %q, want second", model.input)
 	}
 
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
 	model = next.(Model)
 	if model.input != "first" {
-		t.Fatalf("after second Up input = %q, want first", model.input)
+		t.Fatalf("after second Ctrl+P input = %q, want first", model.input)
 	}
 
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
 	model = next.(Model)
 	if model.input != "first" {
-		t.Fatalf("extra Up input = %q, want first", model.input)
+		t.Fatalf("extra Ctrl+P input = %q, want first", model.input)
 	}
 
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
 	model = next.(Model)
 	if model.input != "second" {
-		t.Fatalf("after first Down input = %q, want second", model.input)
+		t.Fatalf("after first Ctrl+N input = %q, want second", model.input)
 	}
 
-	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
 	model = next.(Model)
 	if model.input != "draft" {
-		t.Fatalf("after second Down input = %q, want restored draft", model.input)
+		t.Fatalf("after second Ctrl+N input = %q, want restored draft", model.input)
 	}
 }
 
@@ -3404,6 +3726,44 @@ func TestMouseWheelScrollsViewportWithoutNavigatingInputHistory(t *testing.T) {
 	}
 }
 
+func TestUpDownScrollViewportWithoutNavigatingInputHistory(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude-sonnet"})
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	model = next.(Model)
+	model = typeAndEnter(t, model, "first")
+	model = typeAndEnter(t, model, "second")
+	model.input = "draft"
+	for i := 0; i < 30; i++ {
+		model.messages = append(model.messages, chatMsg{
+			role:    "assistant",
+			content: strings.Repeat("line\n", 3) + "message",
+		})
+	}
+	model.updateViewportContent()
+	model.vp.GotoBottom()
+	bottomOffset := model.vp.YOffset
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = next.(Model)
+
+	if model.input != "draft" {
+		t.Fatalf("Up changed input to %q, want draft", model.input)
+	}
+	if model.vp.YOffset >= bottomOffset {
+		t.Fatalf("Up did not scroll viewport up: before=%d after=%d", bottomOffset, model.vp.YOffset)
+	}
+
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(Model)
+
+	if model.input != "draft" {
+		t.Fatalf("Down changed input to %q, want draft", model.input)
+	}
+	if model.vp.YOffset <= bottomOffset-1 {
+		t.Fatalf("Down did not scroll viewport down: before=%d after=%d", bottomOffset-1, model.vp.YOffset)
+	}
+}
+
 func TestExitCommandQuits(t *testing.T) {
 	model := NewModel(ModelConfig{})
 	for _, r := range "/exit" {
@@ -3562,8 +3922,9 @@ func newInitializeVersionTestClient(t *testing.T, version string) *mcp.Client {
 func TestInitSkipsVersionCheckForDevVersion(t *testing.T) {
 	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Version: "dev"})
 
-	if cmd := model.Init(); cmd != nil {
-		t.Fatal("Init() returned command for dev version with no clients, want nil")
+	msg := execCmd(t, model.Init())
+	if _, ok := msg.(startupTickMsg); !ok {
+		t.Fatalf("Init() returned %T, want startup tick only", msg)
 	}
 }
 

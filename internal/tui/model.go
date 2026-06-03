@@ -101,6 +101,19 @@ type chatMsg struct {
 	hidden       bool
 }
 
+type subagentRunView struct {
+	ID      string
+	Role    subagent.Role
+	Task    string
+	Prompt  string
+	Model   string
+	Nodes   []string
+	Status  string
+	Summary string
+	Err     string
+	Elapsed time.Duration
+}
+
 type tuiMode int
 
 const (
@@ -207,6 +220,9 @@ type Model struct {
 	memoryKnowledgePromptLimit int
 	subagents                  configschema.SubagentConfig
 	subagentResults            []subagent.Result
+	subagentStatus             string
+	subagentRuns               []subagentRunView
+	subagentRunsExpanded       bool
 	sessionList                sessionList
 	configScreen               configScreen
 	ac                         autocomplete
@@ -235,6 +251,7 @@ type Model struct {
 	streamEnded        bool
 	streamEventSeq     int
 	thinkingFrame      int
+	startupFrame       int
 	compacting         bool
 	compactID          uint64
 	compactFrame       int
@@ -421,7 +438,7 @@ func normalizeVisionConfig(cfg configschema.VisionConfig) configschema.VisionCon
 }
 
 func (m Model) Init() tea.Cmd {
-	var cmds []tea.Cmd
+	cmds := []tea.Cmd{m.scheduleStartupTick()}
 	if strings.TrimSpace(m.initialSessionID) != "" {
 		cmds = append(cmds, m.loadSession(strings.TrimSpace(m.initialSessionID)))
 	}
@@ -459,6 +476,8 @@ type streamDoneMsg struct {
 type thinkingTickMsg struct {
 	streamID uint64
 }
+
+type startupTickMsg struct{}
 
 type streamTimeoutMsg struct {
 	streamID uint64
@@ -535,12 +554,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subagentCommandResultMsg:
 		m.subagentResults = append(m.subagentResults, msg.result)
+		m.updateSubagentRunResult(msg.result)
 		content := renderSubagentCommandResult(msg.result)
 		m.messages = append(m.messages, chatMsg{role: "assistant", content: content, elapsed: msg.result.Elapsed})
 		if msg.result.Err != nil {
 			m.status = m.uiLanguage.tr("Subagent failed: ", "Subagent 失败: ") + msg.result.Err.Error()
+			m.subagentStatus = renderManualSubagentStatus(msg.result, m.uiLanguage)
 		} else {
 			m.status = m.uiLanguage.tr("Subagent completed", "Subagent 已完成")
+			m.subagentStatus = renderManualSubagentStatus(msg.result, m.uiLanguage)
 		}
 		m.updateViewportContent()
 		return m, nil
@@ -749,6 +771,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if memory.IsMemoryTool(e.Name) {
 				toolCmd = m.handleMemoryTool(msg.streamID, call)
 			} else if e.Name == metaToolSubagentsRun {
+				m.subagentStatus = renderSubagentRunningStatus(subagent.RoleInvestigator, countSubagentTasks(call.Arguments), m.uiLanguage)
+				m.addSubagentRunsFromTasks(call.Arguments)
 				toolCmd = m.dispatchSubagentsRun(msg.streamID, call)
 			} else {
 				toolCmd = m.assessToolRisk(msg.streamID, call)
@@ -838,6 +862,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 		return m, m.scheduleThinkingTick(msg.streamID)
 
+	case startupTickMsg:
+		if !m.startupOverviewVisible() {
+			return m, nil
+		}
+		m.startupFrame++
+		m.updateViewportContent()
+		return m, m.scheduleStartupTick()
+
 	case compactTickMsg:
 		if !m.compacting || msg.compactID != m.compactID {
 			return m, nil
@@ -870,6 +902,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recordToolResultEvidence(msg.Call, msg.Results, aggregatedOutput)
 		if msg.Call.Name != metaToolAskChoice {
 			m.logAuditExecution(msg.Call, msg.Results)
+		}
+		if msg.Call.Name == metaToolSubagentsRun {
+			m.subagentStatus = summarizeSubagentsRunStatus(msg.Results, m.uiLanguage)
+			m.updateSubagentRunResultsFromToolOutput(msg.Results)
 		}
 		return m.completeToolAndResume(msg.streamID, msg.Call)
 
@@ -1048,6 +1084,10 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toggleLastToolOutputExpanded()
 			return m, nil
 		}
+		if key.Type == tea.KeyCtrlA {
+			m.toggleSubagentRunsExpanded()
+			return m, nil
+		}
 		if key.Type == tea.KeyCtrlC || key.Type == tea.KeyEsc {
 			m.finishStream(true)
 			m.status = m.uiLanguage.tr("Interrupted", "已中断")
@@ -1065,8 +1105,17 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case tea.KeyCtrlV:
 		return m, clipboardImageOrTextCmd(m.attachmentDir(), len(m.attachedImages)+len(m.pendingImages)+1)
+	case tea.KeyCtrlP:
+		m.navigateInputHistory(-1)
+		return m, nil
+	case tea.KeyCtrlN:
+		m.navigateInputHistory(1)
+		return m, nil
 	case tea.KeyCtrlO:
 		m.toggleLastToolOutputExpanded()
+		return m, nil
+	case tea.KeyCtrlA:
+		m.toggleSubagentRunsExpanded()
 		return m, nil
 	case tea.KeyCtrlL:
 		m.messages = nil
@@ -1105,14 +1154,14 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ac.visible {
 			m.ac = m.ac.moveUp()
 		} else {
-			m.navigateInputHistory(-1)
+			m.scrollViewportForKey(key)
 		}
 		return m, nil
 	case tea.KeyDown:
 		if m.ac.visible {
 			m.ac = m.ac.moveDown()
 		} else {
-			m.navigateInputHistory(1)
+			m.scrollViewportForKey(key)
 		}
 		return m, nil
 	case tea.KeyPgUp:
@@ -1969,6 +2018,9 @@ func (m Model) switchModel(name string) (Model, tea.Cmd) {
 	}
 	m.provider = provider
 	m.model = modelName
+	if m.reviewer != nil {
+		m.reviewer.SetProvider(provider, modelName)
+	}
 	m.visionProvider = nil
 	m.visionError = ""
 	if visionProvider, _, err := llm.NewVisionProvider(m.modelConfigs, name); err != nil {
@@ -2038,6 +2090,9 @@ func (m Model) View() string {
 	acView := m.ac.View(m.width)
 	meter := m.currentContextMeter()
 	footer := statusView + "\n" + renderInputBox(m.inputWithImageChips(), m.width, m.uiLanguage)
+	if shortcutHints := renderShortcutHints(m.uiLanguage); shortcutHints != "" {
+		footer += "\n" + shortcutHints
+	}
 	leftMeta := renderModelClusterMeta(m.model, m.cluster)
 	if meterLine := renderFooterMeta(leftMeta, meter, m.uiLanguage, max(m.width-2, 1)); meterLine != "" {
 		footer += "\n" + meterLine
@@ -2054,6 +2109,13 @@ func (m Model) View() string {
 	}
 
 	return header + "\n\n" + body + "\n\n" + footer
+}
+
+func renderShortcutHints(lang uiLanguage) string {
+	return statusStyle.Render(lang.tr(
+		"↑/↓ Scroll  Ctrl+P/N History  PgUp/PgDn Page  Ctrl+O Tool  Ctrl+A Agents  Ctrl+L Clear",
+		"↑/↓ 滚动  Ctrl+P/N 历史  PgUp/PgDn 翻页  Ctrl+O 工具输出  Ctrl+A Agents  Ctrl+L 清屏",
+	))
 }
 
 func (m Model) inputWithImageChips() string {
@@ -2395,6 +2457,9 @@ func (m Model) renderBody() string {
 			bodyParts = append(bodyParts, renderMessageWithElapsed(m.renderToolMsg(msg), msg.elapsed, m.uiLanguage))
 		}
 	}
+	if subagentView := m.renderSubagentRuns(); subagentView != "" {
+		bodyParts = append(bodyParts, subagentView)
+	}
 	if m.streaming {
 		if m.streamBuf != "" {
 			bodyParts = append(bodyParts, renderStreamingMsg(m.streamBuf))
@@ -2406,9 +2471,23 @@ func (m Model) renderBody() string {
 	}
 	body := strings.Join(bodyParts, "\n\n")
 	if body == "" {
-		body = renderStartupOverview(m.cluster, m.model, m.nodes, m.selectedNodes, m.uiLanguage)
+		body = renderStartupOverview(m.cluster, m.model, m.nodes, m.selectedNodes, m.uiLanguage, m.width, m.bodyHeight(), m.startupFrame)
 	}
 	return body
+}
+
+func (m Model) startupOverviewVisible() bool {
+	return m.mode == modeChat && len(m.messages) == 0 && !m.streaming && len(m.subagentRuns) == 0
+}
+
+func (m Model) bodyHeight() int {
+	if m.viewportReady {
+		return m.vp.Height
+	}
+	if m.height > 0 {
+		return max(m.height-5, 3)
+	}
+	return 0
 }
 
 func renderMessageWithElapsed(content string, elapsed time.Duration, lang uiLanguage) string {
@@ -2417,6 +2496,97 @@ func renderMessageWithElapsed(content string, elapsed time.Duration, lang uiLang
 		return content
 	}
 	return strings.TrimRight(content, "\n") + "\n\n" + footer
+}
+
+func (m Model) renderSubagentRuns() string {
+	if len(m.subagentRuns) == 0 {
+		return ""
+	}
+	if !m.subagentRunsExpanded {
+		return renderSubagentRunCollapsed(m.subagentRuns[len(m.subagentRuns)-1], m.thinkingFrame, m.uiLanguage)
+	}
+	var lines []string
+	lines = append(lines, statusStyle.Render(m.uiLanguage.tr("Subagents", "Subagents")))
+	for _, run := range m.subagentRuns {
+		lines = append(lines, renderSubagentRunExpanded(run, m.uiLanguage))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderSubagentRunCollapsed(run subagentRunView, frame int, lang uiLanguage) string {
+	icon := "◦"
+	if len(thinkingFrames) > 0 && run.Status == "receiving" {
+		icon = thinkingFrames[frame%len(thinkingFrames)]
+	}
+	parts := []string{
+		icon,
+		"subagent",
+		run.ID,
+		string(normalizeSubagentRoleForStatus(run.Role)),
+		"·",
+		run.Model,
+		"·",
+		subagentStatusLabel(run.Status, lang),
+	}
+	if preview := oneLineSubagentPrompt(run.Task); preview != "" {
+		parts = append(parts, "·", "prompt:", preview)
+	}
+	return statusStyle.Render(strings.Join(parts, " "))
+}
+
+func renderSubagentRunExpanded(run subagentRunView, lang uiLanguage) string {
+	var lines []string
+	header := fmt.Sprintf("- subagent %s · %s · %s · %s", run.ID, normalizeSubagentRoleForStatus(run.Role), run.Model, subagentStatusLabel(run.Status, lang))
+	if run.Elapsed > 0 {
+		header += " · " + run.Elapsed.Round(100*time.Millisecond).String()
+	}
+	lines = append(lines, statusStyle.Render(header))
+	lines = append(lines, statusStyle.Render("  Role: "+string(normalizeSubagentRoleForStatus(run.Role))))
+	lines = append(lines, statusStyle.Render("  Model: "+run.Model))
+	if len(run.Nodes) > 0 {
+		lines = append(lines, statusStyle.Render("  Nodes: "+strings.Join(run.Nodes, ", ")))
+	}
+	if strings.TrimSpace(run.Prompt) != "" {
+		lines = append(lines, statusStyle.Render("  Prompt:"))
+		for _, line := range strings.Split(strings.TrimSpace(run.Prompt), "\n") {
+			lines = append(lines, statusStyle.Render("    "+line))
+		}
+	}
+	if run.Summary != "" {
+		lines = append(lines, statusStyle.Render("  Summary: "+run.Summary))
+	}
+	if run.Err != "" {
+		lines = append(lines, statusStyle.Render("  Error: "+run.Err))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func oneLineSubagentPrompt(prompt string) string {
+	line := strings.Join(strings.Fields(prompt), " ")
+	if len(line) > 100 {
+		return line[:100] + "..."
+	}
+	return line
+}
+
+func subagentStatusLabel(status string, lang uiLanguage) string {
+	switch status {
+	case "queued":
+		return lang.tr("queued", "排队中")
+	case "receiving":
+		return lang.tr("receiving", "接收中")
+	case "tool":
+		return lang.tr("tool", "工具")
+	case "completed":
+		return lang.tr("completed", "已完成")
+	case "failed":
+		return lang.tr("failed", "失败")
+	default:
+		if strings.TrimSpace(status) != "" {
+			return status
+		}
+		return lang.tr("running", "运行中")
+	}
 }
 
 func (m Model) streamElapsed() time.Duration {
@@ -2428,12 +2598,20 @@ func (m Model) streamElapsed() time.Duration {
 
 func (m Model) renderStatus() string {
 	if m.streaming && m.status == m.uiLanguage.tr("Thinking...", "思考中...") {
-		return statusStyle.Render(m.versionWarning)
+		return renderStatusLines("", m.subagentStatus, m.versionWarning)
 	}
-	if m.versionWarning == "" {
-		return statusStyle.Render(m.status)
+	return renderStatusLines(m.status, m.subagentStatus, m.versionWarning)
+}
+
+func renderStatusLines(lines ...string) string {
+	var rendered []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rendered = append(rendered, statusStyle.Render(line))
 	}
-	return statusStyle.Render(m.status) + "\n" + statusStyle.Render(m.versionWarning)
+	return strings.Join(rendered, "\n")
 }
 
 func (m Model) renderToolMsg(msg chatMsg) string {
@@ -2505,6 +2683,21 @@ func (m *Model) toggleLastToolOutputExpanded() {
 		return
 	}
 	m.status = m.uiLanguage.tr("No tool output to expand", "没有可展开的工具输出")
+}
+
+func (m *Model) toggleSubagentRunsExpanded() {
+	if len(m.subagentRuns) == 0 {
+		m.status = m.uiLanguage.tr("No subagents to expand", "没有可展开的 Subagent")
+		return
+	}
+	m.subagentRunsExpanded = !m.subagentRunsExpanded
+	m.lastBodyContent = ""
+	if m.subagentRunsExpanded {
+		m.status = m.uiLanguage.tr("Subagents expanded", "Subagents 已展开")
+	} else {
+		m.status = m.uiLanguage.tr("Subagents collapsed", "Subagents 已折叠")
+	}
+	m.updateViewportContent()
 }
 
 func (m Model) hasPendingVisibleTool() bool {
@@ -2857,6 +3050,8 @@ func (m Model) startManualSubagent(arg string) (Model, tea.Cmd) {
 	}
 	req := m.newSubagentRequest(role, task, m.selectedNodeNames())
 	m.status = m.uiLanguage.tr("Subagent running...", "Subagent 运行中...")
+	m.subagentStatus = renderSubagentRunningStatus(role, 1, m.uiLanguage)
+	m.addSubagentRun(req)
 	return m, func() tea.Msg {
 		result := m.runSubagent(context.Background(), req)
 		return subagentCommandResultMsg{result: result}
@@ -3253,6 +3448,121 @@ func (m Model) newSubagentRequest(role subagent.Role, task string, nodes []strin
 	}
 }
 
+func (m *Model) addSubagentRun(req subagent.Request) {
+	m.subagentRuns = append(m.subagentRuns, subagentRunView{
+		ID:     req.ID,
+		Role:   req.Role,
+		Task:   req.Task,
+		Prompt: subagentPromptForDisplay(req),
+		Model:  req.Model,
+		Nodes:  append([]string(nil), req.Nodes...),
+		Status: "receiving",
+	})
+	m.lastBodyContent = ""
+}
+
+func (m *Model) addSubagentRunsFromTasks(raw json.RawMessage) {
+	tasks, err := subagent.ParseTasks(raw)
+	if err != nil {
+		return
+	}
+	for _, task := range tasks {
+		nodes := m.restrictSubagentNodes(task.Nodes)
+		if len(task.Nodes) > 0 && len(nodes) == 0 {
+			continue
+		}
+		req := m.newSubagentRequest(task.Role, task.Task, nodes)
+		m.addSubagentRun(req)
+	}
+}
+
+func (m *Model) updateSubagentRunResult(result subagent.Result) {
+	for i := len(m.subagentRuns) - 1; i >= 0; i-- {
+		if result.ID != "" && m.subagentRuns[i].ID != result.ID {
+			continue
+		}
+		if result.ID == "" && m.subagentRuns[i].Status != "receiving" {
+			continue
+		}
+		m.subagentRuns[i].Status = "completed"
+		if result.Err != nil {
+			m.subagentRuns[i].Status = "failed"
+			m.subagentRuns[i].Err = result.Err.Error()
+		}
+		m.subagentRuns[i].Summary = strings.TrimSpace(result.Summary)
+		m.subagentRuns[i].Elapsed = result.Elapsed
+		m.lastBodyContent = ""
+		return
+	}
+}
+
+func (m *Model) updateSubagentRunResultsFromToolOutput(results []nodeToolResult) {
+	statuses := parseFormattedSubagentStatuses(results)
+	j := 0
+	for i := range m.subagentRuns {
+		if m.subagentRuns[i].Status != "receiving" {
+			continue
+		}
+		if j >= len(statuses) {
+			return
+		}
+		m.subagentRuns[i].Status = statuses[j].status
+		m.subagentRuns[i].Summary = statuses[j].summary
+		m.subagentRuns[i].Err = statuses[j].err
+		j++
+	}
+	if j > 0 {
+		m.lastBodyContent = ""
+	}
+}
+
+type parsedSubagentStatus struct {
+	status  string
+	summary string
+	err     string
+}
+
+func parseFormattedSubagentStatuses(results []nodeToolResult) []parsedSubagentStatus {
+	var statuses []parsedSubagentStatus
+	for _, result := range results {
+		for _, line := range strings.Split(result.Output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.HasPrefix(line, "[") {
+				continue
+			}
+			status := parsedSubagentStatus{status: "completed"}
+			if strings.Contains(line, ":error:") || strings.Contains(line, ":error ") {
+				status.status = "failed"
+				status.err = line
+			}
+			if idx := strings.Index(line, "] "); idx >= 0 {
+				status.summary = strings.TrimSpace(line[idx+2:])
+			}
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses
+}
+
+func subagentPromptForDisplay(req subagent.Request) string {
+	var b strings.Builder
+	b.WriteString("Role: ")
+	b.WriteString(string(normalizeSubagentRoleForStatus(req.Role)))
+	b.WriteString("\nTask: ")
+	b.WriteString(strings.TrimSpace(req.Task))
+	if req.Cluster != "" {
+		b.WriteString("\nCluster: ")
+		b.WriteString(req.Cluster)
+	}
+	if len(req.Nodes) > 0 {
+		nodes := append([]string(nil), req.Nodes...)
+		sort.Strings(nodes)
+		b.WriteString("\nNodes: ")
+		b.WriteString(strings.Join(nodes, ", "))
+	}
+	return b.String()
+}
+
 func recentConversationContext(conv *conversation.Conversation, maxChars int) []models.Message {
 	if conv == nil {
 		return nil
@@ -3291,14 +3601,23 @@ func completeToolCallContext(messages []models.Message) []models.Message {
 }
 
 func (m Model) runSubagent(ctx context.Context, req subagent.Request) subagent.Result {
-	runner := subagent.Runner{
-		Provider:     m.provider,
-		Tools:        m.availableToolDefsForSubagent(),
-		Executor:     subagentToolExecutor{model: m, nodes: req.Nodes},
-		MaxTurns:     4,
-		MaxToolCalls: 8,
+	if req.MaxTurns <= 0 {
+		req.MaxTurns = 4
 	}
-	return runner.Run(ctx, req)
+	if req.MaxToolCalls <= 0 {
+		req.MaxToolCalls = 8
+	}
+	runner := subagent.Runner{
+		Provider: m.provider,
+		Tools:    m.availableToolDefsForSubagent(),
+		Executor: subagentToolExecutor{model: m, nodes: req.Nodes},
+	}
+	events, results := runner.Run(ctx, req)
+	go func() {
+		for range events {
+		}
+	}()
+	return <-results
 }
 
 func (m Model) availableToolDefsForSubagent() []llm.ToolDef {
@@ -3409,6 +3728,12 @@ func (m Model) availableToolDefs() []llm.ToolDef {
 func (m Model) scheduleThinkingTick(streamID uint64) tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return thinkingTickMsg{streamID: streamID}
+	})
+}
+
+func (m Model) scheduleStartupTick() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return startupTickMsg{}
 	})
 }
 
@@ -4232,6 +4557,69 @@ func subagentResultsSuccessful(results []subagent.Result) bool {
 		}
 	}
 	return true
+}
+
+func countSubagentTasks(raw json.RawMessage) int {
+	tasks, err := subagent.ParseTasks(raw)
+	if err != nil {
+		return 0
+	}
+	return len(tasks)
+}
+
+func renderSubagentRunningStatus(role subagent.Role, count int, lang uiLanguage) string {
+	if count > 1 {
+		return fmt.Sprintf(lang.tr("Subagents running: %d active", "Subagents 运行中: %d 个活跃"), count)
+	}
+	return fmt.Sprintf(lang.tr("Subagent %s running...", "Subagent %s 运行中..."), normalizeSubagentRoleForStatus(role))
+}
+
+func renderManualSubagentStatus(result subagent.Result, lang uiLanguage) string {
+	role := normalizeSubagentRoleForStatus(result.Role)
+	elapsed := result.Elapsed.Round(100 * time.Millisecond)
+	if result.Err != nil {
+		return fmt.Sprintf(lang.tr("Subagent %s failed: %s", "Subagent %s 失败: %s"), role, result.Err.Error())
+	}
+	if elapsed > 0 {
+		return fmt.Sprintf(lang.tr("Subagent %s completed in %s", "Subagent %s 已完成，用时 %s"), role, elapsed)
+	}
+	return fmt.Sprintf(lang.tr("Subagent %s completed", "Subagent %s 已完成"), role)
+}
+
+func summarizeSubagentsRunStatus(results []nodeToolResult, lang uiLanguage) string {
+	ok, errCount := countFormattedSubagentResults(results)
+	if ok == 0 && errCount == 0 {
+		if allNodeToolResultsSuccessful(results) {
+			ok = len(results)
+		} else {
+			errCount = len(results)
+		}
+	}
+	return fmt.Sprintf(lang.tr("Subagents completed: %d ok, %d error", "Subagents 已完成: %d 正常，%d 错误"), ok, errCount)
+}
+
+func countFormattedSubagentResults(results []nodeToolResult) (int, int) {
+	ok := 0
+	errCount := 0
+	for _, result := range results {
+		for _, line := range strings.Split(result.Output, "\n") {
+			if strings.Contains(line, ":error:") || strings.Contains(line, ":error ") {
+				errCount++
+			} else if strings.Contains(line, ":ok]") {
+				ok++
+			}
+		}
+	}
+	return ok, errCount
+}
+
+func normalizeSubagentRoleForStatus(role subagent.Role) subagent.Role {
+	switch role {
+	case subagent.RoleReviewer, subagent.RoleSummarizer:
+		return role
+	default:
+		return subagent.RoleInvestigator
+	}
 }
 
 func (m Model) restrictSubagentNodes(requested []string) []string {

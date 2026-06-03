@@ -380,26 +380,7 @@ func TestRootCommandUsesConfiguredStreams(t *testing.T) {
 	}
 }
 
-func TestTUIProgramOptionsEnableMouseByDefaultForWheelScrolling(t *testing.T) {
-	input := strings.NewReader("")
-	var output bytes.Buffer
-	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
-
-	startupOptions := reflect.ValueOf(program).Elem().FieldByName("startupOptions").Int()
-	const (
-		withMouseCellMotion = int64(1 << 1)
-		withMouseAllMotion  = int64(1 << 2)
-	)
-	if startupOptions&withMouseCellMotion == 0 {
-		t.Fatal("tui should capture mouse by default so wheel scrolling reaches the viewport")
-	}
-	if startupOptions&withMouseAllMotion != 0 {
-		t.Fatal("tui should not enable full mouse motion")
-	}
-}
-
-func TestTUIProgramOptionsCanDisableMouseCellMotion(t *testing.T) {
-	t.Setenv("CONAN_TUI_MOUSE", "0")
+func TestTUIProgramOptionsDisableMouseByDefaultForTextSelection(t *testing.T) {
 	input := strings.NewReader("")
 	var output bytes.Buffer
 	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
@@ -410,7 +391,26 @@ func TestTUIProgramOptionsCanDisableMouseCellMotion(t *testing.T) {
 		withMouseAllMotion  = int64(1 << 2)
 	)
 	if startupOptions&withMouseCellMotion != 0 {
-		t.Fatal("tui should disable mouse cell motion when CONAN_TUI_MOUSE=0")
+		t.Fatal("tui should not capture mouse by default so terminal text selection works")
+	}
+	if startupOptions&withMouseAllMotion != 0 {
+		t.Fatal("tui should not enable full mouse motion")
+	}
+}
+
+func TestTUIProgramOptionsCanOptInToMouseCellMotion(t *testing.T) {
+	t.Setenv("CONAN_TUI_MOUSE", "1")
+	input := strings.NewReader("")
+	var output bytes.Buffer
+	program := tea.NewProgram(nil, teaProgramOptions(input, &output)...)
+
+	startupOptions := reflect.ValueOf(program).Elem().FieldByName("startupOptions").Int()
+	const (
+		withMouseCellMotion = int64(1 << 1)
+		withMouseAllMotion  = int64(1 << 2)
+	)
+	if startupOptions&withMouseCellMotion == 0 {
+		t.Fatal("tui should enable mouse cell motion when CONAN_TUI_MOUSE=1")
 	}
 	if startupOptions&withMouseAllMotion != 0 {
 		t.Fatal("tui should not enable full mouse motion")
@@ -581,6 +581,51 @@ func TestRootCommandInitChecksAgentVersionsAndRendersWarning(t *testing.T) {
 		view := model.View()
 		if !strings.Contains(view, "Version warning") || !strings.Contains(view, "node-a: 1.2.2 (expected 1.2.3)") {
 			t.Fatalf("view missing version warning:\n%s", view)
+		}
+		return model, nil
+	}
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--home", home})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("root: %v", err)
+	}
+}
+
+func TestRootCommandDoesNotFetchNodeToolsBeforeTUIStartup(t *testing.T) {
+	oldRun := runTeaProgram
+	defer func() { runTeaProgram = oldRun }()
+	defer logging.Close()
+
+	rpcCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/rpc" {
+			rpcCalls++
+			_ = json.NewEncoder(w).Encode(mcpproto.NewSuccessResponse(json.RawMessage(`1`), map[string]interface{}{"tools": []interface{}{}}))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "clusters", "test"), 0755); err != nil {
+		t.Fatalf("mkdir cluster: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("default_cluster: test\nlogging:\n  level: debug\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "clusters", "test", "cluster.yaml"), []byte("agent:\n  listen: 127.0.0.1:9280\n"), 0644); err != nil {
+		t.Fatalf("write cluster: %v", err)
+	}
+	nodes := "nodes:\n  - name: node-a\n    host: 127.0.0.1\n    agent:\n      port: " + strings.TrimPrefix(srv.URL, "http://127.0.0.1:") + "\n"
+	if err := os.WriteFile(filepath.Join(home, "clusters", "test", "nodes.yaml"), []byte(nodes), 0644); err != nil {
+		t.Fatalf("write nodes: %v", err)
+	}
+
+	runTeaProgram = func(model tea.Model, in io.Reader, out io.Writer) (tea.Model, error) {
+		if rpcCalls != 0 {
+			t.Fatalf("node RPC calls before TUI startup = %d, want 0", rpcCalls)
 		}
 		return model, nil
 	}

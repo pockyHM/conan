@@ -67,6 +67,15 @@ func NewReviewer(cfg ReviewerConfig) *Reviewer {
 	}
 }
 
+func (r *Reviewer) SetProvider(provider llm.Provider, modelName string) {
+	if r == nil {
+		return
+	}
+	r.provider = provider
+	r.modelName = modelName
+	r.cache = make(map[string]RiskAssessment)
+}
+
 // Review performs a two-stage security review of a tool call.
 // Read-only tools are auto-allowed. Whitelisted shell commands are auto-allowed.
 // Everything else is assessed by the LLM provider (with session caching).
