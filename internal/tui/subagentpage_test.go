@@ -473,6 +473,77 @@ func TestSubagentDetailJKAlsoMovesCursor(t *testing.T) {
 	}
 }
 
+func TestCollectPendingSubagentRunIDsReturnsMostRecentReceiving(t *testing.T) {
+	runs := []subagentRunView{
+		{ID: "old1", Status: "completed"},
+		{ID: "old2", Status: "completed"},
+		{ID: "new1", Status: "receiving"},
+		{ID: "new2", Status: "receiving"},
+		{ID: "new3", Status: "receiving"},
+	}
+	ids := collectPendingSubagentRunIDs(runs, 2)
+	if len(ids) != 2 || ids[0] != "new2" || ids[1] != "new3" {
+		t.Fatalf("ids = %v, want [new2 new3]", ids)
+	}
+	all := collectPendingSubagentRunIDs(runs, 99)
+	if len(all) != 3 || all[0] != "new1" || all[1] != "new2" || all[2] != "new3" {
+		t.Fatalf("all = %v, want [new1 new2 new3]", all)
+	}
+	if got := collectPendingSubagentRunIDs(runs, 0); len(got) != 0 {
+		t.Fatalf("n=0 should return empty, got %v", got)
+	}
+}
+
+func TestSubagentDetailStreamingDispatchReusesRunIDs(t *testing.T) {
+	home := t.TempDir()
+	conv := conversation.New("test", nil, "m")
+	model := NewModel(ModelConfig{
+		Cluster:    "test",
+		Model:      "m",
+		ConfigHome: home,
+		Conv:       conv,
+		Subagents:  configschema.SubagentConfig{Enabled: true},
+		Provider:   &fakeProvider{},
+	})
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+	model.streamCh = make(chan llm.ChatEvent)
+	model.streamCtx = context.Background()
+
+	args := json.RawMessage(`{"tasks":[{"role":"investigator","task":"check disk"}]}`)
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+		ID: "sa1", Name: metaToolSubagentsRun, Arguments: args,
+	}})
+	model = next.(Model)
+
+	if len(model.subagentRuns) != 1 {
+		t.Fatalf("expected 1 subagent run, got %d", len(model.subagentRuns))
+	}
+	expectedRunID := model.subagentRuns[0].ID
+	if expectedRunID == "" {
+		t.Fatal("subagent run ID is empty")
+	}
+
+	cmd := model.dispatchSubagentsRun(1, llm.ToolCall{ID: "sa1", Name: metaToolSubagentsRun, Arguments: args})
+	if cmd == nil {
+		t.Fatal("dispatchSubagentsRun returned nil cmd")
+	}
+	msg := cmd()
+	multi, ok := msg.(multiToolResultMsg)
+	if !ok {
+		t.Fatalf("expected multiToolResultMsg, got %T", msg)
+	}
+	if len(multi.subagentEvents) != 1 {
+		t.Fatalf("expected 1 subagent in events map, got %d (map=%v)", len(multi.subagentEvents), multi.subagentEvents)
+	}
+	for id := range multi.subagentEvents {
+		if id != expectedRunID {
+			t.Fatalf("events map keyed by %q, want %q (run view ID must match dispatch request ID)", id, expectedRunID)
+		}
+	}
+}
+
 func TestSubagentDetailEventsArriveViaStreamingToolPath(t *testing.T) {
 	home := t.TempDir()
 	conv := conversation.New("test", nil, "m")

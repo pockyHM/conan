@@ -4527,6 +4527,19 @@ func singleNodeToolResult(streamID uint64, call llm.ToolCall, node, output strin
 	}
 }
 
+func collectPendingSubagentRunIDs(runs []subagentRunView, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	ids := make([]string, 0, n)
+	for i := len(runs) - 1; i >= 0 && len(ids) < n; i-- {
+		if runs[i].Status == "receiving" {
+			ids = append([]string{runs[i].ID}, ids...)
+		}
+	}
+	return ids
+}
+
 func (m Model) dispatchSubagentsRun(streamID uint64, call llm.ToolCall) tea.Cmd {
 	if !m.subagents.Enabled {
 		return func() tea.Msg {
@@ -4538,13 +4551,18 @@ func (m Model) dispatchSubagentsRun(streamID uint64, call llm.ToolCall) tea.Cmd 
 		if err != nil {
 			return multiToolResultMsg{streamID: streamID, Call: call, Results: []nodeToolResult{{Node: "local", Output: "invalid subagent tasks: " + err.Error(), Success: false}}}
 		}
+		pendingIDs := collectPendingSubagentRunIDs(m.subagentRuns, len(tasks))
 		requests := make([]subagent.Request, 0, len(tasks))
-		for _, task := range tasks {
+		for i, task := range tasks {
 			nodes := m.restrictSubagentNodes(task.Nodes)
 			if len(task.Nodes) > 0 && len(nodes) == 0 {
 				return multiToolResultMsg{streamID: streamID, Call: call, Results: []nodeToolResult{{Node: "local", Output: "subagent task has no allowed target nodes", Success: false}}}
 			}
-			requests = append(requests, m.newSubagentRequest(task.Role, task.Task, nodes))
+			req := m.newSubagentRequest(task.Role, task.Task, nodes)
+			if i < len(pendingIDs) {
+				req.ID = pendingIDs[i]
+			}
+			requests = append(requests, req)
 		}
 		ctx := m.streamCtx
 		if ctx == nil {
