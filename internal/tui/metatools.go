@@ -117,7 +117,7 @@ var metaToolDefs = []llm.ToolDef{
 	},
 	{
 		Name:        metaToolAskChoice,
-		Description: "Ask the user to choose one option in the TUI before continuing. Use this when the next step depends on a user decision, such as choosing a plan, approving a non-tool workflow choice, selecting a mode, or clarifying an ambiguous preference. Do not use for security approval of tool execution; Conan handles that separately.",
+		Description: "Ask the user to choose one or more options in the TUI before continuing. Use this when the next step depends on a user decision, such as choosing a plan, approving a non-tool workflow choice, selecting a mode, or clarifying an ambiguous preference. Set multiple=true when more than one option may apply. Do not use for security approval of tool execution; Conan handles that separately.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -137,6 +137,8 @@ var metaToolDefs = []llm.ToolDef{
 					}
 				},
 				"default_value": {"type": "string", "description": "Optional option value to preselect."},
+				"default_values": {"type": "array", "items": {"type": "string"}, "description": "Optional option values to preselect when multiple is true."},
+				"multiple": {"type": "boolean", "description": "Whether the user may select multiple options."},
 				"allow_cancel": {"type": "boolean", "description": "Whether Esc should return a cancellation result."}
 			},
 			"required": ["question", "options"]

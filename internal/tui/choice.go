@@ -20,19 +20,23 @@ type choiceOption struct {
 }
 
 type choiceState struct {
-	streamID    uint64
-	call        llm.ToolCall
-	question    string
-	options     []choiceOption
-	selected    int
-	allowCancel bool
+	streamID       uint64
+	call           llm.ToolCall
+	question       string
+	options        []choiceOption
+	selected       int
+	multiple       bool
+	selectedValues map[string]bool
+	allowCancel    bool
 }
 
 type choiceArgs struct {
-	Question     string         `json:"question"`
-	Options      []choiceOption `json:"options"`
-	DefaultValue string         `json:"default_value"`
-	AllowCancel  bool           `json:"allow_cancel"`
+	Question      string         `json:"question"`
+	Options       []choiceOption `json:"options"`
+	DefaultValue  string         `json:"default_value"`
+	DefaultValues []string       `json:"default_values"`
+	Multiple      bool           `json:"multiple"`
+	AllowCancel   bool           `json:"allow_cancel"`
 }
 
 func newChoiceState(streamID uint64, call llm.ToolCall) (choiceState, error) {
@@ -77,18 +81,36 @@ func newChoiceState(streamID uint64, call llm.ToolCall) (choiceState, error) {
 			break
 		}
 	}
+	selectedValues := make(map[string]bool)
+	if args.Multiple {
+		defaultValues := append([]string(nil), args.DefaultValues...)
+		if defaultValue != "" && len(defaultValues) == 0 {
+			defaultValues = append(defaultValues, defaultValue)
+		}
+		for _, value := range defaultValues {
+			value = strings.TrimSpace(value)
+			if _, ok := seen[value]; ok {
+				selectedValues[value] = true
+			}
+		}
+	}
 
 	return choiceState{
-		streamID:    streamID,
-		call:        call,
-		question:    args.Question,
-		options:     args.Options,
-		selected:    selected,
-		allowCancel: args.AllowCancel,
+		streamID:       streamID,
+		call:           call,
+		question:       args.Question,
+		options:        args.Options,
+		selected:       selected,
+		multiple:       args.Multiple,
+		selectedValues: selectedValues,
+		allowCancel:    args.AllowCancel,
 	}, nil
 }
 
 func (s choiceState) selectedResultJSON() string {
+	if s.multiple {
+		return s.selectedValuesResultJSON()
+	}
 	if len(s.options) == 0 || s.selected < 0 || s.selected >= len(s.options) {
 		return `{"selected":false}`
 	}
@@ -104,6 +126,47 @@ func (s choiceState) selectedResultJSON() string {
 	})
 	if err != nil {
 		return `{"selected":false}`
+	}
+	return string(result)
+}
+
+func (s choiceState) selectedValuesResultJSON() string {
+	var values []string
+	var labels []string
+	var options []struct {
+		Value string `json:"value"`
+		Label string `json:"label"`
+	}
+	for _, opt := range s.options {
+		if !s.selectedValues[opt.Value] {
+			continue
+		}
+		values = append(values, opt.Value)
+		labels = append(labels, opt.Label)
+		options = append(options, struct {
+			Value string `json:"value"`
+			Label string `json:"label"`
+		}{Value: opt.Value, Label: opt.Label})
+	}
+	if len(values) == 0 {
+		return `{"selected":false,"values":[],"labels":[],"options":[]}`
+	}
+	result, err := json.Marshal(struct {
+		Selected bool     `json:"selected"`
+		Values   []string `json:"values"`
+		Labels   []string `json:"labels"`
+		Options  []struct {
+			Value string `json:"value"`
+			Label string `json:"label"`
+		} `json:"options"`
+	}{
+		Selected: true,
+		Values:   values,
+		Labels:   labels,
+		Options:  options,
+	})
+	if err != nil {
+		return `{"selected":false,"values":[],"labels":[],"options":[]}`
 	}
 	return string(result)
 }
@@ -131,4 +194,19 @@ func (s *choiceState) moveChoice(delta int) {
 	if s.selected > last {
 		s.selected = last
 	}
+}
+
+func (s *choiceState) toggleSelectedValue() {
+	if !s.multiple || len(s.options) == 0 || s.selected < 0 || s.selected >= len(s.options) {
+		return
+	}
+	if s.selectedValues == nil {
+		s.selectedValues = make(map[string]bool)
+	}
+	value := s.options[s.selected].Value
+	if s.selectedValues[value] {
+		delete(s.selectedValues, value)
+		return
+	}
+	s.selectedValues[value] = true
 }

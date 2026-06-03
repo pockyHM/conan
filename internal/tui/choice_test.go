@@ -44,6 +44,39 @@ func TestNewChoiceStateValidatesAndSelectsDefault(t *testing.T) {
 	}
 }
 
+func TestNewChoiceStateSupportsMultipleDefaults(t *testing.T) {
+	call := llm.ToolCall{
+		ID:   "choice-1",
+		Name: metaToolAskChoice,
+		Arguments: json.RawMessage(`{
+			"question":"Pick targets",
+			"multiple":true,
+			"options":[
+				{"label":"Logs","value":"logs"},
+				{"label":"Metrics","value":"metrics"},
+				{"label":"Traces","value":"traces"}
+			],
+			"default_values":["logs","traces"]
+		}`),
+	}
+
+	state, err := newChoiceState(7, call)
+	if err != nil {
+		t.Fatalf("newChoiceState returned error: %v", err)
+	}
+	if !state.multiple {
+		t.Fatal("multiple should be true")
+	}
+	for _, want := range []string{"logs", "traces"} {
+		if !state.selectedValues[want] {
+			t.Fatalf("selectedValues = %#v, want %q selected", state.selectedValues, want)
+		}
+	}
+	if state.selectedValues["metrics"] {
+		t.Fatalf("selectedValues = %#v, metrics should not be selected", state.selectedValues)
+	}
+}
+
 func TestNewChoiceStateRejectsInvalidArguments(t *testing.T) {
 	tests := []struct {
 		name string
@@ -89,6 +122,24 @@ func TestChoiceResultJSON(t *testing.T) {
 	}
 }
 
+func TestMultiChoiceResultJSON(t *testing.T) {
+	state := choiceState{
+		options: []choiceOption{
+			{Label: "Logs", Value: "logs", Description: "Inspect logs"},
+			{Label: "Metrics", Value: "metrics"},
+			{Label: "Traces", Value: "traces"},
+		},
+		multiple:       true,
+		selectedValues: map[string]bool{"logs": true, "traces": true},
+	}
+
+	selected := state.selectedResultJSON()
+	want := `{"selected":true,"values":["logs","traces"],"labels":["Logs","Traces"],"options":[{"value":"logs","label":"Logs"},{"value":"traces","label":"Traces"}]}`
+	if selected != want {
+		t.Fatalf("selected result = %s, want %s", selected, want)
+	}
+}
+
 func TestChoiceMovementClampsToOptions(t *testing.T) {
 	state := choiceState{options: []choiceOption{{Label: "A", Value: "a"}, {Label: "B", Value: "b"}}}
 
@@ -100,5 +151,24 @@ func TestChoiceMovementClampsToOptions(t *testing.T) {
 	state.moveChoice(1)
 	if state.selected != 1 {
 		t.Fatalf("selected after down = %d, want 1", state.selected)
+	}
+}
+
+func TestMultiChoiceToggleSelectedValue(t *testing.T) {
+	state := choiceState{
+		options:        []choiceOption{{Label: "Logs", Value: "logs"}, {Label: "Metrics", Value: "metrics"}},
+		multiple:       true,
+		selectedValues: map[string]bool{"logs": true},
+	}
+
+	state.toggleSelectedValue()
+	if state.selectedValues["logs"] {
+		t.Fatalf("selectedValues = %#v, logs should be toggled off", state.selectedValues)
+	}
+
+	state.moveChoice(1)
+	state.toggleSelectedValue()
+	if !state.selectedValues["metrics"] {
+		t.Fatalf("selectedValues = %#v, metrics should be toggled on", state.selectedValues)
 	}
 }

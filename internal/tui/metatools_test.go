@@ -122,11 +122,11 @@ func TestAskChoiceToolDefinition(t *testing.T) {
 	if def == nil {
 		t.Fatal("ask_choice meta tool is not exposed")
 	}
-	if !strings.Contains(def.Description, "choose one option") {
+	if !strings.Contains(def.Description, "choose one or more options") {
 		t.Fatalf("description = %q, want choice guidance", def.Description)
 	}
 	schema := string(def.InputSchema)
-	for _, want := range []string{`"question"`, `"options"`, `"label"`, `"value"`, `"description"`, `"default_value"`, `"allow_cancel"`, `"minItems": 2`, `"maxItems": 10`} {
+	for _, want := range []string{`"question"`, `"options"`, `"label"`, `"value"`, `"description"`, `"default_value"`, `"default_values"`, `"multiple"`, `"allow_cancel"`, `"minItems": 2`, `"maxItems": 10`} {
 		if !strings.Contains(schema, want) {
 			t.Fatalf("ask_choice schema missing %s:\n%s", want, schema)
 		}

@@ -164,12 +164,12 @@ func renderStreamingMsg(content string) string {
 	return renderMarkdown(content) + "▌"
 }
 
-func renderReasoningMsg(content string, lang uiLanguage) string {
+func renderReasoningMsg(content string, elapsed time.Duration, lang uiLanguage) string {
 	line := lastNonEmptyLine(content)
 	if line == "" {
 		line = strings.TrimSpace(content)
 	}
-	return reasoningStyle.Render("◦ " + lang.tr("Thinking:", "思考:") + " " + line)
+	return reasoningStyle.Render("◦ " + lang.tr("Thinking:", "思考:") + " " + line + " " + renderThinkingMeta(elapsed, lang))
 }
 
 func lastNonEmptyLine(content string) string {
@@ -273,27 +273,18 @@ func multilineInputLineCount(input string) int {
 
 func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map[string]bool, lang uiLanguage, width int, bodyHeight int, frame int) string {
 	const maxNodeRows = 5
-	fullWordmark := strings.Join([]string{
-		" ██████╗ ██████╗ ███╗   ██╗ █████╗ ███╗   ██╗",
-		"██╔════╝██╔═══██╗████╗  ██║██╔══██╗████╗  ██║",
-		"██║     ██║   ██║██╔██╗ ██║███████║██╔██╗ ██║",
-		"██║     ██║   ██║██║╚██╗██║██╔══██║██║╚██╗██║",
-		"╚██████╗╚██████╔╝██║ ╚████║██║  ██║██║ ╚████║",
-		" ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═══╝",
-	}, "\n")
 	markFrame := "▌"
 	if len(startupFrames) > 0 {
 		markFrame = startupFrames[frame%len(startupFrames)]
 	}
-	compact := width > 0 && width < 56
+	fullWordmark := startupWordmark(frame)
+	compact := width > 0 && width < maxDisplayLineWidth(strings.Split(fullWordmark, "\n"))
 	if bodyHeight > 0 && bodyHeight < 10 {
 		compact = true
 	}
 	wordmark := fullWordmark
 	if compact {
 		wordmark = "CONAN " + markFrame
-	} else {
-		wordmark += "\n" + markFrame
 	}
 
 	selectedCount := 0
@@ -343,6 +334,44 @@ func renderStartupOverview(cluster, model string, nodes []NodeInfo, selected map
 	b.WriteString("\n")
 	b.WriteString(statusStyle.Render(lang.tr("Type a message or /help", "输入消息或 /help")))
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func startupWordmark(frame int) string {
+	lines := []string{
+		" █████  █████  █   █  █████  █   █",
+		"█       █   █  ██  █  █   █  ██  █",
+		"█       █   █  █ █ █  █████  █ █ █",
+		"█       █   █  █  ██  █   █  █  ██",
+		" █████  █████  █   █  █   █  █   █",
+	}
+	return strings.Join(animateStartupWordmark(lines, frame), "\n")
+}
+
+func animateStartupWordmark(lines []string, frame int) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	animated := make([]string, len(lines))
+	for i, line := range lines {
+		runes := []rune(line)
+		if frame > 0 {
+			for col, r := range runes {
+				if r == '█' && (col+i+frame)%17 == 0 {
+					runes[col] = '▓'
+				}
+			}
+		}
+		animated[i] = string(runes)
+	}
+	return animated
+}
+
+func maxDisplayLineWidth(lines []string) int {
+	width := 0
+	for _, line := range lines {
+		width = max(width, lipgloss.Width(line))
+	}
+	return width
 }
 
 func formatElapsed(elapsed time.Duration) string {
