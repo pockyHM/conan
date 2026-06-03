@@ -1179,6 +1179,14 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollViewportForKey(key)
 		return m, nil
 	case tea.KeyRunes:
+		if len(key.Runes) == 1 && key.Runes[0] == 'c' && !key.Paste &&
+			m.mode == modeChat && m.subagentRunsExpanded && len(m.subagentRuns) > 0 {
+			focusedID := m.subagentRuns[len(m.subagentRuns)-1].ID
+			if m.subagentManager != nil && focusedID != "" {
+				_ = m.subagentManager.Cancel(focusedID)
+			}
+			return m, nil
+		}
 		added := string(key.Runes)
 		if key.Paste {
 			images, ok, err := imageAttachmentsFromPastedText(added, m.attachmentDir(), len(m.attachedImages)+len(m.pendingImages)+1)
