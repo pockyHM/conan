@@ -29,6 +29,7 @@ func (m *Manager) Submit(ctx context.Context, runner Runner, req Request) (strin
 	id := req.ID
 	if id == "" {
 		id = models.NewID()
+		req.ID = id
 	}
 
 	subCtx, cancel := context.WithCancel(ctx)

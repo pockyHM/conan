@@ -127,6 +127,26 @@ func TestManagerResultChannelClosesAfterResult(t *testing.T) {
 	}
 }
 
+func TestManagerSubmitAutoIDMatchesResultID(t *testing.T) {
+	mgr := NewManager()
+	runner := Runner{Provider: &fakeProvider{}, Executor: &fakeExecutor{}}
+
+	id, _, results, err := mgr.Submit(context.Background(), runner, Request{
+		Role:     RoleInvestigator,
+		Task:     "x",
+		MaxTurns: 4,
+		MaxToolCalls: 4,
+	})
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	res := <-results
+	if res.ID != id {
+		t.Errorf("result.ID = %q, want %q (manager's auto-generated id)", res.ID, id)
+	}
+	mgr.CancelAll()
+}
+
 var _ = time.Second
 var _ = models.NewID
 var _ llm.ToolCall
