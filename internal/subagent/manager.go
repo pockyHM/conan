@@ -16,6 +16,15 @@ func NewManager() *Manager {
 	return &Manager{running: map[string]context.CancelFunc{}}
 }
 
+// Submit starts a subagent and returns channels for the caller to observe
+// its progress. The returned events/result channels are the same ones the
+// runner writes to — there is no tee or forwarder. The Manager tracks a
+// per-id cancel func so Cancel(id) can stop a specific in-flight runner.
+// The m.running map is allowed to retain stale entries for runners that
+// finish naturally: their cancel funcs are no-ops at that point, and
+// Cancel/Submit use the map as a lookup, not a strict live-set. This is
+// the simplest correct design and avoids the channel-consumption race
+// that a cleanup goroutine would introduce.
 func (m *Manager) Submit(ctx context.Context, runner Runner, req Request) (string, <-chan Event, <-chan Result, error) {
 	id := req.ID
 	if id == "" {
@@ -28,20 +37,6 @@ func (m *Manager) Submit(ctx context.Context, runner Runner, req Request) (strin
 	m.mu.Lock()
 	m.running[id] = cancel
 	m.mu.Unlock()
-
-	// Drain the events channel so the cleanup is triggered when the runner
-	// finishes (events and results are both closed by the same defers in
-	// runner.Run). We deliberately do not consume from results: results is
-	// a buffered channel of size 1 and the caller expects to receive the
-	// single result value, so a competing receive here would race with the
-	// caller and could deliver a zero-value Result to the caller.
-	go func() {
-		for range events {
-		}
-		m.mu.Lock()
-		delete(m.running, id)
-		m.mu.Unlock()
-	}()
 
 	return id, events, results, nil
 }
