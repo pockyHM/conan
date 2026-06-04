@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pockyHM/conan/internal/llm"
 )
 
 func TestTraceCommandOpensEmptyTracePage(t *testing.T) {
@@ -111,5 +114,83 @@ func TestTracePageBoundsTimelineRowsToHeight(t *testing.T) {
 	}
 	if rendered > 3 {
 		t.Fatalf("rendered %d trace node summaries, want at most 3:\n%s", rendered, view)
+	}
+}
+
+func TestTraceRecordsUserMessageWithoutProvider(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+
+	next, _ := model.submitMessage("check nginx status", nil)
+	model = next.(Model)
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len = %d, want 1", len(model.traceNodes))
+	}
+	node := model.traceNodes[0]
+	if node.Kind != traceUser || node.Status != traceDone {
+		t.Fatalf("user trace node = (%s, %s), want (%s, %s)", node.Kind, node.Status, traceUser, traceDone)
+	}
+	if !strings.Contains(node.Summary, "check nginx status") || !strings.Contains(node.Detail, "check nginx status") {
+		t.Fatalf("user trace node missing content: %#v", node)
+	}
+}
+
+func TestTraceUpdatesSingleAssistantNodeFromStreamingDeltas(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, ConfigHome: t.TempDir()})
+	model.streaming = true
+	model.activeStreamID = 1
+	model.streamStartedAt = time.Now()
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.TextDeltaEvent{Delta: "Hello "}})
+	model = next.(Model)
+	next, _ = model.Update(streamEventMsg{streamID: 1, Event: llm.TextDeltaEvent{Delta: "world"}})
+	model = next.(Model)
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len = %d, want 1", len(model.traceNodes))
+	}
+	node := model.traceNodes[0]
+	if node.Kind != traceAssistant || node.Status != traceRunning {
+		t.Fatalf("assistant trace node = (%s, %s), want (%s, %s)", node.Kind, node.Status, traceAssistant, traceRunning)
+	}
+	if node.Detail != "Hello world" || node.Summary != "Hello world" {
+		t.Fatalf("assistant trace content = summary %q detail %q, want Hello world", node.Summary, node.Detail)
+	}
+
+	next, _ = model.Update(streamEventMsg{streamID: 1, Event: llm.StopEvent{Reason: llm.StopEndTurn}})
+	model = next.(Model)
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len after stop = %d, want 1", len(model.traceNodes))
+	}
+	node = model.traceNodes[0]
+	if node.Status != traceDone || node.EndedAt.IsZero() {
+		t.Fatalf("assistant trace completion = (%s, ended %t), want done with end time", node.Status, !node.EndedAt.IsZero())
+	}
+}
+
+func TestTraceMarksAssistantNodeFailedOnStreamError(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, ConfigHome: t.TempDir()})
+	model.streaming = true
+	model.activeStreamID = 1
+	model.streamStartedAt = time.Now()
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.TextDeltaEvent{Delta: "partial"}})
+	model = next.(Model)
+	next, _ = model.Update(streamEventMsg{streamID: 1, Event: llm.ErrorEvent{Err: errors.New("stream failed")}})
+	model = next.(Model)
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len = %d, want 1", len(model.traceNodes))
+	}
+	node := model.traceNodes[0]
+	if node.Status != traceFailed || node.EndedAt.IsZero() {
+		t.Fatalf("assistant trace status = %s ended=%t, want failed with end time", node.Status, !node.EndedAt.IsZero())
+	}
+	if !strings.Contains(node.Detail, "partial") {
+		t.Fatalf("assistant failed trace should preserve partial detail: %#v", node)
+	}
+	if !strings.Contains(node.Detail, "stream failed") {
+		t.Fatalf("assistant failed trace should include error detail: %#v", node)
 	}
 }

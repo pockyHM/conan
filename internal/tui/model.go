@@ -735,6 +735,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch e := msg.Event.(type) {
 		case llm.TextDeltaEvent:
 			m.streamBuf += e.Delta
+			m = m.updateActiveTraceAssistant(m.streamBuf)
 		case llm.ReasoningDeltaEvent:
 			m.streamReasoningBuf += e.Delta
 		case llm.ToolCallEvent:
@@ -831,10 +832,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateViewportContent()
 			return m, nil
 		case llm.ErrorEvent:
-			if m.appendAssistantStreamContent() {
-				m.status = m.uiLanguage.tr("Stream error; partial content preserved: ", "流错误，已保留部分内容: ") + e.Err.Error()
+			errText := m.uiLanguage.tr("unknown error", "未知错误")
+			if e.Err != nil {
+				errText = e.Err.Error()
+			}
+			if m.appendAssistantStreamContentWithStatus(traceFailed, errText) {
+				m.status = m.uiLanguage.tr("Stream error; partial content preserved: ", "流错误，已保留部分内容: ") + errText
 			} else {
-				m.status = m.uiLanguage.tr("Stream error: ", "流错误: ") + e.Err.Error()
+				m = m.finishActiveTraceAssistant(traceFailed, errText)
+				m.status = m.uiLanguage.tr("Stream error: ", "流错误: ") + errText
 			}
 			m.finishStream(false)
 			if isContextLimitError(e.Err) {
@@ -2779,6 +2785,7 @@ func (m Model) submitProcessedMessage(visibleInput string, referenceInput string
 func (m Model) startSubmittedMessage(visibleInput string, llmInput string, thinking *bool) (tea.Model, tea.Cmd) {
 	if m.provider == nil {
 		m.messages = append(m.messages, chatMsg{role: "user", content: visibleInput})
+		m = m.recordUserTrace(visibleInput)
 		m.recordUserEvidence(visibleInput)
 		if m.conv != nil {
 			m.conv.AddUser(llmInput)
@@ -2789,6 +2796,7 @@ func (m Model) startSubmittedMessage(visibleInput string, llmInput string, think
 		return m, nil
 	}
 	m.messages = append(m.messages, chatMsg{role: "user", content: visibleInput})
+	m = m.recordUserTrace(visibleInput)
 	m.recordUserEvidence(visibleInput)
 	if m.conv != nil {
 		m.conv.AddUser(llmInput)
@@ -3879,6 +3887,7 @@ func (m Model) isActiveStream(streamID uint64) bool {
 
 func (m *Model) finishStream(cancel bool) {
 	if cancel {
+		*m = m.finishActiveTraceAssistant(traceFailed, "Interrupted")
 		m.cancelActiveStream()
 	}
 	m.clearNodeToolExposure()
@@ -3902,6 +3911,10 @@ func (m *Model) clearNodeToolExposure() {
 }
 
 func (m *Model) appendAssistantStreamContent() bool {
+	return m.appendAssistantStreamContentWithStatus(traceDone, "")
+}
+
+func (m *Model) appendAssistantStreamContentWithStatus(status traceStatus, fallbackDetail string) bool {
 	content := m.streamBuf
 	if content == "" {
 		m.streamReasoningBuf = ""
@@ -3912,6 +3925,8 @@ func (m *Model) appendAssistantStreamContent() bool {
 	}
 	m.messages = append(m.messages, chatMsg{role: "assistant", content: content, elapsed: m.streamElapsed()})
 	m.recordAssistantEvidence(content)
+	*m = m.updateActiveTraceAssistant(content)
+	*m = m.finishActiveTraceAssistant(status, fallbackDetail)
 	m.streamBuf = ""
 	m.streamReasoningBuf = ""
 	return true

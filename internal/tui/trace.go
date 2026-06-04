@@ -109,6 +109,68 @@ func (m Model) findTraceBySubagentID(id string) int {
 	return -1
 }
 
+func (m Model) recordUserTrace(content string) Model {
+	content = strings.TrimSpace(content)
+	return m.appendTraceNode(newTraceNode(traceUser, traceDone, "user", firstTraceLine(content), content))
+}
+
+func (m Model) ensureActiveTraceAssistant() Model {
+	if m.activeTraceAssistantID != "" {
+		for _, node := range m.traceNodes {
+			if node.ID == m.activeTraceAssistantID {
+				return m
+			}
+		}
+		m.activeTraceAssistantID = ""
+	}
+	node := newTraceNode(traceAssistant, traceRunning, "assistant", "receiving...", "")
+	m = m.appendTraceNode(node)
+	m.activeTraceAssistantID = node.ID
+	return m
+}
+
+func (m Model) updateActiveTraceAssistant(content string) Model {
+	content = strings.TrimSpace(content)
+	m = m.ensureActiveTraceAssistant()
+	return m.updateTraceNode(m.activeTraceAssistantID, func(node *traceNode) {
+		node.Status = traceRunning
+		node.Detail = content
+		if summary := firstTraceLine(content); summary != "" {
+			node.Summary = summary
+		}
+	})
+}
+
+func (m Model) finishActiveTraceAssistant(status traceStatus, fallbackDetail string) Model {
+	if m.activeTraceAssistantID == "" {
+		return m
+	}
+	id := m.activeTraceAssistantID
+	m.activeTraceAssistantID = ""
+	return m.updateTraceNode(id, func(node *traceNode) {
+		node.Status = status
+		node.EndedAt = time.Now()
+		detail := strings.TrimSpace(node.Detail)
+		fallback := strings.TrimSpace(fallbackDetail)
+		if status != traceDone && fallback != "" {
+			if detail == "" {
+				detail = fallback
+			} else if !strings.Contains(detail, fallback) {
+				detail += "\n\n" + fallback
+			}
+		} else if detail == "" {
+			detail = fallback
+		}
+		node.Detail = detail
+		if strings.TrimSpace(node.Summary) == "" || node.Summary == "receiving..." {
+			node.Summary = firstTraceLine(node.Detail)
+		}
+		if strings.TrimSpace(node.Summary) == "" {
+			node.Summary = string(status)
+		}
+	})
+}
+
 func traceKindLabel(kind traceKind, lang uiLanguage) string {
 	switch kind {
 	case traceUser:
