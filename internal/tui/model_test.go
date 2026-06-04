@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
 	"fmt"
+	"github.com/charmbracelet/x/ansi"
 	"image"
 	"image/color"
 	"image/png"
@@ -2591,11 +2593,14 @@ func TestAssistantMessageRendersElapsedAfterOutput(t *testing.T) {
 	}
 
 	view := model.View()
+	// Strip ANSI: glamour's dark style wraps each rendered word in escape codes,
+	// so the literal "hi\n\n✱ Took 1.2s" substring won't appear contiguously.
+	plainView := ansi.Strip(view)
 
-	if strings.Contains(view, "── 1.2s ──") {
+	if strings.Contains(plainView, "── 1.2s ──") {
 		t.Fatalf("view should not render elapsed as divider:\n%s", view)
 	}
-	if !strings.Contains(view, "hi\n\n✱ Took 1.2s") {
+	if !strings.Contains(plainView, "hi") || !strings.Contains(plainView, "✱ Took 1.2s") {
 		t.Fatalf("view missing elapsed footer after assistant output:\n%s", view)
 	}
 }
@@ -4064,7 +4069,10 @@ func TestStreamingUpdatesAccumulate(t *testing.T) {
 		t.Fatalf("streamBuf = %q, want empty", model.streamBuf)
 	}
 	view := model.View()
-	if !strings.Contains(view, "Hello world") {
+	// Strip ANSI: glamour's dark style wraps each rendered word in escape codes,
+	// so "Hello world" won't appear as a contiguous substring.
+	plainView := ansi.Strip(view)
+	if !strings.Contains(plainView, "Hello world") {
 		t.Fatalf("view missing streamed text:\n%s", view)
 	}
 	msgs := conv.Messages()
@@ -4336,7 +4344,10 @@ func TestStreamErrorPreservesPartialContent(t *testing.T) {
 		t.Fatalf("streamBuf = %q, want empty", model.streamBuf)
 	}
 	view := model.View()
-	if !strings.Contains(view, "Partial response") {
+	// Markdown rendering inserts ANSI escape sequences between words, so strip
+	// them before substring matching.
+	plainView := ansi.Strip(view)
+	if !strings.Contains(plainView, "Partial response") {
 		t.Fatalf("view missing preserved content:\n%s", view)
 	}
 	if !strings.Contains(model.status, "Stream error") || !strings.Contains(model.status, "preserved") {
@@ -4619,7 +4630,10 @@ func TestToolCallPreservesPrecedingAssistantText(t *testing.T) {
 		t.Fatalf("second message = %#v, want tool call placeholder", model.messages[1])
 	}
 	view := model.View()
-	if !strings.Contains(view, "Before the tool.") {
+	// Strip ANSI: glamour's dark style wraps each rendered word in escape codes,
+	// so "Before the tool." won't appear as a contiguous substring.
+	plainView := ansi.Strip(view)
+	if !strings.Contains(plainView, "Before the tool.") {
 		t.Fatalf("view missing preserved assistant text:\n%s", view)
 	}
 	msgs := conv.Messages()
@@ -4832,7 +4846,10 @@ func TestStreamErrorWithPartialBufferPreservesContent(t *testing.T) {
 		t.Fatalf("streamBuf = %q, want empty", model.streamBuf)
 	}
 	view := model.View()
-	if !strings.Contains(view, "Partial response") {
+	// Markdown rendering inserts ANSI escape sequences between words, so strip
+	// them before substring matching.
+	plainView := ansi.Strip(view)
+	if !strings.Contains(plainView, "Partial response") {
 		t.Fatalf("view missing preserved content:\n%s", view)
 	}
 	if !strings.Contains(model.status, "Stream error") || !strings.Contains(model.status, "preserved") {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -73,14 +74,33 @@ var thinkingFrames = []string{"◐", "◓", "◑", "◒"}
 var startupFrames = []string{"▌", "▐", "▔", "▁"}
 var subagentAnimFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// markdownStyleName picks the glamour style for assistant message rendering.
+// The TUI itself is dark-themed (fixed bright lipgloss colors throughout), so
+// we default to the built-in "dark" style which actually styles headings,
+// code, lists, etc. with ANSI colors. The previous WithEnvironmentConfig path
+// could fall through to glamour's "notty" preset whenever stdout wasn't
+// recognized as a terminal — that preset is plain text, so headings were
+// displayed as "## 标题" with no visual treatment. Users can still override
+// via the GLAMOUR_STYLE env var (e.g. "light", "dracula", "pink").
+func markdownStyleName() string {
+	name := strings.TrimSpace(os.Getenv("GLAMOUR_STYLE"))
+	if name == "" || name == "auto" {
+		return "dark"
+	}
+	return name
+}
+
 func init() {
 	var err error
 	mdRenderer, err = glamour.NewTermRenderer(
-		glamour.WithEnvironmentConfig(),
+		glamour.WithStandardStyle(markdownStyleName()),
 		glamour.WithWordWrap(80),
 	)
 	if err != nil {
-		mdRenderer, _ = glamour.NewTermRenderer(glamour.WithWordWrap(80))
+		mdRenderer, _ = glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(80),
+		)
 	}
 }
 
