@@ -7594,3 +7594,120 @@ func TestConfirmNoCancelsTool(t *testing.T) {
 		t.Fatalf("cancelled tool should show cancelled:\n%s", view)
 	}
 }
+
+func TestParallelRiskConfirmationsAreQueued(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Provider: &stubRiskProvider{response: `{"risk_level":"confirm","reason":"multi"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+		Nodes:    []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	calls := []llm.ToolCall{
+		{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)},
+		{ID: "tc2", Name: "shell_run", Arguments: []byte(`{"command":"date"}`)},
+		{ID: "tc3", Name: "shell_run", Arguments: []byte(`{"command":"whoami"}`)},
+		{ID: "tc4", Name: "shell_run", Arguments: []byte(`{"command":"hostname"}`)},
+	}
+	for _, c := range calls {
+		next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+			ID: c.ID, Name: c.Name, Arguments: c.Arguments,
+		}})
+		model = next.(Model)
+		riskMsg := execCmd(t, cmd)
+		if riskMsg == nil {
+			t.Fatalf("call %s: risk cmd was nil", c.ID)
+		}
+		next, _ = model.Update(riskMsg)
+		model = next.(Model)
+	}
+
+	if model.streamToolExpected != len(calls) {
+		t.Fatalf("streamToolExpected = %d, want %d", model.streamToolExpected, len(calls))
+	}
+	if model.mode != modeConfirm {
+		t.Fatalf("mode = %v, want modeConfirm after first risk", model.mode)
+	}
+	if model.pendingToolCall == nil || model.pendingToolCall.ID != "tc1" {
+		t.Fatalf("first pending = %#v, want tc1", model.pendingToolCall)
+	}
+	if len(model.pendingToolQueue) != len(calls)-1 {
+		t.Fatalf("queue len = %d, want %d", len(model.pendingToolQueue), len(calls)-1)
+	}
+
+	for i, c := range calls {
+		if model.pendingToolCall == nil || model.pendingToolCall.ID != c.ID {
+			t.Fatalf("round %d: pending = %#v, want %s", i, model.pendingToolCall, c.ID)
+		}
+		if model.mode != modeConfirm {
+			t.Fatalf("round %d: mode = %v, want modeConfirm", i, model.mode)
+		}
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		model = next.(Model)
+	}
+
+	if model.mode == modeConfirm {
+		t.Fatalf("mode should leave modeConfirm once queue is drained, still in %v with pending=%#v queue=%#v", model.mode, model.pendingToolCall, model.pendingToolQueue)
+	}
+	if model.pendingToolCall != nil {
+		t.Fatalf("pending should be nil after queue drain, got %#v", model.pendingToolCall)
+	}
+	if len(model.pendingToolQueue) != 0 {
+		t.Fatalf("queue should be empty, got %d entries", len(model.pendingToolQueue))
+	}
+}
+
+func TestParallelRiskConfirmationsEscCancelsAll(t *testing.T) {
+	conv := conversation.New("test", nil, "model")
+	reviewer := security.NewReviewer(security.ReviewerConfig{
+		Provider: &stubRiskProvider{response: `{"risk_level":"confirm","reason":"multi"}`},
+	})
+	model := NewModel(ModelConfig{
+		Cluster:  "test",
+		Model:    "m",
+		Conv:     conv,
+		Reviewer: reviewer,
+		Nodes:    []NodeInfo{{Name: "node-01", Host: "10.0.1.1", Online: true}},
+	})
+	model.selectedNodes = map[string]bool{"node-01": true}
+	model.streaming = true
+	model.streamID = 1
+	model.activeStreamID = 1
+
+	calls := []llm.ToolCall{
+		{ID: "tc1", Name: "shell_run", Arguments: []byte(`{"command":"uptime"}`)},
+		{ID: "tc2", Name: "shell_run", Arguments: []byte(`{"command":"date"}`)},
+	}
+	for _, c := range calls {
+		next, cmd := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{
+			ID: c.ID, Name: c.Name, Arguments: c.Arguments,
+		}})
+		model = next.(Model)
+		riskMsg := execCmd(t, cmd)
+		next, _ = model.Update(riskMsg)
+		model = next.(Model)
+	}
+
+	for i := 0; i < len(calls); i++ {
+		if model.pendingToolCall == nil {
+			t.Fatalf("round %d: pending is nil", i)
+		}
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		model = next.(Model)
+	}
+	if model.mode == modeConfirm {
+		t.Fatalf("Esc should have drained queue, still in modeConfirm")
+	}
+	if model.pendingToolCall != nil || len(model.pendingToolQueue) != 0 {
+		t.Fatalf("queue not drained: pending=%#v queue=%#v", model.pendingToolCall, model.pendingToolQueue)
+	}
+}

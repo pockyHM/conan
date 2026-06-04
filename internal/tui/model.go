@@ -150,6 +150,11 @@ type nodePromptState struct {
 	secret   bool
 }
 
+type pendingRiskEntry struct {
+	call       llm.ToolCall
+	assessment security.RiskAssessment
+}
+
 type nodeAddFormResultMsg struct {
 	result  nodeadd.Result
 	results []nodeadd.Result
@@ -212,6 +217,7 @@ type Model struct {
 	incidentRecorder    *evidence.Recorder
 	pendingToolCall     *llm.ToolCall
 	pendingRisk         *security.RiskAssessment
+	pendingToolQueue    []pendingRiskEntry
 	confirmChoice       int // 0=Allow, 1=Deny
 	choice              choiceState
 	nodePrompt          nodePromptState
@@ -678,11 +684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.recordRiskEvidence(msg.call, msg.assessment, "pending confirmation")
 				m.logAuditDecision(msg.call, msg.assessment, "pending confirmation")
-				m.mode = modeConfirm
-				m.pendingToolCall = &msg.call
-				m.pendingRisk = &msg.assessment
-				m.input = ""
-				m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
+				m.enqueuePendingToolConfirmation(msg.call, msg.assessment, msg.streamID)
 				return m, nil
 			}
 			m.recordRiskEvidence(msg.call, msg.assessment, "dispatched")
@@ -702,11 +704,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case security.RiskConfirm:
 			m.recordRiskEvidence(msg.call, msg.assessment, "pending confirmation")
 			m.logAuditDecision(msg.call, msg.assessment, "pending confirmation")
-			m.mode = modeConfirm
-			m.pendingToolCall = &msg.call
-			m.pendingRisk = &msg.assessment
-			m.input = ""
-			m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
+			m.enqueuePendingToolConfirmation(msg.call, msg.assessment, msg.streamID)
 			return m, nil
 		}
 
@@ -1612,7 +1610,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = m.uiLanguage.tr("Approved, executing...", "已批准，正在执行...")
 			m.recordRiskEvidence(call, derefRiskAssessment(assessment), "approved")
 			m.logAuditDecision(call, derefRiskAssessment(assessment), "approved")
-			return m, m.dispatchTool(m.activeStreamID, call)
+			return m, m.dispatchAfterConfirmation(call)
 		}
 		if choice == 1 && addToAllowlist {
 			if err := m.addPendingToolToAllowlist(call); err != nil {
@@ -1626,7 +1624,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = m.uiLanguage.tr("Approved and added to allowlist, executing...", "已批准并加入白名单，正在执行...")
 			m.recordRiskEvidence(call, derefRiskAssessment(assessment), "approved")
 			m.logAuditDecision(call, derefRiskAssessment(assessment), "approved and allowlisted")
-			return m, m.dispatchTool(m.activeStreamID, call)
+			return m, m.dispatchAfterConfirmation(call)
 		}
 		m.recordRiskEvidence(call, derefRiskAssessment(assessment), "cancelled")
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
@@ -1638,7 +1636,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m = m.recordToolResultTrace(call, results, cancelled)
 		m.status = m.uiLanguage.tr("Ready", "就绪")
-		return m.completeToolAndResume(m.activeStreamID, call)
+		return m.completeCancelledAndAdvance(call)
 	case tea.KeyEsc:
 		call := *m.pendingToolCall
 		assessment := m.pendingRisk
@@ -1656,7 +1654,7 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m = m.recordToolResultTrace(call, results, cancelled)
 		m.status = m.uiLanguage.tr("Ready", "就绪")
-		return m.completeToolAndResume(m.activeStreamID, call)
+		return m.completeCancelledAndAdvance(call)
 	default:
 		return m, nil
 	}
@@ -1670,6 +1668,66 @@ func (m *Model) addPendingToolToAllowlist(call llm.ToolCall) error {
 		return m.addPendingLocalFileToAllowlist(call)
 	}
 	return fmt.Errorf("tool cannot be added to allowlist: %s", call.Name)
+}
+
+func (m *Model) enqueuePendingToolConfirmation(call llm.ToolCall, assessment security.RiskAssessment, streamID uint64) {
+	if m.pendingToolCall == nil {
+		c := call
+		m.pendingToolCall = &c
+		a := assessment
+		m.pendingRisk = &a
+		m.confirmChoice = 0
+		m.input = ""
+		m.mode = modeConfirm
+		m.status = m.uiLanguage.tr("Use ↑↓ to choose, Enter to confirm", "使用 ↑↓ 选择，Enter 确认")
+		return
+	}
+	m.pendingToolQueue = append(m.pendingToolQueue, pendingRiskEntry{call: call, assessment: assessment})
+	m.status = m.uiLanguage.tr(
+		fmt.Sprintf("Use ↑↓ to choose, Enter to confirm (%d more pending)", len(m.pendingToolQueue)),
+		fmt.Sprintf("使用 ↑↓ 选择，Enter 确认（还有 %d 个待确认）", len(m.pendingToolQueue)),
+	)
+	_ = streamID
+}
+
+func (m *Model) advancePendingToolQueue() {
+	if len(m.pendingToolQueue) == 0 {
+		m.pendingToolCall = nil
+		m.pendingRisk = nil
+		m.confirmChoice = 0
+		if m.mode == modeConfirm {
+			m.mode = modeChat
+		}
+		return
+	}
+	next := m.pendingToolQueue[0]
+	m.pendingToolQueue = m.pendingToolQueue[1:]
+	c := next.call
+	m.pendingToolCall = &c
+	a := next.assessment
+	m.pendingRisk = &a
+	m.confirmChoice = 0
+	m.input = ""
+	m.mode = modeConfirm
+	m.status = m.uiLanguage.tr(
+		fmt.Sprintf("Use ↑↓ to choose, Enter to confirm (%d more pending)", len(m.pendingToolQueue)),
+		fmt.Sprintf("使用 ↑↓ 选择，Enter 确认（还有 %d 个待确认）", len(m.pendingToolQueue)),
+	)
+}
+
+func (m Model) hasQueuedPendingToolConfirmations() bool {
+	return len(m.pendingToolQueue) > 0
+}
+
+func (m *Model) dispatchAfterConfirmation(call llm.ToolCall) tea.Cmd {
+	dispatchCmd := m.dispatchTool(m.activeStreamID, call)
+	m.advancePendingToolQueue()
+	return dispatchCmd
+}
+
+func (m *Model) completeCancelledAndAdvance(call llm.ToolCall) (tea.Model, tea.Cmd) {
+	m.advancePendingToolQueue()
+	return m.completeToolAndResume(m.activeStreamID, call)
 }
 
 func (m Model) handleNodeSelectKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
