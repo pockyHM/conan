@@ -37,6 +37,7 @@ func TestParseSlashCommand(t *testing.T) {
 		{input: "/runbook draft incidents/2026-05-23-api.md", kind: CommandRunbook, arg: "draft incidents/2026-05-23-api.md"},
 		{input: "/runbook preview runbooks/2026-05-23-nginx-502.md", kind: CommandRunbook, arg: "preview runbooks/2026-05-23-nginx-502.md"},
 		{input: "/runbook run runbooks/2026-05-23-nginx-502.md", kind: CommandRunbook, arg: "run runbooks/2026-05-23-nginx-502.md"},
+		{input: "/trace", kind: CommandTrace},
 	}
 
 	for _, tt := range tests {

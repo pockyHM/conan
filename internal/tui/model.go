@@ -132,6 +132,7 @@ const (
 	modeSkillsManage
 	modeSkillInstallSelect
 	modeSubagentList
+	modeTrace
 )
 
 type pingResultMsg struct {
@@ -229,6 +230,7 @@ type Model struct {
 	subagentDetailVisible      bool
 	subagentDetailCursor       int
 	subagentDetailExpanded     map[int]bool
+	traceDetailVisible         bool
 	sessionList                sessionList
 	configScreen               configScreen
 	ac                         autocomplete
@@ -1103,6 +1105,9 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == modeSubagentList {
 		return m.handleSubagentListKey(key)
+	}
+	if m.mode == modeTrace {
+		return m.handleTraceKey(key)
 	}
 	if m.mode == modeConfirm {
 		return m.handleConfirmKey(key)
@@ -2116,6 +2121,9 @@ func (m Model) View() string {
 	if m.mode == modeSubagentList {
 		return header + "\n\n" + m.renderSubagentPage() + "\n\n" + statusView
 	}
+	if m.mode == modeTrace {
+		return header + "\n\n" + m.renderTracePage() + "\n\n" + statusView
+	}
 	var body string
 
 	if m.viewportReady {
@@ -2803,7 +2811,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 	case CommandHelp:
 		m.messages = append(m.messages, chatMsg{
 			role:    "assistant",
-			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /config /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit] /incident <start|status|note|export|close> /runbook <draft|preview|run>", "Conan: /help /clear /compact [重点] /config /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit] /incident <start|status|note|export|close> /runbook <draft|preview|run>"),
+			content: m.uiLanguage.tr("Conan: /help /clear /compact [focus] /config /exit /cluster [name] /skills /skill <name> [arguments] /lang /model [name] /node [off] /nodes /memory /resume /thinking <message> /agent <role> <task> /subagents [on|off|limit] /incident <start|status|note|export|close> /runbook <draft|preview|run> /trace", "Conan: /help /clear /compact [重点] /config /exit /cluster [名称] /skills /skill <名称> [参数] /lang /model [名称] /node [off] /nodes /memory /resume /thinking <消息> /agent <角色> <任务> /subagents [on|off|limit] /incident <start|status|note|export|close> /runbook <draft|preview|run> /trace"),
 		})
 		m.status = m.uiLanguage.tr("Help shown", "已显示帮助")
 	case CommandClear:
@@ -2964,6 +2972,10 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		return m.applyIncidentCommand(cmd.Arg)
 	case CommandRunbook:
 		return m.applyRunbookCommand(cmd.Arg)
+	case CommandTrace:
+		m.mode = modeTrace
+		m.traceDetailVisible = false
+		m.status = m.uiLanguage.tr("Trace opened", "已打开链路")
 	default:
 		name, rest := splitSkillInvocationArg(cmd.Arg)
 		if skill, found := m.findSkill(name); found {

@@ -24,6 +24,7 @@ const (
 	CommandSubagents CommandKind = "subagents"
 	CommandIncident  CommandKind = "incident"
 	CommandRunbook   CommandKind = "runbook"
+	CommandTrace     CommandKind = "trace"
 	CommandUnknown   CommandKind = "unknown"
 )
 
@@ -90,6 +91,8 @@ func ParseSlashCommand(input string) (SlashCommand, bool) {
 		return SlashCommand{Kind: CommandIncident, Arg: arg}, true
 	case "runbook":
 		return SlashCommand{Kind: CommandRunbook, Arg: arg}, true
+	case "trace":
+		return SlashCommand{Kind: CommandTrace, Arg: arg}, true
 	default:
 		if arg != "" {
 			return SlashCommand{Kind: CommandUnknown, Arg: name + " " + arg}, true
