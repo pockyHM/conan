@@ -9,8 +9,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pockyHM/conan/internal/conversation"
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/memory"
 	"github.com/pockyHM/conan/internal/subagent"
+	"github.com/pockyHM/conan/pkg/models"
 )
 
 func TestTraceCommandOpensEmptyTracePage(t *testing.T) {
@@ -275,5 +278,81 @@ func TestTraceRecordsSubagentRunAndResult(t *testing.T) {
 	}
 	if !strings.Contains(node.Summary, "nginx logs are clean") || !strings.Contains(node.Detail, "nginx logs are clean") {
 		t.Fatalf("subagent trace missing result detail: %#v", node)
+	}
+}
+
+func TestTraceClearsWithClearCommand(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", ConfigHome: t.TempDir()})
+	model = model.appendTraceNode(newTraceNode(traceUser, traceDone, "user", "hello", "hello"))
+	model.activeTraceAssistantID = "assistant-1"
+	model.traceDetailVisible = true
+	model.traceCursor = 4
+
+	next, _ := model.applyCommand(SlashCommand{Kind: CommandClear})
+	model = next
+
+	if len(model.traceNodes) != 0 {
+		t.Fatalf("traceNodes len = %d, want 0", len(model.traceNodes))
+	}
+	if model.activeTraceAssistantID != "" || model.traceDetailVisible || model.traceCursor != 0 {
+		t.Fatalf("trace state not reset: active=%q detail=%v cursor=%d", model.activeTraceAssistantID, model.traceDetailVisible, model.traceCursor)
+	}
+}
+
+func TestTraceRebuildsFromLoadedSession(t *testing.T) {
+	saved := []models.Message{
+		{ID: "m1", Role: conversation.RoleUser, Content: "check api"},
+		{ID: "m2", Role: conversation.RoleAssistant, Content: "checking"},
+		{ID: "m3", Role: conversation.RoleAssistant, ToolCallID: "call-1", ToolName: metaToolExec, ToolInput: `{"command":"uptime"}`},
+		{ID: "m4", Role: conversation.RoleTool, ToolCallID: "call-1", Content: "ok", ToolOutput: "ok"},
+	}
+	data, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", ConfigHome: t.TempDir()})
+	model.traceNodes = []traceNode{newTraceNode(traceUser, traceDone, "old", "old", "old")}
+
+	model.applyLoadedSession(&memory.ConversationRecord{
+		ID:       "conv-trace",
+		Cluster:  "prod",
+		Model:    "model",
+		Messages: string(data),
+	})
+
+	if len(model.traceNodes) != 4 {
+		t.Fatalf("traceNodes len = %d, want 4: %#v", len(model.traceNodes), model.traceNodes)
+	}
+	if model.traceNodes[0].Kind != traceUser || model.traceNodes[1].Kind != traceAssistant || model.traceNodes[2].Kind != traceToolCall || model.traceNodes[3].Kind != traceToolResult {
+		t.Fatalf("unexpected rebuilt trace kinds: %#v", model.traceNodes)
+	}
+	if model.traceNodes[2].ToolCallID != "call-1" || !strings.Contains(model.traceNodes[3].Detail, "ok") {
+		t.Fatalf("rebuilt tool trace missing IDs/details: %#v", model.traceNodes)
+	}
+}
+
+func TestTraceDetailShowsIdentifiersAndElapsed(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", ConfigHome: t.TempDir()})
+	started := time.Now().Add(-1500 * time.Millisecond)
+	model.mode = modeTrace
+	model.traceDetailVisible = true
+	model.traceNodes = []traceNode{{
+		ID:         "trace-1",
+		Kind:       traceToolResult,
+		Status:     traceDone,
+		Title:      "tool result",
+		Summary:    "local · ok",
+		Detail:     "all good",
+		StartedAt:  started,
+		EndedAt:    started.Add(1500 * time.Millisecond),
+		ToolCallID: "call-1",
+		ToolName:   metaToolExec,
+	}}
+
+	view := model.View()
+	for _, want := range []string{"Tool call ID", "call-1", "Tool", metaToolExec, "Elapsed", "1.5s"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("trace detail missing %q:\n%s", want, view)
+		}
 	}
 }

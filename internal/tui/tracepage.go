@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -151,9 +152,9 @@ func (m Model) renderTraceDetailPage() string {
 		subagentPageLabelStyle.Render(m.uiLanguage.tr("Type: ", "类型: ")) + traceKindLabel(node.Kind, m.uiLanguage),
 		subagentPageLabelStyle.Render(m.uiLanguage.tr("Status: ", "状态: ")) + traceStatusLabel(node.Status, m.uiLanguage),
 		subagentPageLabelStyle.Render(m.uiLanguage.tr("Summary: ", "摘要: ")) + node.Summary,
-		"",
-		subagentPageSectionStyle.Render(m.uiLanguage.tr("Detail", "详情")),
 	}
+	lines = append(lines, m.renderTraceDetailMetadata(node)...)
+	lines = append(lines, "", subagentPageSectionStyle.Render(m.uiLanguage.tr("Detail", "详情")))
 	detail := strings.TrimSpace(node.Detail)
 	if detail == "" {
 		detail = m.uiLanguage.tr("(no detail)", "（无详情）")
@@ -163,6 +164,47 @@ func (m Model) renderTraceDetailPage() string {
 	}
 	lines = append(lines, "", tracePageHelpStyle.Render(m.uiLanguage.tr("Esc back", "Esc 返回")))
 	return tracePageBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderTraceDetailMetadata(node traceNode) []string {
+	var lines []string
+	if node.ParentID != "" {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Parent ID: ", "父节点 ID: "))+node.ParentID)
+	}
+	if node.ToolCallID != "" {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Tool call ID: ", "工具调用 ID: "))+node.ToolCallID)
+	}
+	if node.ToolName != "" {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Tool: ", "工具: "))+node.ToolName)
+	}
+	if node.SubagentID != "" {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Subagent ID: ", "子智能体 ID: "))+node.SubagentID)
+	}
+	if !node.StartedAt.IsZero() {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Started: ", "开始: "))+node.StartedAt.Format("15:04:05"))
+	}
+	if !node.EndedAt.IsZero() {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Ended: ", "结束: "))+node.EndedAt.Format("15:04:05"))
+	}
+	if elapsed, ok := traceNodeElapsed(node); ok {
+		lines = append(lines, subagentPageLabelStyle.Render(m.uiLanguage.tr("Elapsed: ", "耗时: "))+elapsed)
+	}
+	return lines
+}
+
+func traceNodeElapsed(node traceNode) (string, bool) {
+	if node.StartedAt.IsZero() {
+		return "", false
+	}
+	end := node.EndedAt
+	if end.IsZero() {
+		end = time.Now()
+	}
+	if end.Before(node.StartedAt) {
+		return "", false
+	}
+	elapsed := end.Sub(node.StartedAt).Round(100 * time.Millisecond)
+	return elapsed.String(), true
 }
 
 func traceMarker(node traceNode) string {

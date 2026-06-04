@@ -111,6 +111,14 @@ func (m Model) findTraceBySubagentID(id string) int {
 	return -1
 }
 
+func (m Model) clearTraceState() Model {
+	m.traceNodes = nil
+	m.traceCursor = 0
+	m.traceDetailVisible = false
+	m.activeTraceAssistantID = ""
+	return m
+}
+
 func (m Model) recordUserTrace(content string) Model {
 	content = strings.TrimSpace(content)
 	return m.appendTraceNode(newTraceNode(traceUser, traceDone, "user", firstTraceLine(content), content))

@@ -1171,6 +1171,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyCtrlL:
 		m.messages = nil
+		m = m.clearTraceState()
 		m.lastBodyContent = ""
 		m.status = m.uiLanguage.tr("Conversation cleared", "对话已清空")
 		return m, nil
@@ -2842,6 +2843,7 @@ func (m Model) applyCommand(cmd SlashCommand) (Model, tea.Cmd) {
 		m.status = m.uiLanguage.tr("Help shown", "已显示帮助")
 	case CommandClear:
 		m.messages = nil
+		m = m.clearTraceState()
 		if m.conv != nil {
 			m.conv.Clear()
 		}
@@ -5655,6 +5657,7 @@ func (m *Model) applyLoadedSession(rec *memory.ConversationRecord) {
 		visibleMessages = visibleMessages[len(visibleMessages)-maxResumedVisibleMessages:]
 	}
 	m.messages = chatMessagesFromModels(visibleMessages)
+	*m = m.rebuildTraceFromMessages(messages)
 	m.lastBodyContent = ""
 }
 
