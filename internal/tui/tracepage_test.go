@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -83,5 +84,32 @@ func TestTracePageNavigationAndDetail(t *testing.T) {
 	model = next.(Model)
 	if model.mode != modeChat {
 		t.Fatalf("mode = %v, want modeChat", model.mode)
+	}
+}
+
+func TestTracePageBoundsTimelineRowsToHeight(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.mode = modeTrace
+	model.height = 14
+	for i := 0; i < 20; i++ {
+		summary := fmt.Sprintf("trace-node-%02d", i)
+		model = model.appendTraceNode(newTraceNode(traceUser, traceDone, "user", summary, summary))
+	}
+	model.traceCursor = 10
+
+	view := model.renderTracePage()
+	for _, want := range []string{"Trace", "20 nodes", "Enter detail", "trace-node-10"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("bounded trace view missing %q:\n%s", want, view)
+		}
+	}
+	rendered := 0
+	for i := 0; i < 20; i++ {
+		if strings.Contains(view, fmt.Sprintf("trace-node-%02d", i)) {
+			rendered++
+		}
+	}
+	if rendered > 3 {
+		t.Fatalf("rendered %d trace node summaries, want at most 3:\n%s", rendered, view)
 	}
 }

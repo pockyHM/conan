@@ -53,8 +53,10 @@ func (m Model) renderTraceTimelinePage() string {
 		return tracePageBoxStyle.Render(strings.Join([]string{title, "", empty, "", help}, "\n"))
 	}
 
+	start, end := m.visibleTraceTimelineRange()
 	lines := []string{title, ""}
-	for i, node := range m.traceNodes {
+	for i := start; i < end; i++ {
+		node := m.traceNodes[i]
 		lines = append(lines, m.renderTraceTimelineNode(i, node, i == len(m.traceNodes)-1))
 	}
 	lines = append(lines, "", tracePageHelpStyle.Render(m.uiLanguage.tr(
@@ -62,6 +64,41 @@ func (m Model) renderTraceTimelinePage() string {
 		"↑↓/jk 选择 · Enter 详情 · Esc 关闭",
 	)))
 	return tracePageBoxStyle.Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) visibleTraceTimelineRange() (int, int) {
+	total := len(m.traceNodes)
+	if total == 0 {
+		return 0, 0
+	}
+	if m.height <= 0 {
+		return 0, total
+	}
+	const (
+		traceTimelineReservedLines = 6
+		traceTimelineLinesPerNode  = 3
+	)
+	visible := max((m.height-traceTimelineReservedLines)/traceTimelineLinesPerNode, 1)
+	if visible >= total {
+		return 0, total
+	}
+	cursor := m.traceCursor
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= total {
+		cursor = total - 1
+	}
+	start := cursor - visible/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + visible
+	if end > total {
+		end = total
+		start = max(end-visible, 0)
+	}
+	return start, end
 }
 
 func (m Model) renderTraceTimelineNode(index int, node traceNode, last bool) string {
