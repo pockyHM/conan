@@ -2724,10 +2724,13 @@ func TestManualSubagentRendersPromptPreviewWithShortID(t *testing.T) {
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 	model = next.(Model)
 	pageView := model.View()
-	for _, want := range []string{id, "reviewer", "receiving", "check config"} {
+	for _, want := range []string{id, "reviewer", "receivin", "check config"} {
 		if !strings.Contains(pageView, want) {
 			t.Fatalf("subagent page missing %q:\n%s", want, pageView)
 		}
+	}
+	if !strings.Contains(pageView, subagentSpinnerGlyph(0)) {
+		t.Fatalf("subagent page missing spinner glyph for active run:\n%s", pageView)
 	}
 }
 
@@ -2811,8 +2814,11 @@ func TestSubagentsRunStatusUpdatesWhenToolCallStarts(t *testing.T) {
 	}})
 	model = next.(Model)
 
-	if !strings.Contains(model.View(), "Subagents running: 2 active") {
+	if !strings.Contains(model.View(), "Subagents running: 0/2 active") {
 		t.Fatalf("view missing running subagents status:\n%s", model.View())
+	}
+	if !strings.Contains(model.View(), subagentSpinnerGlyph(model.subagentAnimFrame)) {
+		t.Fatalf("chat view missing spinner for active subagents:\n%s", model.View())
 	}
 }
 

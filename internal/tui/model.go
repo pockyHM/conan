@@ -258,6 +258,7 @@ type Model struct {
 	streamEventSeq     int
 	thinkingFrame      int
 	startupFrame       int
+	subagentAnimFrame  int
 	compacting         bool
 	compactID          uint64
 	compactFrame       int
@@ -483,6 +484,8 @@ type streamDoneMsg struct {
 type thinkingTickMsg struct {
 	streamID uint64
 }
+
+type subagentAnimTickMsg struct{}
 
 type startupTickMsg struct{}
 
@@ -779,9 +782,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if memory.IsMemoryTool(e.Name) {
 				toolCmd = m.handleMemoryTool(msg.streamID, call)
 			} else if e.Name == metaToolSubagentsRun {
-				m.subagentStatus = renderSubagentRunningStatus(subagent.RoleInvestigator, countSubagentTasks(call.Arguments), m.uiLanguage)
 				m.addSubagentRunsFromTasks(call.Arguments)
+				m.refreshSubagentRunningStatus()
 				toolCmd = m.dispatchSubagentsRun(msg.streamID, call)
+				animCmd := m.scheduleSubagentAnimTick()
+				extraCmds := []tea.Cmd{toolCmd}
+				if animCmd != nil {
+					extraCmds = append(extraCmds, animCmd)
+				}
+				m.updateViewportContent()
+				return m, tea.Batch(append(extraCmds, m.waitForEventAndTimeout(msg.streamID)...)...)
 			} else {
 				toolCmd = m.assessToolRisk(msg.streamID, call)
 			}
@@ -877,6 +887,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.startupFrame++
 		m.updateViewportContent()
 		return m, m.scheduleStartupTick()
+
+	case subagentAnimTickMsg:
+		if !m.hasActiveSubagentRun() {
+			return m, nil
+		}
+		m.subagentAnimFrame++
+		m.refreshSubagentRunningStatus()
+		m.updateViewportContent()
+		return m, m.scheduleSubagentAnimTick()
 
 	case compactTickMsg:
 		if !m.compacting || msg.compactID != m.compactID {
@@ -2994,12 +3013,16 @@ func (m Model) startManualSubagent(arg string) (Model, tea.Cmd) {
 	}
 	req := m.newSubagentRequest(role, task, m.selectedNodeNames())
 	m.status = m.uiLanguage.tr("Subagent running...", "Subagent 运行中...")
-	m.subagentStatus = renderSubagentRunningStatus(role, 1, m.uiLanguage)
 	m.addSubagentRun(req)
-	return m, func() tea.Msg {
+	m.refreshSubagentRunningStatus()
+	runCmd := func() tea.Msg {
 		result := m.runSubagent(context.Background(), req)
 		return subagentCommandResultMsg{result: result}
 	}
+	if animCmd := m.scheduleSubagentAnimTick(); animCmd != nil {
+		return m, tea.Batch(runCmd, animCmd)
+	}
+	return m, runCmd
 }
 
 func (m Model) compactConversation(focus string) (Model, tea.Cmd) {
@@ -3743,6 +3766,51 @@ func (m Model) scheduleThinkingTick(streamID uint64) tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return thinkingTickMsg{streamID: streamID}
 	})
+}
+
+func (m Model) scheduleSubagentAnimTick() tea.Cmd {
+	if !m.hasActiveSubagentRun() {
+		return nil
+	}
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return subagentAnimTickMsg{}
+	})
+}
+
+func (m *Model) refreshSubagentRunningStatus() {
+	active, done := m.countSubagentRunsByStatus()
+	if active == 0 {
+		return
+	}
+	role := subagent.RoleInvestigator
+	for _, run := range m.subagentRuns {
+		if run.Status == "receiving" || run.Status == "tool" || run.Status == "queued" {
+			role = run.Role
+			break
+		}
+	}
+	m.subagentStatus = renderSubagentRunningStatus(role, active+done, m.uiLanguage, m.subagentAnimFrame, done)
+}
+
+func (m Model) hasActiveSubagentRun() bool {
+	for _, run := range m.subagentRuns {
+		if run.Status == "receiving" || run.Status == "tool" || run.Status == "queued" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) countSubagentRunsByStatus() (active, done int) {
+	for _, run := range m.subagentRuns {
+		switch run.Status {
+		case "receiving", "tool", "queued":
+			active++
+		case "completed", "failed", "cancelled":
+			done++
+		}
+	}
+	return active, done
 }
 
 func (m Model) scheduleStartupTick() tea.Cmd {
@@ -4608,11 +4676,14 @@ func countSubagentTasks(raw json.RawMessage) int {
 	return len(tasks)
 }
 
-func renderSubagentRunningStatus(role subagent.Role, count int, lang uiLanguage) string {
+func renderSubagentRunningStatus(role subagent.Role, count int, lang uiLanguage, frame int, done int) string {
+	spinner := subagentSpinnerGlyph(frame)
 	if count > 1 {
-		return fmt.Sprintf(lang.tr("Subagents running: %d active", "Subagents 运行中: %d 个活跃"), count)
+		return fmt.Sprintf(lang.tr("%s Subagents running: %d/%d active", "%s Subagents 运行中: %d/%d 活跃"),
+			spinner, done, count)
 	}
-	return fmt.Sprintf(lang.tr("Subagent %s running...", "Subagent %s 运行中..."), normalizeSubagentRoleForStatus(role))
+	return fmt.Sprintf(lang.tr("%s Subagent %s running...", "%s Subagent %s 运行中..."),
+		spinner, normalizeSubagentRoleForStatus(role))
 }
 
 func renderManualSubagentStatus(result subagent.Result, lang uiLanguage) string {

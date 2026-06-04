@@ -188,10 +188,16 @@ func TestSubagentListPageStatusBadgesInList(t *testing.T) {
 	model = next.(Model)
 
 	view := model.View()
-	for _, want := range []string{"receiving", "completed", "failed"} {
+	for _, want := range []string{"completed", "failed"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("list view missing status %q:\n%s", want, view)
 		}
+	}
+	if !strings.Contains(view, subagentSpinnerGlyph(0)) {
+		t.Fatalf("list view missing spinner for active run:\n%s", view)
+	}
+	if !strings.Contains(view, "receivin") {
+		t.Fatalf("list view missing truncated receiving status:\n%s", view)
 	}
 }
 
@@ -611,5 +617,56 @@ func TestSubagentDetailEventsArriveViaStreamingToolPath(t *testing.T) {
 	}
 	if strings.Contains(view, "checking now") {
 		t.Fatalf("turn 1 assistant text leaked (should be collapsed):\n%s", view)
+	}
+}
+
+func TestSubagentSpinnerCyclingFrames(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "production", Model: "claude", ConfigHome: t.TempDir()})
+	model.subagentRuns = []subagentRunView{
+		{ID: "r1", Role: subagent.RoleInvestigator, Model: "claude", Status: "receiving", Prompt: "x"},
+	}
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	model = next.(Model)
+
+	frames := map[string]bool{}
+	for i := 0; i < 12; i++ {
+		model.subagentAnimFrame = i
+		view := model.View()
+		for _, c := range []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"} {
+			if strings.Contains(view, c) {
+				frames[c] = true
+			}
+		}
+	}
+	if len(frames) < 5 {
+		t.Fatalf("expected spinner to cycle through multiple frames, only saw %d: %v", len(frames), frames)
+	}
+}
+
+func TestSubagentAnimTickAdvancesFrameAndSchedulesNext(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.subagentRuns = []subagentRunView{
+		{ID: "r1", Status: "receiving"},
+	}
+	startFrame := model.subagentAnimFrame
+	next, cmd := model.Update(subagentAnimTickMsg{})
+	model = next.(Model)
+	if model.subagentAnimFrame != startFrame+1 {
+		t.Fatalf("frame = %d, want %d", model.subagentAnimFrame, startFrame+1)
+	}
+	if cmd == nil {
+		t.Fatalf("expected follow-up tick cmd while runs are active")
+	}
+}
+
+func TestSubagentAnimTickStopsWhenNoActiveRuns(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m"})
+	model.subagentRuns = []subagentRunView{
+		{ID: "r1", Status: "completed"},
+		{ID: "r2", Status: "failed"},
+	}
+	_, cmd := model.Update(subagentAnimTickMsg{})
+	if cmd != nil {
+		t.Fatalf("expected no reschedule when no runs are active, got cmd")
 	}
 }

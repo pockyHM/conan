@@ -71,6 +71,7 @@ var mdRenderer *glamour.TermRenderer
 
 var thinkingFrames = []string{"◐", "◓", "◑", "◒"}
 var startupFrames = []string{"▌", "▐", "▔", "▁"}
+var subagentAnimFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func init() {
 	var err error
@@ -112,6 +113,13 @@ func renderThinkingMsg(frame int, elapsed time.Duration, lang uiLanguage) string
 	}
 	icon := thinkingFrames[frame%len(thinkingFrames)]
 	return thinkingStyle.Render(icon + " " + lang.tr("Thinking...", "思考中...") + " " + renderThinkingMeta(elapsed, lang))
+}
+
+func subagentSpinnerGlyph(frame int) string {
+	if len(subagentAnimFrames) == 0 {
+		return "⠋"
+	}
+	return subagentAnimFrames[frame%len(subagentAnimFrames)]
 }
 
 func renderThinkingMeta(elapsed time.Duration, lang uiLanguage) string {

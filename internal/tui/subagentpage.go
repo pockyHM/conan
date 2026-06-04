@@ -83,6 +83,22 @@ type subagentToolTrace struct {
 	OK     bool
 }
 
+func renderSubagentStatusCell(status string, frame int, lang uiLanguage) string {
+	label := subagentStatusLabel(status, lang)
+	if isSubagentStatusActive(status) {
+		return subagentSpinnerGlyph(frame) + " " + label
+	}
+	return label
+}
+
+func isSubagentStatusActive(status string) bool {
+	switch status {
+	case "receiving", "tool", "queued":
+		return true
+	}
+	return false
+}
+
 func subagentStatusBadgeStyle(status string) lipgloss.Style {
 	color := "243"
 	switch status {
@@ -143,7 +159,7 @@ func (m Model) renderSubagentListRow(index int, run subagentRunView) string {
 	}
 	cells := []string{
 		padCell(run.ID, 24),
-		subagentStatusBadgeStyle(run.Status).Render(padCell(subagentStatusLabel(run.Status, m.uiLanguage), 10)),
+		subagentStatusBadgeStyle(run.Status).Render(padCell(renderSubagentStatusCell(run.Status, m.subagentAnimFrame, m.uiLanguage), 10)),
 		padCell(string(normalizeSubagentRoleForStatus(run.Role)), 13),
 		padCell(run.Model, 15),
 		padCell(strings.Join(run.Nodes, ", "), 20),
@@ -162,7 +178,7 @@ func (m Model) renderSubagentDetailPage() string {
 	title := subagentPageTitleStyle.Render(
 		m.uiLanguage.tr("Subagent detail", "子智能体详情") + " · " + truncateWithEllipsis(run.ID, 16),
 	)
-	status := subagentStatusBadgeStyle(run.Status).Render(subagentStatusLabel(run.Status, m.uiLanguage))
+	status := subagentStatusBadgeStyle(run.Status).Render(renderSubagentStatusCell(run.Status, m.subagentAnimFrame, m.uiLanguage))
 	elapsed := ""
 	if run.Elapsed > 0 {
 		elapsed = run.Elapsed.Round(100 * time.Millisecond).String()
