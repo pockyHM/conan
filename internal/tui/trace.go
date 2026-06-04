@@ -1,0 +1,211 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/pkg/models"
+)
+
+type traceKind string
+
+const (
+	traceUser       traceKind = "user"
+	traceAssistant  traceKind = "assistant"
+	traceToolCall   traceKind = "tool_call"
+	traceToolResult traceKind = "tool_result"
+	traceSubagent   traceKind = "subagent"
+)
+
+type traceStatus string
+
+const (
+	tracePending traceStatus = "pending"
+	traceRunning traceStatus = "running"
+	traceDone    traceStatus = "done"
+	traceFailed  traceStatus = "failed"
+	traceBlocked traceStatus = "blocked"
+)
+
+type traceNode struct {
+	ID        string
+	ParentID  string
+	Kind      traceKind
+	Status    traceStatus
+	Title     string
+	Summary   string
+	Detail    string
+	StartedAt time.Time
+	EndedAt   time.Time
+
+	ToolCallID string
+	ToolName   string
+	SubagentID string
+}
+
+func newTraceNode(kind traceKind, status traceStatus, title, summary, detail string) traceNode {
+	now := time.Now()
+	return traceNode{
+		ID:        models.NewID(),
+		Kind:      kind,
+		Status:    status,
+		Title:     title,
+		Summary:   strings.TrimSpace(summary),
+		Detail:    strings.TrimSpace(detail),
+		StartedAt: now,
+	}
+}
+
+func (m Model) appendTraceNode(node traceNode) Model {
+	if node.ID == "" {
+		node.ID = models.NewID()
+	}
+	if node.StartedAt.IsZero() {
+		node.StartedAt = time.Now()
+	}
+	m.traceNodes = append(m.traceNodes, node)
+	if m.traceCursor < 0 || m.traceCursor >= len(m.traceNodes) {
+		m.traceCursor = len(m.traceNodes) - 1
+	}
+	return m
+}
+
+func (m Model) updateTraceNode(id string, fn func(*traceNode)) Model {
+	if id == "" || fn == nil {
+		return m
+	}
+	for i := range m.traceNodes {
+		if m.traceNodes[i].ID == id {
+			fn(&m.traceNodes[i])
+			return m
+		}
+	}
+	return m
+}
+
+func (m Model) findTraceByToolCallID(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := len(m.traceNodes) - 1; i >= 0; i-- {
+		if m.traceNodes[i].ToolCallID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m Model) findTraceBySubagentID(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := len(m.traceNodes) - 1; i >= 0; i-- {
+		if m.traceNodes[i].SubagentID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func traceKindLabel(kind traceKind, lang uiLanguage) string {
+	switch kind {
+	case traceUser:
+		return lang.tr("user", "用户")
+	case traceAssistant:
+		return lang.tr("assistant", "助手")
+	case traceToolCall:
+		return lang.tr("tool call", "工具调用")
+	case traceToolResult:
+		return lang.tr("tool result", "工具结果")
+	case traceSubagent:
+		return lang.tr("subagent", "子智能体")
+	default:
+		return string(kind)
+	}
+}
+
+func traceStatusLabel(status traceStatus, lang uiLanguage) string {
+	switch status {
+	case tracePending:
+		return lang.tr("pending", "等待")
+	case traceRunning:
+		return lang.tr("running", "运行中")
+	case traceDone:
+		return lang.tr("done", "完成")
+	case traceFailed:
+		return lang.tr("failed", "失败")
+	case traceBlocked:
+		return lang.tr("blocked", "已阻止")
+	default:
+		return string(status)
+	}
+}
+
+func (m Model) rebuildTraceFromMessages(messages []models.Message) Model {
+	m.traceNodes = nil
+	m.traceCursor = 0
+	m.traceDetailVisible = false
+	m.activeTraceAssistantID = ""
+	for _, msg := range messages {
+		switch msg.Role {
+		case conversation.RoleUser:
+			m = m.appendTraceNode(newTraceNode(traceUser, traceDone, "user", msg.Content, msg.Content))
+		case conversation.RoleAssistant:
+			if msg.ToolCallID != "" {
+				node := newTraceNode(traceToolCall, traceDone, msg.ToolName, traceToolSummary(msg.ToolName, msg.ToolInput), msg.ToolInput)
+				node.ToolCallID = msg.ToolCallID
+				node.ToolName = msg.ToolName
+				m = m.appendTraceNode(node)
+			} else if strings.TrimSpace(msg.Content) != "" {
+				m = m.appendTraceNode(newTraceNode(traceAssistant, traceDone, "assistant", firstTraceLine(msg.Content), msg.Content))
+			}
+		case conversation.RoleTool:
+			node := newTraceNode(traceToolResult, traceDone, "tool result", traceToolResultSummary([]nodeToolResult{{Node: "local", Output: msg.Content, Success: true}}), msg.Content)
+			node.ToolCallID = msg.ToolCallID
+			m = m.appendTraceNode(node)
+		}
+	}
+	return m
+}
+
+func firstTraceLine(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	line := strings.Split(text, "\n")[0]
+	return truncateWithEllipsis(strings.Join(strings.Fields(line), " "), 120)
+}
+
+func traceToolSummary(name, args string) string {
+	args = strings.Join(strings.Fields(args), " ")
+	if args == "" {
+		return name
+	}
+	return truncateWithEllipsis(fmt.Sprintf("%s %s", name, args), 140)
+}
+
+func traceToolResultSummary(results []nodeToolResult) string {
+	if len(results) == 0 {
+		return "0 nodes"
+	}
+	okCount := 0
+	failCount := 0
+	for _, r := range results {
+		if r.Success {
+			okCount++
+		} else {
+			failCount++
+		}
+	}
+	if len(results) == 1 {
+		status := "failed"
+		if okCount == 1 {
+			status = "ok"
+		}
+		return fmt.Sprintf("%s · %s", results[0].Node, status)
+	}
+	return fmt.Sprintf("%d nodes · %d ok · %d failed", len(results), okCount, failCount)
+}

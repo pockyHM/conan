@@ -230,7 +230,10 @@ type Model struct {
 	subagentDetailVisible      bool
 	subagentDetailCursor       int
 	subagentDetailExpanded     map[int]bool
+	traceNodes                 []traceNode
+	traceCursor                int
 	traceDetailVisible         bool
+	activeTraceAssistantID     string
 	sessionList                sessionList
 	configScreen               configScreen
 	ac                         autocomplete
