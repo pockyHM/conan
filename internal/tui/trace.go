@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/pockyHM/conan/internal/conversation"
+	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/subagent"
 	"github.com/pockyHM/conan/pkg/models"
 )
 
@@ -169,6 +171,129 @@ func (m Model) finishActiveTraceAssistant(status traceStatus, fallbackDetail str
 			node.Summary = string(status)
 		}
 	})
+}
+
+func (m Model) recordToolCallTrace(call llm.ToolCall, detail string) Model {
+	if call.ID == "" {
+		call.ID = models.NewID()
+	}
+	if idx := m.findTraceToolCallNode(call.ID); idx >= 0 {
+		m.traceNodes[idx].Status = traceRunning
+		m.traceNodes[idx].ToolName = call.Name
+		m.traceNodes[idx].Summary = traceToolSummary(call.Name, detail)
+		m.traceNodes[idx].Detail = strings.TrimSpace(detail)
+		return m
+	}
+	node := newTraceNode(traceToolCall, traceRunning, call.Name, traceToolSummary(call.Name, detail), detail)
+	node.ToolCallID = call.ID
+	node.ToolName = call.Name
+	return m.appendTraceNode(node)
+}
+
+func (m Model) recordToolResultTrace(call llm.ToolCall, results []nodeToolResult, output string) Model {
+	status := traceDone
+	if !allNodeToolResultsSuccessful(results) {
+		status = traceFailed
+	}
+	if idx := m.findTraceToolCallNode(call.ID); idx >= 0 {
+		m.traceNodes[idx].Status = status
+		m.traceNodes[idx].EndedAt = time.Now()
+	}
+	node := newTraceNode(traceToolResult, status, "tool result", traceToolResultSummary(results), output)
+	node.ToolCallID = call.ID
+	node.ToolName = call.Name
+	return m.appendTraceNode(node)
+}
+
+func (m Model) findTraceToolCallNode(id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := len(m.traceNodes) - 1; i >= 0; i-- {
+		if m.traceNodes[i].Kind == traceToolCall && m.traceNodes[i].ToolCallID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m Model) recordSubagentTrace(req subagent.Request) Model {
+	if req.ID == "" {
+		req.ID = models.NewID()
+	}
+	title := string(normalizeSubagentRoleForStatus(req.Role))
+	summary := strings.TrimSpace(fmt.Sprintf("%s · %s", title, firstTraceLine(req.Task)))
+	node := newTraceNode(traceSubagent, traceRunning, title, summary, subagentPromptForDisplay(req))
+	node.SubagentID = req.ID
+	return m.appendTraceNode(node)
+}
+
+func (m Model) updateSubagentTraceResult(result subagent.Result) Model {
+	status := traceDone
+	if result.Err != nil {
+		status = traceFailed
+	}
+	return m.updateSubagentTraceByID(result.ID, status, renderSubagentTraceDetail(result), result.Summary)
+}
+
+func (m Model) updateSubagentTraceByID(id string, status traceStatus, detail string, summary string) Model {
+	if id == "" {
+		return m
+	}
+	for i := range m.traceNodes {
+		if m.traceNodes[i].Kind != traceSubagent || m.traceNodes[i].SubagentID != id {
+			continue
+		}
+		m.traceNodes[i].Status = status
+		m.traceNodes[i].EndedAt = time.Now()
+		if strings.TrimSpace(summary) != "" {
+			m.traceNodes[i].Summary = firstTraceLine(summary)
+		}
+		if strings.TrimSpace(m.traceNodes[i].Summary) == "" {
+			m.traceNodes[i].Summary = traceStatusLabel(status, m.uiLanguage)
+		}
+		if strings.TrimSpace(detail) != "" {
+			m.traceNodes[i].Detail = strings.TrimSpace(detail)
+		}
+		return m
+	}
+	return m
+}
+
+func renderSubagentTraceDetail(result subagent.Result) string {
+	lines := []string{renderSubagentResultLine(result)}
+	if len(result.Events) > 0 {
+		lines = append(lines, "", "Events:")
+		for _, event := range result.Events {
+			line := strings.TrimSpace(formatSubagentTraceEvent(event))
+			if line != "" {
+				lines = append(lines, "- "+line)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatSubagentTraceEvent(event subagent.Event) string {
+	switch event.Kind {
+	case subagent.EventAssistantText:
+		return firstTraceLine(event.Content)
+	case subagent.EventToolCall:
+		return traceToolSummary(event.Tool, event.Args)
+	case subagent.EventToolResult:
+		if event.OK {
+			return "ok · " + firstTraceLine(event.Out)
+		}
+		return "failed · " + firstTraceLine(event.Out)
+	case subagent.EventDone:
+		return "done"
+	case subagent.EventTurnStart:
+		return fmt.Sprintf("turn %d started", event.Turn)
+	case subagent.EventTurnEnd:
+		return fmt.Sprintf("turn %d ended", event.Turn)
+	default:
+		return ""
+	}
 }
 
 func traceKindLabel(kind traceKind, lang uiLanguage) string {

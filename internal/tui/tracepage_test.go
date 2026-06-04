@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pockyHM/conan/internal/llm"
+	"github.com/pockyHM/conan/internal/subagent"
 )
 
 func TestTraceCommandOpensEmptyTracePage(t *testing.T) {
@@ -192,5 +194,86 @@ func TestTraceMarksAssistantNodeFailedOnStreamError(t *testing.T) {
 	}
 	if !strings.Contains(node.Detail, "stream failed") {
 		t.Fatalf("assistant failed trace should include error detail: %#v", node)
+	}
+}
+
+func TestTraceRecordsToolCallAndResultNodes(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, ConfigHome: t.TempDir()})
+	model.streaming = true
+	model.activeStreamID = 1
+	model.streamStartedAt = time.Now()
+	args := json.RawMessage(`{"command":"uptime"}`)
+
+	next, _ := model.Update(streamEventMsg{streamID: 1, Event: llm.ToolCallEvent{ID: "call-1", Name: metaToolExec, Arguments: args}})
+	model = next.(Model)
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len after tool call = %d, want 1", len(model.traceNodes))
+	}
+	callNode := model.traceNodes[0]
+	if callNode.Kind != traceToolCall || callNode.Status != traceRunning || callNode.ToolCallID != "call-1" {
+		t.Fatalf("tool call trace = %#v, want running tool_call with call ID", callNode)
+	}
+	if !strings.Contains(callNode.Summary, metaToolExec) || !strings.Contains(callNode.Detail, "uptime") {
+		t.Fatalf("tool call trace missing summary/detail: %#v", callNode)
+	}
+
+	next, _ = model.Update(multiToolResultMsg{
+		streamID: 1,
+		Call:     llm.ToolCall{ID: "call-1", Name: metaToolExec, Arguments: args},
+		Results:  []nodeToolResult{{Node: "local", Output: "load average ok", Success: true}},
+	})
+	model = next.(Model)
+
+	if len(model.traceNodes) != 2 {
+		t.Fatalf("traceNodes len after tool result = %d, want 2", len(model.traceNodes))
+	}
+	if model.traceNodes[0].Status != traceDone || model.traceNodes[0].EndedAt.IsZero() {
+		t.Fatalf("tool call node not completed: %#v", model.traceNodes[0])
+	}
+	resultNode := model.traceNodes[1]
+	if resultNode.Kind != traceToolResult || resultNode.Status != traceDone || resultNode.ToolCallID != "call-1" {
+		t.Fatalf("tool result trace = %#v, want done tool_result with call ID", resultNode)
+	}
+	if !strings.Contains(resultNode.Summary, "local") || !strings.Contains(resultNode.Detail, "load average ok") {
+		t.Fatalf("tool result trace missing output: %#v", resultNode)
+	}
+}
+
+func TestTraceRecordsSubagentRunAndResult(t *testing.T) {
+	model := NewModel(ModelConfig{Cluster: "test", Model: "m", Provider: &fakeProvider{}, ConfigHome: t.TempDir()})
+	req := model.newSubagentRequest(subagent.RoleInvestigator, "inspect nginx logs", []string{"node-1"})
+
+	model.addSubagentRun(req)
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len after subagent run = %d, want 1", len(model.traceNodes))
+	}
+	node := model.traceNodes[0]
+	if node.Kind != traceSubagent || node.Status != traceRunning || node.SubagentID != req.ID {
+		t.Fatalf("subagent trace = %#v, want running subagent with request ID", node)
+	}
+	if !strings.Contains(node.Summary, "investigator") || !strings.Contains(node.Detail, "inspect nginx logs") {
+		t.Fatalf("subagent trace missing task detail: %#v", node)
+	}
+
+	model.updateSubagentRunResult(subagent.Result{
+		ID:      req.ID,
+		Role:    subagent.RoleInvestigator,
+		Task:    req.Task,
+		Nodes:   req.Nodes,
+		Summary: "nginx logs are clean",
+		Elapsed: 1200 * time.Millisecond,
+	})
+
+	if len(model.traceNodes) != 1 {
+		t.Fatalf("traceNodes len after subagent result = %d, want 1", len(model.traceNodes))
+	}
+	node = model.traceNodes[0]
+	if node.Status != traceDone || node.EndedAt.IsZero() {
+		t.Fatalf("subagent trace not completed: %#v", node)
+	}
+	if !strings.Contains(node.Summary, "nginx logs are clean") || !strings.Contains(node.Detail, "nginx logs are clean") {
+		t.Fatalf("subagent trace missing result detail: %#v", node)
 	}
 }

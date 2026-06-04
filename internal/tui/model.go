@@ -661,10 +661,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			output := "Risk assessment error: " + msg.err.Error()
-			m.fillToolPlaceholder(msg.call, output, []nodeToolResult{{Node: "-", Output: msg.err.Error(), Success: false}})
+			results := []nodeToolResult{{Node: "-", Output: msg.err.Error(), Success: false}}
+			m.fillToolPlaceholder(msg.call, output, results)
 			if m.conv != nil {
 				m.conv.AddToolResult(msg.call.ID, output)
 			}
+			m = m.recordToolResultTrace(msg.call, results, output)
 			return m.completeToolAndResume(msg.streamID, msg.call)
 		}
 		switch msg.assessment.Level {
@@ -690,10 +692,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.recordRiskEvidence(msg.call, msg.assessment, "blocked")
 			m.logAuditDecision(msg.call, msg.assessment, "blocked")
 			denial := "BLOCKED: " + msg.assessment.Reason
-			m.fillToolPlaceholder(msg.call, denial, []nodeToolResult{{Node: "-", Output: denial, Success: false}})
+			results := []nodeToolResult{{Node: "-", Output: denial, Success: false}}
+			m.fillToolPlaceholder(msg.call, denial, results)
 			if m.conv != nil {
 				m.conv.AddToolResult(msg.call.ID, denial)
 			}
+			m = m.recordToolResultTrace(msg.call, results, denial)
 			return m.completeToolAndResume(msg.streamID, msg.call)
 		case security.RiskConfirm:
 			m.recordRiskEvidence(msg.call, msg.assessment, "pending confirmation")
@@ -750,6 +754,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.streamToolExpected++
 			hidden := isHiddenInternalTool(e.Name)
 			sanitizedArgs := sanitizeToolArguments(e.Name, e.Arguments)
+			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
 			m.messages = append(m.messages, chatMsg{
 				role:       "tool",
 				toolCallID: e.ID,
@@ -760,11 +765,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.conv != nil {
 				m.conv.AddToolCall(e.ID, e.Name, string(sanitizedArgs))
 			}
+			m = m.recordToolCallTrace(call, string(sanitizedArgs))
 			m.recordToolCallEvidence(llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}, "tool call requested: "+e.Name)
 			if hidden {
 				m.status = hiddenToolStatus(e.Name)
 			}
-			call := llm.ToolCall{ID: e.ID, Name: e.Name, Arguments: e.Arguments}
 			var toolCmd tea.Cmd
 			if m.mode == modeChoice && m.choice.call.ID != "" {
 				toolCmd = func() tea.Msg {
@@ -937,6 +942,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.conv != nil {
 			m.conv.AddToolResult(msg.Call.ID, aggregatedOutput)
 		}
+		m = m.recordToolResultTrace(msg.Call, msg.Results, aggregatedOutput)
 		m.recordToolResultEvidence(msg.Call, msg.Results, aggregatedOutput)
 		if msg.Call.Name != metaToolAskChoice {
 			m.logAuditExecution(msg.Call, msg.Results)
@@ -1002,6 +1008,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.conv != nil {
 			m.conv.AddToolResult(msg.Call.ID, msg.Output)
 		}
+		m = m.recordToolResultTrace(msg.Call, results, msg.Output)
 		m.logAuditExecution(msg.Call, results)
 		m.status = m.uiLanguage.tr("Node added and deployed", "节点已添加并部署")
 		m.updateViewportContent()
@@ -1297,6 +1304,7 @@ func (m Model) interruptChoice(output string, status string) Model {
 	if m.conv != nil {
 		m.conv.AddToolResult(state.call.ID, output)
 	}
+	m = m.recordToolResultTrace(state.call, results, output)
 	m.recordToolResultEvidence(state.call, results, output)
 	m.finishStream(true)
 	m.mode = modeChat
@@ -1320,6 +1328,7 @@ func (m Model) finishChoice(output string) (tea.Model, tea.Cmd) {
 	if m.conv != nil {
 		m.conv.AddToolResult(state.call.ID, output)
 	}
+	m = m.recordToolResultTrace(state.call, results, output)
 	m.recordToolResultEvidence(state.call, results, output)
 	m.status = m.uiLanguage.tr("Ready", "就绪")
 	m.updateViewportContent()
@@ -1484,10 +1493,12 @@ func (m Model) cancelNodePrompt() (tea.Model, tea.Cmd) {
 	m.input = ""
 	m.ac = newAutocompleteWithLanguage(m.uiLanguage)
 	output := m.uiLanguage.tr("Cancelled by user", "用户已取消")
-	m.fillToolPlaceholder(state.call, output, []nodeToolResult{{Node: "-", Output: output, Success: false}})
+	results := []nodeToolResult{{Node: "-", Output: output, Success: false}}
+	m.fillToolPlaceholder(state.call, output, results)
 	if m.conv != nil {
 		m.conv.AddToolResult(state.call.ID, "Cancelled by user")
 	}
+	m = m.recordToolResultTrace(state.call, results, output)
 	m.status = m.uiLanguage.tr("Ready", "就绪")
 	if state.call.Name == metaToolNodeAdd {
 		m.clearNodeToolExposure()
@@ -1619,10 +1630,12 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.recordRiskEvidence(call, derefRiskAssessment(assessment), "cancelled")
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
 		cancelled := m.uiLanguage.tr("Cancelled by user", "用户已取消")
-		m.fillToolPlaceholder(call, cancelled, []nodeToolResult{{Node: "-", Output: cancelled, Success: false}})
+		results := []nodeToolResult{{Node: "-", Output: cancelled, Success: false}}
+		m.fillToolPlaceholder(call, cancelled, results)
 		if m.conv != nil {
 			m.conv.AddToolResult(call.ID, "Cancelled by user")
 		}
+		m = m.recordToolResultTrace(call, results, cancelled)
 		m.status = m.uiLanguage.tr("Ready", "就绪")
 		return m.completeToolAndResume(m.activeStreamID, call)
 	case tea.KeyEsc:
@@ -1635,10 +1648,12 @@ func (m Model) handleConfirmKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.recordRiskEvidence(call, derefRiskAssessment(assessment), "cancelled")
 		m.logAuditDecision(call, derefRiskAssessment(assessment), "cancelled")
 		cancelled := m.uiLanguage.tr("Cancelled by user", "用户已取消")
-		m.fillToolPlaceholder(call, cancelled, []nodeToolResult{{Node: "-", Output: cancelled, Success: false}})
+		results := []nodeToolResult{{Node: "-", Output: cancelled, Success: false}}
+		m.fillToolPlaceholder(call, cancelled, results)
 		if m.conv != nil {
 			m.conv.AddToolResult(call.ID, "Cancelled by user")
 		}
+		m = m.recordToolResultTrace(call, results, cancelled)
 		m.status = m.uiLanguage.tr("Ready", "就绪")
 		return m.completeToolAndResume(m.activeStreamID, call)
 	default:
@@ -3448,6 +3463,7 @@ func (m *Model) addSubagentRun(req subagent.Request) {
 		Nodes:  append([]string(nil), req.Nodes...),
 		Status: "receiving",
 	})
+	*m = m.recordSubagentTrace(req)
 	m.lastBodyContent = ""
 }
 
@@ -3484,6 +3500,11 @@ func (m *Model) updateSubagentRunResult(result subagent.Result) {
 		if len(result.Events) > 0 {
 			m.subagentRuns[i].Events = append([]subagent.Event(nil), result.Events...)
 		}
+		traceResult := result
+		if traceResult.ID == "" {
+			traceResult.ID = m.subagentRuns[i].ID
+		}
+		*m = m.updateSubagentTraceResult(traceResult)
 		m.lastBodyContent = ""
 		return
 	}
@@ -3502,6 +3523,15 @@ func (m *Model) updateSubagentRunResultsFromToolOutput(results []nodeToolResult)
 		m.subagentRuns[i].Status = statuses[j].status
 		m.subagentRuns[i].Summary = statuses[j].summary
 		m.subagentRuns[i].Err = statuses[j].err
+		status := traceDone
+		if statuses[j].status == "failed" {
+			status = traceFailed
+		}
+		detail := statuses[j].summary
+		if strings.TrimSpace(statuses[j].err) != "" {
+			detail = strings.TrimSpace(detail + "\n" + statuses[j].err)
+		}
+		*m = m.updateSubagentTraceByID(m.subagentRuns[i].ID, status, detail, statuses[j].summary)
 		j++
 	}
 	if j > 0 {
