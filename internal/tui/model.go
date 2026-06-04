@@ -4332,7 +4332,7 @@ func (m Model) dispatchLocalTool(streamID uint64, call llm.ToolCall) tea.Cmd {
 		root = "."
 	}
 	return func() tea.Msg {
-		result := localtools.Handle(localtools.RootedFS{Root: root}, call.Name, call.Arguments)
+		result := localtools.Handle(context.Background(), localtools.RootedFS{Root: root}, call.Name, call.Arguments)
 		return multiToolResultMsg{
 			streamID: streamID,
 			Call:     call,

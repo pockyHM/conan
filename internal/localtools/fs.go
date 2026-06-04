@@ -1,6 +1,7 @@
 package localtools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -30,15 +31,16 @@ func ToolDefs() []llm.ToolDef {
 		{Name: "local_fs_write", Description: "Create or overwrite a local workspace text file only. Binary and image paths/content are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`)},
 		{Name: "local_fs_patch", Description: "Edit a local workspace text file. Use old_text/new_text for exact replacement, or start_line/end_line/content for 1-based inclusive line range replacement. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"},"start_line":{"type":"integer","description":"1-based first line to replace"},"end_line":{"type":"integer","description":"1-based last line to replace, inclusive. Defaults to start_line."},"content":{"type":"string","description":"Replacement content for line range mode"}},"required":["path"]}`)},
 		{Name: "local_fs_delete", Description: "Delete a local workspace text file only. Binary and image files are refused. Requires user confirmation unless the file is allowlisted.", InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
+		{Name: "web_report", Description: "Render Markdown as a local browser report and provide a Markdown download link. Runs on the Conan orchestrator (the user's machine), not on a managed node, so the preview URL is reachable in the operator's browser. Read-only; no confirmation required.", InputSchema: json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"Optional report title"},"markdown":{"type":"string","description":"Markdown report content to render"},"filename":{"type":"string","description":"Optional Markdown download filename"}},"required":["markdown"]}`)},
 	}
 }
 
 func IsLocalTool(name string) bool {
-	return strings.HasPrefix(name, "local_fs_")
+	return strings.HasPrefix(name, "local_fs_") || name == reportToolName
 }
 
 func IsReadOnly(name string) bool {
-	return name == "local_fs_read" || name == "local_fs_list" || name == "local_fs_stat"
+	return name == "local_fs_read" || name == "local_fs_list" || name == "local_fs_stat" || name == reportToolName
 }
 
 func PathFromCall(name string, input json.RawMessage) string {
@@ -52,7 +54,7 @@ func PathFromCall(name string, input json.RawMessage) string {
 	return strings.TrimSpace(args.Path)
 }
 
-func Handle(fsys RootedFS, name string, input json.RawMessage) Result {
+func Handle(ctx context.Context, fsys RootedFS, name string, input json.RawMessage) Result {
 	switch name {
 	case "local_fs_read":
 		return fsys.read(input)
@@ -66,6 +68,8 @@ func Handle(fsys RootedFS, name string, input json.RawMessage) Result {
 		return fsys.patch(input)
 	case "local_fs_delete":
 		return fsys.delete(input)
+	case reportToolName:
+		return handleReport(ctx, input)
 	default:
 		return Result{Output: "unknown local tool: " + name, Success: false}
 	}

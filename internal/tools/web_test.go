@@ -10,19 +10,19 @@ import (
 	"unicode/utf8"
 )
 
-func TestNewWebToolsExposesFetchAndReportWithoutSearchConfig(t *testing.T) {
+func TestNewWebToolsExposesFetchWithoutSearchConfig(t *testing.T) {
 	tools := NewWebTools(WebToolConfig{})
 
-	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,web_report" {
-		t.Fatalf("tools = %#v, want web_fetch and web_report", got)
+	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch" {
+		t.Fatalf("tools = %#v, want web_fetch", got)
 	}
 }
 
 func TestNewWebToolsExposesSearchWhenConfigured(t *testing.T) {
 	tools := NewWebTools(WebToolConfig{SearchProvider: "brave", SearchAPIKey: "test-key"})
 
-	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,web_report,web_search" {
-		t.Fatalf("tools = %#v, want web_fetch, web_report, and web_search", got)
+	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,web_search" {
+		t.Fatalf("tools = %#v, want web_fetch and web_search", got)
 	}
 }
 
